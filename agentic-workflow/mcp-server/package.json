@@ -1,0 +1,29 @@
+{
+  "name": "unified-automation-mcp-server",
+  "version": "1.0.0",
+  "description": "Unified MCP Server combining Playwright MCP and ChromeDevTools MCP capabilities",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "start:stdio": "node server.js --transport=stdio",
+    "start:http": "node server.js --transport=http --port=3000",
+    "dev": "node --watch server.js",
+    "test": "node test-server.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "playwright",
+    "chrome-devtools",
+    "automation",
+    "testing"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.3",
+    "@playwright/mcp": "^0.0.56",
+    "playwright": "^1.58.2"
+  }
+}

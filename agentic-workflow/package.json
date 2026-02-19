@@ -1,0 +1,56 @@
+{
+  "name": "agentic-automation-workflow",
+  "version": "1.0.0",
+  "description": "Agentic workflow system for Playwright test automation with Jira integration",
+  "main": "index.js",
+  "scripts": {
+    "setup": "node scripts/setup-project.js",
+    "postinstall": "cd mcp-server && npm install",
+    "test": "npx playwright test",
+    "test:headed": "npx playwright test --headed",
+    "test:debug": "npx playwright test --debug",
+    "test:ui": "npx playwright test --ui",
+    "report": "npx playwright show-report",
+    "format-testcases": "node scripts/format-test-cases.js",
+    "validate-excel": "node scripts/validate-test-case-excel.js",
+    "mcp:unified": "node mcp-server/server.js",
+    "mcp:unified:test": "node mcp-server/test-server.js",
+    "workflow": "node orchestrator/workflow-orchestrator.js",
+    "workflow:headed": "node orchestrator/workflow-orchestrator.js --headed",
+    "sdk:pipeline": "node sdk-orchestrator/cli.js",
+    "sdk:heal": "node sdk-orchestrator/cli.js --mode heal",
+    "sdk:execute": "node sdk-orchestrator/cli.js --mode execute",
+    "sdk:server": "node sdk-orchestrator/cli.js --server",
+    "sdk:server:dev": "node sdk-orchestrator/cli.js --server --verbose"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.3",
+    "@playwright/mcp": "^0.0.56",
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^20.0.0",
+    "allure-commandline": "^2.34.0",
+    "allure-playwright": "^2.10.0",
+    "chai": "^4.3.0",
+    "cross-env": "^7.0.3",
+    "mocha": "^10.0.0",
+    "rimraf": "^6.1.0",
+    "typescript": "^5.0.0",
+    "xlsx": "^0.18.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "^0.1.22",
+    "axios": "^1.9.0",
+    "dotenv": "^17.3.1",
+    "exceljs": "^4.4.0",
+    "lodash": "^4.17.21",
+    "ortoni-report": "^4.0.1",
+    "zod": "^3.25.76"
+  }
+}

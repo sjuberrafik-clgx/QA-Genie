@@ -1,0 +1,1655 @@
+{
+    "$schema": "./assertion-config.schema.json",
+    "version": "1.0.0",
+    "activeFramework": "playwright",
+    "globalSettings": {
+        "defaultTimeout": 30000,
+        "retryCount": 3,
+        "softAssertionsEnabled": true,
+        "screenshotOnFailure": true,
+        "customMessagesRequired": true,
+        "pollingInterval": [
+            100,
+            250,
+            500,
+            1000
+        ]
+    },
+    "frameworks": {
+        "playwright": {
+            "name": "Playwright",
+            "version": "^1.40.0",
+            "documentation": "https://playwright.dev/docs/test-assertions",
+            "import": {
+                "statement": "const { test, expect } = require('@playwright/test');",
+                "destructure": [
+                    "test",
+                    "expect"
+                ]
+            },
+            "assertions": {
+                "visibility": {
+                    "toBeVisible": {
+                        "syntax": "await expect(locator).toBeVisible()",
+                        "description": "Asserts element is visible on the page",
+                        "autoRetry": true,
+                        "parameters": [
+                            {
+                                "name": "options",
+                                "type": "object",
+                                "required": false,
+                                "description": "{ timeout?: number }"
+                            }
+                        ],
+                        "example": "await expect(page.getByRole('button', { name: 'Submit' })).toBeVisible();",
+                        "tags": [
+                            "visibility",
+                            "ui",
+                            "common"
+                        ]
+                    },
+                    "toBeHidden": {
+                        "syntax": "await expect(locator).toBeHidden()",
+                        "description": "Asserts element is NOT visible (hidden or detached)",
+                        "autoRetry": true,
+                        "example": "await expect(page.getByTestId('loading-spinner')).toBeHidden();",
+                        "tags": [
+                            "visibility",
+                            "ui"
+                        ]
+                    },
+                    "toBeInViewport": {
+                        "syntax": "await expect(locator).toBeInViewport()",
+                        "description": "Asserts element is within the viewport (scrolled into view)",
+                        "autoRetry": true,
+                        "example": "await expect(page.getByRole('heading')).toBeInViewport();",
+                        "tags": [
+                            "visibility",
+                            "viewport",
+                            "scroll"
+                        ]
+                    },
+                    "toBeAttached": {
+                        "syntax": "await expect(locator).toBeAttached()",
+                        "description": "Asserts element exists in DOM (may be hidden)",
+                        "autoRetry": true,
+                        "example": "await expect(page.locator('#hidden-input')).toBeAttached();",
+                        "tags": [
+                            "dom",
+                            "existence"
+                        ]
+                    }
+                },
+                "state": {
+                    "toBeEnabled": {
+                        "syntax": "await expect(locator).toBeEnabled()",
+                        "description": "Asserts element is enabled (not disabled)",
+                        "autoRetry": true,
+                        "example": "await expect(page.getByRole('button', { name: 'Submit' })).toBeEnabled();",
+                        "tags": [
+                            "state",
+                            "interactive",
+                            "common"
+                        ]
+                    },
+                    "toBeDisabled": {
+                        "syntax": "await expect(locator).toBeDisabled()",
+                        "description": "Asserts element is disabled",
+                        "autoRetry": true,
+                        "example": "await expect(page.getByRole('button', { name: 'Submit' })).toBeDisabled();",
+                        "tags": [
+                            "state",
+                            "interactive"
+                        ]
+                    },
+                    "toBeChecked": {
+                        "syntax": "await expect(locator).toBeChecked()",
+                        "description": "Asserts checkbox/radio is checked",
+                        "autoRetry": true,
+                        "parameters": [
+                            {
+                                "name": "options",
+                                "type": "object",
+                                "required": false,
+                                "description": "{ checked?: boolean, timeout?: number }"
+                            }
+                        ],
+                        "example": "await expect(page.getByRole('checkbox', { name: 'Terms' })).toBeChecked();",
+                        "tags": [
+                            "state",
+                            "form",
+                            "checkbox"
+                        ]
+                    },
+                    "toBeFocused": {
+                        "syntax": "await expect(locator).toBeFocused()",
+                        "description": "Asserts element has keyboard focus",
+                        "autoRetry": true,
+                        "example": "await expect(page.getByLabel('Email')).toBeFocused();",
+                        "tags": [
+                            "state",
+                            "focus",
+                            "keyboard"
+                        ]
+                    },
+                    "toBeEditable": {
+                        "syntax": "await expect(locator).toBeEditable()",
+                        "description": "Asserts element is editable (input, textarea, contenteditable)",
+                        "autoRetry": true,
+                        "example": "await expect(page.getByLabel('Username')).toBeEditable();",
+                        "tags": [
+                            "state",
+                            "form",
+                            "input"
+                        ]
+                    },
+                    "toBeEmpty": {
+                        "syntax": "await expect(locator).toBeEmpty()",
+                        "description": "Asserts element has no children/text content",
+                        "autoRetry": true,
+                        "example": "await expect(page.getByTestId('results-list')).toBeEmpty();",
+                        "tags": [
+                            "state",
+                            "content"
+                        ]
+                    }
+                },
+                "content": {
+                    "toHaveText": {
+                        "syntax": "await expect(locator).toHaveText(expected)",
+                        "description": "Asserts element text matches exactly (with normalization)",
+                        "autoRetry": true,
+                        "parameters": [
+                            {
+                                "name": "expected",
+                                "type": "string | RegExp | string[]",
+                                "required": true,
+                                "description": "Expected text or pattern"
+                            },
+                            {
+                                "name": "options",
+                                "type": "object",
+                                "required": false,
+                                "description": "{ ignoreCase?: boolean, timeout?: number, useInnerText?: boolean }"
+                            }
+                        ],
+                        "example": "await expect(page.getByRole('heading')).toHaveText('Welcome');",
+                        "tags": [
+                            "content",
+                            "text",
+                            "common"
+                        ]
+                    },
+                    "toContainText": {
+                        "syntax": "await expect(locator).toContainText(expected)",
+                        "description": "Asserts element contains specified text (partial match)",
+                        "autoRetry": true,
+                        "parameters": [
+                            {
+                                "name": "expected",
+                                "type": "string | RegExp | string[]",
+                                "required": true,
+                                "description": "Text to find"
+                            }
+                        ],
+                        "example": "await expect(page.getByRole('alert')).toContainText('Error');",
+                        "tags": [
+                            "content",
+                            "text",
+                            "partial",
+                            "common"
+                        ]
+                    },
+                    "toHaveValue": {
+                        "syntax": "await expect(locator).toHaveValue(expected)",
+                        "description": "Asserts input element has specified value",
+                        "autoRetry": true,
+                        "parameters": [
+                            {
+                                "name": "expected",
+                                "type": "string | RegExp",
+                                "required": true,
+                                "description": "Expected input value"
+                            }
+                        ],
+                        "example": "await expect(page.getByLabel('Email')).toHaveValue('test@example.com');",
+                        "tags": [
+                            "content",
+                            "form",
+                            "input",
+                            "common"
+                        ]
+                    },
+                    "toHaveValues": {
+                        "syntax": "await expect(locator).toHaveValues(expected)",
+                        "description": "Asserts multi-select has specified options selected",
+                        "autoRetry": true,
+                        "parameters": [
+                            {
+                                "name": "expected",
+                                "type": "string[]",
+                                "required": true,
+                                "description": "Expected selected values"
+                            }
+                        ],
+                        "example": "await expect(page.getByLabel('Colors')).toHaveValues(['red', 'blue']);",
+                        "tags": [
+                            "content",
+                            "form",
+                            "select"
+                        ]
+                    },
+                    "toHaveCount": {
+                        "syntax": "await expect(locator).toHaveCount(count)",
+                        "description": "Asserts locator resolves to specific number of elements",
+                        "autoRetry": true,
+                        "parameters": [
+                            {
+                                "name": "count",
+                                "type": "number",
+                                "required": true,
+                                "description": "Expected count"
+                            }
+                        ],
+                        "example": "await expect(page.getByRole('listitem')).toHaveCount(5);",
+                        "tags": [
+                            "content",
+                            "list",
+                            "count",
+                            "common"
+                        ]
+                    }
+                },
+                "attribute": {
+                    "toHaveAttribute": {
+                        "syntax": "await expect(locator).toHaveAttribute(name, value)",
+                        "description": "Asserts element has specified DOM attribute with value",
+                        "autoRetry": true,
+                        "parameters": [
+                            {
+                                "name": "name",
+                                "type": "string",
+                                "required": true,
+                                "description": "Attribute name"
+                            },
+                            {
+                                "name": "value",
+                                "type": "string | RegExp",
+                                "required": true,
+                                "description": "Expected value"
+                            }
+                        ],
+                        "example": "await expect(page.getByRole('link')).toHaveAttribute('href', '/dashboard');",
+                        "tags": [
+                            "attribute",
+                            "dom",
+                            "common"
+                        ]
+                    },
+                    "toHaveClass": {
+                        "syntax": "await expect(locator).toHaveClass(expected)",
+                        "description": "Asserts element has specified CSS class(es)",
+                        "autoRetry": true,
+                        "parameters": [
+                            {
+                                "name": "expected",
+                                "type": "string | RegExp | string[]",
+                                "required": true,
+                                "description": "Expected class(es)"
+                            }
+                        ],
+                        "example": "await expect(page.getByRole('button')).toHaveClass(/active/);",
+                        "tags": [
+                            "attribute",
+                            "css",
+                            "class"
+                        ]
+                    },
+                    "toContainClass": {
+                        "syntax": "await expect(locator).toContainClass(expected)",
+                        "description": "Asserts element contains specified CSS class(es)",
+                        "autoRetry": true,
+                        "example": "await expect(page.getByRole('button')).toContainClass('btn-primary');",
+                        "tags": [
+                            "attribute",
+                            "css",
+                            "class"
+                        ]
+                    },
+                    "toHaveCSS": {
+                        "syntax": "await expect(locator).toHaveCSS(name, value)",
+                        "description": "Asserts element has computed CSS property value",
+                        "autoRetry": true,
+                        "parameters": [
+                            {
+                                "name": "name",
+                                "type": "string",
+                                "required": true,
+                                "description": "CSS property name"
+                            },
+                            {
+                                "name": "value",
+                                "type": "string | RegExp",
+                                "required": true,
+                                "description": "Expected value"
+                            }
+                        ],
+                        "example": "await expect(page.getByRole('button')).toHaveCSS('background-color', 'rgb(0, 128, 0)');",
+                        "tags": [
+                            "attribute",
+                            "css",
+                            "style"
+                        ]
+                    },
+                    "toHaveId": {
+                        "syntax": "await expect(locator).toHaveId(id)",
+                        "description": "Asserts element has specified ID attribute",
+                        "autoRetry": true,
+                        "example": "await expect(page.locator('header')).toHaveId('main-header');",
+                        "tags": [
+                            "attribute",
+                            "id"
+                        ]
+                    },
+                    "toHaveRole": {
+                        "syntax": "await expect(locator).toHaveRole(role)",
+                        "description": "Asserts element has specified ARIA role",
+                        "autoRetry": true,
+                        "example": "await expect(page.locator('nav')).toHaveRole('navigation');",
+                        "tags": [
+                            "attribute",
+                            "aria",
+                            "accessibility"
+                        ]
+                    },
+                    "toHaveJSProperty": {
+                        "syntax": "await expect(locator).toHaveJSProperty(name, value)",
+                        "description": "Asserts element has JavaScript property with value",
+                        "autoRetry": true,
+                        "example": "await expect(page.locator('input')).toHaveJSProperty('value', 'test');",
+                        "tags": [
+                            "attribute",
+                            "javascript",
+                            "property"
+                        ]
+                    }
+                },
+                "page": {
+                    "toHaveTitle": {
+                        "syntax": "await expect(page).toHaveTitle(expected)",
+                        "description": "Asserts page title matches",
+                        "autoRetry": true,
+                        "parameters": [
+                            {
+                                "name": "expected",
+                                "type": "string | RegExp",
+                                "required": true,
+                                "description": "Expected title"
+                            }
+                        ],
+                        "example": "await expect(page).toHaveTitle(/OneHome/);",
+                        "tags": [
+                            "page",
+                            "title",
+                            "common"
+                        ]
+                    },
+                    "toHaveURL": {
+                        "syntax": "await expect(page).toHaveURL(expected)",
+                        "description": "Asserts page URL matches",
+                        "autoRetry": true,
+                        "parameters": [
+                            {
+                                "name": "expected",
+                                "type": "string | RegExp",
+                                "required": true,
+                                "description": "Expected URL or pattern"
+                            }
+                        ],
+                        "example": "await expect(page).toHaveURL(/\\/dashboard$/);",
+                        "tags": [
+                            "page",
+                            "url",
+                            "navigation",
+                            "common"
+                        ]
+                    },
+                    "toHaveScreenshot": {
+                        "syntax": "await expect(page).toHaveScreenshot(name)",
+                        "description": "Visual regression - compares page screenshot to baseline",
+                        "autoRetry": false,
+                        "parameters": [
+                            {
+                                "name": "name",
+                                "type": "string",
+                                "required": false,
+                                "description": "Screenshot filename"
+                            }
+                        ],
+                        "example": "await expect(page).toHaveScreenshot('dashboard.png');",
+                        "tags": [
+                            "page",
+                            "visual",
+                            "screenshot"
+                        ]
+                    }
+                },
+                "network": {
+                    "toBeOK": {
+                        "syntax": "await expect(response).toBeOK()",
+                        "description": "Asserts HTTP response status is 2xx",
+                        "autoRetry": false,
+                        "example": "const response = await page.request.get('/api/user'); await expect(response).toBeOK();",
+                        "tags": [
+                            "network",
+                            "api",
+                            "response"
+                        ]
+                    }
+                },
+                "accessibility": {
+                    "toHaveAccessibleName": {
+                        "syntax": "await expect(locator).toHaveAccessibleName(name)",
+                        "description": "Asserts element has matching accessible name",
+                        "autoRetry": true,
+                        "example": "await expect(page.getByRole('button')).toHaveAccessibleName('Submit Form');",
+                        "tags": [
+                            "accessibility",
+                            "aria",
+                            "a11y"
+                        ]
+                    },
+                    "toHaveAccessibleDescription": {
+                        "syntax": "await expect(locator).toHaveAccessibleDescription(description)",
+                        "description": "Asserts element has matching accessible description",
+                        "autoRetry": true,
+                        "example": "await expect(page.getByRole('textbox')).toHaveAccessibleDescription('Enter your email address');",
+                        "tags": [
+                            "accessibility",
+                            "aria",
+                            "a11y"
+                        ]
+                    },
+                    "toMatchAriaSnapshot": {
+                        "syntax": "await expect(locator).toMatchAriaSnapshot()",
+                        "description": "Asserts element ARIA tree matches snapshot",
+                        "autoRetry": true,
+                        "example": "await expect(page.getByRole('navigation')).toMatchAriaSnapshot();",
+                        "tags": [
+                            "accessibility",
+                            "aria",
+                            "snapshot"
+                        ]
+                    }
+                },
+                "advanced": {
+                    "poll": {
+                        "syntax": "await expect.poll(callback, options).toBe(expected)",
+                        "description": "Polls callback until assertion passes (custom retry logic)",
+                        "autoRetry": true,
+                        "parameters": [
+                            {
+                                "name": "callback",
+                                "type": "() => Promise<any>",
+                                "required": true,
+                                "description": "Async function to poll"
+                            },
+                            {
+                                "name": "options",
+                                "type": "object",
+                                "required": false,
+                                "description": "{ message?: string, timeout?: number, intervals?: number[] }"
+                            }
+                        ],
+                        "example": "await expect.poll(async () => { const res = await page.request.get('/api'); return res.status(); }, { timeout: 30000 }).toBe(200);",
+                        "tags": [
+                            "advanced",
+                            "polling",
+                            "api"
+                        ]
+                    },
+                    "toPass": {
+                        "syntax": "await expect(callback).toPass(options)",
+                        "description": "Retries block of code until it passes",
+                        "autoRetry": true,
+                        "parameters": [
+                            {
+                                "name": "callback",
+                                "type": "() => Promise<void>",
+                                "required": true,
+                                "description": "Async function to retry"
+                            },
+                            {
+                                "name": "options",
+                                "type": "object",
+                                "required": false,
+                                "description": "{ timeout?: number, intervals?: number[] }"
+                            }
+                        ],
+                        "example": "await expect(async () => { await page.click('#refresh'); await expect(page.locator('#data')).toBeVisible(); }).toPass();",
+                        "tags": [
+                            "advanced",
+                            "retry",
+                            "block"
+                        ]
+                    },
+                    "soft": {
+                        "syntax": "await expect.soft(locator).toBeVisible()",
+                        "description": "Soft assertion - continues test on failure but marks as failed",
+                        "autoRetry": true,
+                        "example": "await expect.soft(page.getByTestId('status')).toHaveText('Success');",
+                        "tags": [
+                            "advanced",
+                            "soft",
+                            "non-blocking"
+                        ]
+                    },
+                    "configure": {
+                        "syntax": "const customExpect = expect.configure(options)",
+                        "description": "Create pre-configured expect with custom defaults",
+                        "autoRetry": true,
+                        "parameters": [
+                            {
+                                "name": "options",
+                                "type": "object",
+                                "required": true,
+                                "description": "{ timeout?: number, soft?: boolean }"
+                            }
+                        ],
+                        "example": "const slowExpect = expect.configure({ timeout: 60000 }); await slowExpect(locator).toBeVisible();",
+                        "tags": [
+                            "advanced",
+                            "configuration",
+                            "timeout"
+                        ]
+                    }
+                },
+                "generic": {
+                    "toBe": {
+                        "syntax": "expect(actual).toBe(expected)",
+                        "description": "Strict equality check (===)",
+                        "autoRetry": false,
+                        "example": "expect(count).toBe(5);",
+                        "tags": [
+                            "generic",
+                            "equality"
+                        ]
+                    },
+                    "toEqual": {
+                        "syntax": "expect(actual).toEqual(expected)",
+                        "description": "Deep equality check",
+                        "autoRetry": false,
+                        "example": "expect(user).toEqual({ name: 'John', age: 30 });",
+                        "tags": [
+                            "generic",
+                            "equality",
+                            "object"
+                        ]
+                    },
+                    "toBeTruthy": {
+                        "syntax": "expect(value).toBeTruthy()",
+                        "description": "Asserts value is truthy",
+                        "autoRetry": false,
+                        "example": "expect(result.success).toBeTruthy();",
+                        "tags": [
+                            "generic",
+                            "boolean"
+                        ]
+                    },
+                    "toBeFalsy": {
+                        "syntax": "expect(value).toBeFalsy()",
+                        "description": "Asserts value is falsy",
+                        "autoRetry": false,
+                        "example": "expect(error).toBeFalsy();",
+                        "tags": [
+                            "generic",
+                            "boolean"
+                        ]
+                    },
+                    "toContain": {
+                        "syntax": "expect(array).toContain(item)",
+                        "description": "Asserts array/string contains item",
+                        "autoRetry": false,
+                        "example": "expect(items).toContain('apple');",
+                        "tags": [
+                            "generic",
+                            "array",
+                            "string"
+                        ]
+                    },
+                    "toMatch": {
+                        "syntax": "expect(string).toMatch(pattern)",
+                        "description": "Asserts string matches regex pattern",
+                        "autoRetry": false,
+                        "example": "expect(email).toMatch(/^[\\w.-]+@[\\w.-]+\\.\\w+$/);",
+                        "tags": [
+                            "generic",
+                            "regex",
+                            "string"
+                        ]
+                    },
+                    "toHaveLength": {
+                        "syntax": "expect(array).toHaveLength(length)",
+                        "description": "Asserts array/string has specified length",
+                        "autoRetry": false,
+                        "example": "expect(items).toHaveLength(5);",
+                        "tags": [
+                            "generic",
+                            "array",
+                            "length"
+                        ]
+                    },
+                    "toThrow": {
+                        "syntax": "expect(fn).toThrow(error)",
+                        "description": "Asserts function throws error",
+                        "autoRetry": false,
+                        "example": "expect(() => parseJSON('invalid')).toThrow(SyntaxError);",
+                        "tags": [
+                            "generic",
+                            "error",
+                            "exception"
+                        ]
+                    }
+                }
+            },
+            "negation": {
+                "syntax": ".not",
+                "description": "Negate any assertion by adding .not before the matcher",
+                "example": "await expect(locator).not.toBeVisible();"
+            },
+            "customMessage": {
+                "syntax": "await expect(locator, 'Custom message').toBeVisible()",
+                "description": "Add custom error message as second argument to expect",
+                "example": "await expect(page.getByRole('button'), 'Submit button should be visible after form is filled').toBeVisible();"
+            },
+            "antiPatterns": [
+                {
+                    "id": "AP001",
+                    "pattern": "expect(await element.textContent()).toEqual(text)",
+                    "reason": "Non-retrying assertion - will not wait for text to appear",
+                    "replacement": "await expect(element).toHaveText(text)",
+                    "severity": "high"
+                },
+                {
+                    "id": "AP002",
+                    "pattern": "expect(await element.isVisible()).toBe(true)",
+                    "reason": "Non-retrying assertion - snapshot in time, may cause flaky tests",
+                    "replacement": "await expect(element).toBeVisible()",
+                    "severity": "high"
+                },
+                {
+                    "id": "AP003",
+                    "pattern": "await page.waitForTimeout(number)",
+                    "reason": "Arbitrary wait - causes slow and flaky tests",
+                    "replacement": "await expect(element).toBeVisible() or await page.waitForLoadState('networkidle')",
+                    "severity": "high"
+                },
+                {
+                    "id": "AP004",
+                    "pattern": "expect(await element.isEnabled()).toBe(true)",
+                    "reason": "Non-retrying assertion",
+                    "replacement": "await expect(element).toBeEnabled()",
+                    "severity": "medium"
+                },
+                {
+                    "id": "AP005",
+                    "pattern": "expect(await element.getAttribute('class')).toContain(className)",
+                    "reason": "Non-retrying assertion for class check",
+                    "replacement": "await expect(element).toHaveClass(/className/) or await expect(element).toContainClass(className)",
+                    "severity": "medium"
+                },
+                {
+                    "id": "AP006",
+                    "pattern": "if (await element.isVisible()) { ... }",
+                    "reason": "Race condition - element state may change between check and action",
+                    "replacement": "await element.waitFor({ state: 'visible' }).catch(() => {}) for optional elements",
+                    "severity": "medium"
+                }
+            ],
+            "bestPractices": [
+                {
+                    "id": "BP001",
+                    "description": "Always use auto-retrying assertions for DOM elements",
+                    "example": "await expect(element).toBeVisible(); // ✅ Auto-retries",
+                    "priority": "required"
+                },
+                {
+                    "id": "BP002",
+                    "description": "Add custom error messages for clarity",
+                    "example": "await expect(button, 'Submit button should be enabled after form validation').toBeEnabled();",
+                    "priority": "recommended"
+                },
+                {
+                    "id": "BP003",
+                    "description": "Use soft assertions for non-critical checks",
+                    "example": "await expect.soft(page.getByTestId('date')).toHaveText(expectedDate);",
+                    "priority": "recommended"
+                },
+                {
+                    "id": "BP004",
+                    "description": "Use regex for flexible text matching",
+                    "example": "await expect(heading).toHaveText(/Welcome.*/i);",
+                    "priority": "recommended"
+                },
+                {
+                    "id": "BP005",
+                    "description": "Use toContainText for partial matches",
+                    "example": "await expect(card).toContainText('Make Repairs');",
+                    "priority": "recommended"
+                },
+                {
+                    "id": "BP006",
+                    "description": "Chain multiple assertions for complete validation",
+                    "example": "await expect(button).toBeVisible();\nawait expect(button).toBeEnabled();\nawait expect(button).toHaveText('Submit');",
+                    "priority": "recommended"
+                },
+                {
+                    "id": "BP007",
+                    "description": "Use expect.poll for API/custom retry logic",
+                    "example": "await expect.poll(async () => (await page.request.get('/api')).status(), { timeout: 30000 }).toBe(200);",
+                    "priority": "optional"
+                },
+                {
+                    "id": "BP008",
+                    "description": "Use expect.toPass for complex retry blocks",
+                    "example": "await expect(async () => { await page.click('#refresh'); await expect(page.locator('#data')).toBeVisible(); }).toPass();",
+                    "priority": "optional"
+                },
+                {
+                    "id": "BP009",
+                    "description": "Configure custom timeout for slow elements",
+                    "example": "const slowExpect = expect.configure({ timeout: 60000 });\nawait slowExpect(heavyElement).toBeVisible();",
+                    "priority": "optional"
+                },
+                {
+                    "id": "BP010",
+                    "description": "Validate page state after navigation",
+                    "example": "await expect(page).toHaveURL(/dashboard/);\nawait expect(page).toHaveTitle(/Dashboard/);",
+                    "priority": "required"
+                }
+            ],
+            "selectorStrategies": {
+                "_note": "Unified priority — aligned with SelectorEngine (mcp-server/utils/selector-engine.js) and workflow-config.json",
+                "priority": [
+                    {
+                        "rank": 1,
+                        "strategy": "getByTestId",
+                        "stabilityScore": 10,
+                        "description": "Data attribute, most stable for automation",
+                        "example": "page.getByTestId('submit-button')"
+                    },
+                    {
+                        "rank": 2,
+                        "strategy": "getByRole",
+                        "stabilityScore": 9,
+                        "description": "Accessibility role + name, Playwright recommended",
+                        "example": "page.getByRole('button', { name: 'Submit' })"
+                    },
+                    {
+                        "rank": 3,
+                        "strategy": "locator('#id')",
+                        "stabilityScore": 8,
+                        "description": "Stable HTML ID (dynamic IDs rejected)",
+                        "example": "page.locator('#search-input')"
+                    },
+                    {
+                        "rank": 4,
+                        "strategy": "locator('[aria-label]')",
+                        "stabilityScore": 7,
+                        "description": "ARIA label attribute",
+                        "example": "page.locator('[aria-label=\"Close dialog\"]')"
+                    },
+                    {
+                        "rank": 5,
+                        "strategy": "getByLabel",
+                        "stabilityScore": 6,
+                        "description": "Associated label for form inputs",
+                        "example": "page.getByLabel('Email Address')"
+                    },
+                    {
+                        "rank": 6,
+                        "strategy": "getByPlaceholder",
+                        "stabilityScore": 6,
+                        "description": "Input placeholder text",
+                        "example": "page.getByPlaceholder('Enter email')"
+                    },
+                    {
+                        "rank": 7,
+                        "strategy": "getByAltText",
+                        "stabilityScore": 6,
+                        "description": "Image alt text",
+                        "example": "page.getByAltText('Company Logo')"
+                    },
+                    {
+                        "rank": 8,
+                        "strategy": "getByTitle",
+                        "stabilityScore": 5,
+                        "description": "Title attribute",
+                        "example": "page.getByTitle('Settings')"
+                    },
+                    {
+                        "rank": 9,
+                        "strategy": "getByText",
+                        "stabilityScore": 4,
+                        "description": "Visible text content (exact match, stable text only)",
+                        "example": "page.getByText('Welcome', { exact: true })"
+                    },
+                    {
+                        "rank": 10,
+                        "strategy": "composite",
+                        "stabilityScore": 3,
+                        "description": "Parent-scoped chained selector",
+                        "example": "page.locator('[data-testid=\"panel\"]').getByRole('button', { name: 'Save' })"
+                    },
+                    {
+                        "rank": 11,
+                        "strategy": "nth",
+                        "stabilityScore": 2,
+                        "description": "Positional index — last resort",
+                        "example": "page.getByRole('button', { name: 'Save' }).nth(0)"
+                    }
+                ]
+            }
+        },
+        "selenium": {
+            "name": "Selenium WebDriver",
+            "version": "^4.0.0",
+            "documentation": "https://www.selenium.dev/documentation/webdriver/",
+            "import": {
+                "statement": "const { Builder, By, until, expect } = require('selenium-webdriver');",
+                "destructure": [
+                    "Builder",
+                    "By",
+                    "until"
+                ]
+            },
+            "assertions": {
+                "visibility": {
+                    "isDisplayed": {
+                        "syntax": "await driver.wait(until.elementIsVisible(element), timeout)",
+                        "description": "Wait until element is visible",
+                        "autoRetry": true,
+                        "example": "const element = await driver.findElement(By.id('submit')); await driver.wait(until.elementIsVisible(element), 10000);",
+                        "tags": [
+                            "visibility",
+                            "wait"
+                        ]
+                    },
+                    "isNotDisplayed": {
+                        "syntax": "await driver.wait(until.elementIsNotVisible(element), timeout)",
+                        "description": "Wait until element is not visible",
+                        "autoRetry": true,
+                        "example": "await driver.wait(until.elementIsNotVisible(element), 10000);",
+                        "tags": [
+                            "visibility",
+                            "wait"
+                        ]
+                    },
+                    "elementLocated": {
+                        "syntax": "await driver.wait(until.elementLocated(By.locator), timeout)",
+                        "description": "Wait until element is present in DOM",
+                        "autoRetry": true,
+                        "example": "await driver.wait(until.elementLocated(By.id('myElement')), 10000);",
+                        "tags": [
+                            "dom",
+                            "existence"
+                        ]
+                    }
+                },
+                "state": {
+                    "isEnabled": {
+                        "syntax": "await driver.wait(until.elementIsEnabled(element), timeout)",
+                        "description": "Wait until element is enabled",
+                        "autoRetry": true,
+                        "example": "await driver.wait(until.elementIsEnabled(submitBtn), 10000);",
+                        "tags": [
+                            "state",
+                            "interactive"
+                        ]
+                    },
+                    "isSelected": {
+                        "syntax": "await driver.wait(until.elementIsSelected(element), timeout)",
+                        "description": "Wait until checkbox/radio is selected",
+                        "autoRetry": true,
+                        "example": "await driver.wait(until.elementIsSelected(checkbox), 10000);",
+                        "tags": [
+                            "state",
+                            "form"
+                        ]
+                    },
+                    "stalenessOf": {
+                        "syntax": "await driver.wait(until.stalenessOf(element), timeout)",
+                        "description": "Wait until element becomes stale (removed from DOM)",
+                        "autoRetry": true,
+                        "example": "await driver.wait(until.stalenessOf(oldElement), 10000);",
+                        "tags": [
+                            "state",
+                            "dom"
+                        ]
+                    }
+                },
+                "content": {
+                    "textContains": {
+                        "syntax": "await driver.wait(until.elementTextContains(element, text), timeout)",
+                        "description": "Wait until element text contains substring",
+                        "autoRetry": true,
+                        "example": "await driver.wait(until.elementTextContains(heading, 'Welcome'), 10000);",
+                        "tags": [
+                            "content",
+                            "text"
+                        ]
+                    },
+                    "textIs": {
+                        "syntax": "await driver.wait(until.elementTextIs(element, text), timeout)",
+                        "description": "Wait until element text matches exactly",
+                        "autoRetry": true,
+                        "example": "await driver.wait(until.elementTextIs(heading, 'Welcome User'), 10000);",
+                        "tags": [
+                            "content",
+                            "text"
+                        ]
+                    },
+                    "textMatches": {
+                        "syntax": "await driver.wait(until.elementTextMatches(element, regex), timeout)",
+                        "description": "Wait until element text matches regex",
+                        "autoRetry": true,
+                        "example": "await driver.wait(until.elementTextMatches(heading, /Welcome.*/), 10000);",
+                        "tags": [
+                            "content",
+                            "text",
+                            "regex"
+                        ]
+                    }
+                },
+                "page": {
+                    "titleContains": {
+                        "syntax": "await driver.wait(until.titleContains(text), timeout)",
+                        "description": "Wait until page title contains text",
+                        "autoRetry": true,
+                        "example": "await driver.wait(until.titleContains('Dashboard'), 10000);",
+                        "tags": [
+                            "page",
+                            "title"
+                        ]
+                    },
+                    "titleIs": {
+                        "syntax": "await driver.wait(until.titleIs(title), timeout)",
+                        "description": "Wait until page title matches exactly",
+                        "autoRetry": true,
+                        "example": "await driver.wait(until.titleIs('OneHome Dashboard'), 10000);",
+                        "tags": [
+                            "page",
+                            "title"
+                        ]
+                    },
+                    "urlContains": {
+                        "syntax": "await driver.wait(until.urlContains(text), timeout)",
+                        "description": "Wait until URL contains text",
+                        "autoRetry": true,
+                        "example": "await driver.wait(until.urlContains('/dashboard'), 10000);",
+                        "tags": [
+                            "page",
+                            "url"
+                        ]
+                    },
+                    "urlIs": {
+                        "syntax": "await driver.wait(until.urlIs(url), timeout)",
+                        "description": "Wait until URL matches exactly",
+                        "autoRetry": true,
+                        "example": "await driver.wait(until.urlIs('https://example.com/dashboard'), 10000);",
+                        "tags": [
+                            "page",
+                            "url"
+                        ]
+                    },
+                    "urlMatches": {
+                        "syntax": "await driver.wait(until.urlMatches(regex), timeout)",
+                        "description": "Wait until URL matches regex",
+                        "autoRetry": true,
+                        "example": "await driver.wait(until.urlMatches(/dashboard$/), 10000);",
+                        "tags": [
+                            "page",
+                            "url",
+                            "regex"
+                        ]
+                    }
+                },
+                "generic": {
+                    "assertEqual": {
+                        "syntax": "assert.strictEqual(actual, expected)",
+                        "description": "Assert values are strictly equal",
+                        "autoRetry": false,
+                        "example": "const text = await element.getText(); assert.strictEqual(text, 'Expected');",
+                        "tags": [
+                            "generic",
+                            "equality"
+                        ]
+                    },
+                    "assertTrue": {
+                        "syntax": "assert.ok(value)",
+                        "description": "Assert value is truthy",
+                        "autoRetry": false,
+                        "example": "assert.ok(await element.isDisplayed());",
+                        "tags": [
+                            "generic",
+                            "boolean"
+                        ]
+                    },
+                    "assertContains": {
+                        "syntax": "assert.ok(text.includes(substring))",
+                        "description": "Assert string contains substring",
+                        "autoRetry": false,
+                        "example": "const text = await element.getText(); assert.ok(text.includes('partial'));",
+                        "tags": [
+                            "generic",
+                            "string"
+                        ]
+                    }
+                }
+            },
+            "antiPatterns": [
+                {
+                    "id": "AP001",
+                    "pattern": "driver.sleep(time)",
+                    "reason": "Hard-coded wait causes slow and flaky tests",
+                    "replacement": "driver.wait(until.elementIsVisible(element), timeout)",
+                    "severity": "high"
+                },
+                {
+                    "id": "AP002",
+                    "pattern": "const text = await element.getText(); expect(text).toBe(expected);",
+                    "reason": "No retry mechanism for dynamic content",
+                    "replacement": "await driver.wait(until.elementTextIs(element, expected), timeout);",
+                    "severity": "high"
+                }
+            ],
+            "bestPractices": [
+                {
+                    "id": "BP001",
+                    "description": "Always use explicit waits (until.*) instead of implicit waits",
+                    "example": "await driver.wait(until.elementIsVisible(element), 10000);",
+                    "priority": "required"
+                },
+                {
+                    "id": "BP002",
+                    "description": "Use Page Object Model for maintainability",
+                    "example": "class LoginPage { get emailInput() { return driver.findElement(By.id('email')); } }",
+                    "priority": "required"
+                },
+                {
+                    "id": "BP003",
+                    "description": "Use Fluent Waits for custom polling",
+                    "example": "const wait = new WebDriverWait(driver, 30).pollingEvery(500);",
+                    "priority": "recommended"
+                }
+            ],
+            "selectorStrategies": {
+                "priority": [
+                    {
+                        "rank": 1,
+                        "strategy": "By.id",
+                        "description": "ID selector - most stable",
+                        "example": "By.id('submit-btn')"
+                    },
+                    {
+                        "rank": 2,
+                        "strategy": "By.name",
+                        "description": "Name attribute",
+                        "example": "By.name('email')"
+                    },
+                    {
+                        "rank": 3,
+                        "strategy": "By.css",
+                        "description": "CSS selector",
+                        "example": "By.css('.btn-primary')"
+                    },
+                    {
+                        "rank": 4,
+                        "strategy": "By.xpath",
+                        "description": "XPath - most flexible",
+                        "example": "By.xpath('//button[contains(text(),\"Submit\")]')"
+                    },
+                    {
+                        "rank": 5,
+                        "strategy": "By.linkText",
+                        "description": "Exact link text",
+                        "example": "By.linkText('Click here')"
+                    },
+                    {
+                        "rank": 6,
+                        "strategy": "By.partialLinkText",
+                        "description": "Partial link text",
+                        "example": "By.partialLinkText('Click')"
+                    }
+                ]
+            }
+        },
+        "cypress": {
+            "name": "Cypress",
+            "version": "^13.0.0",
+            "documentation": "https://docs.cypress.io/guides/references/assertions",
+            "import": {
+                "statement": "// Cypress automatically includes cy and expect",
+                "destructure": []
+            },
+            "assertions": {
+                "visibility": {
+                    "beVisible": {
+                        "syntax": "cy.get(selector).should('be.visible')",
+                        "description": "Assert element is visible",
+                        "autoRetry": true,
+                        "example": "cy.get('#submit-btn').should('be.visible');",
+                        "tags": [
+                            "visibility",
+                            "ui"
+                        ]
+                    },
+                    "notBeVisible": {
+                        "syntax": "cy.get(selector).should('not.be.visible')",
+                        "description": "Assert element is not visible",
+                        "autoRetry": true,
+                        "example": "cy.get('.modal').should('not.be.visible');",
+                        "tags": [
+                            "visibility",
+                            "ui"
+                        ]
+                    },
+                    "exist": {
+                        "syntax": "cy.get(selector).should('exist')",
+                        "description": "Assert element exists in DOM",
+                        "autoRetry": true,
+                        "example": "cy.get('#hidden-input').should('exist');",
+                        "tags": [
+                            "dom",
+                            "existence"
+                        ]
+                    },
+                    "notExist": {
+                        "syntax": "cy.get(selector).should('not.exist')",
+                        "description": "Assert element does not exist in DOM",
+                        "autoRetry": true,
+                        "example": "cy.get('.deleted-item').should('not.exist');",
+                        "tags": [
+                            "dom",
+                            "existence"
+                        ]
+                    }
+                },
+                "state": {
+                    "beEnabled": {
+                        "syntax": "cy.get(selector).should('be.enabled')",
+                        "description": "Assert element is enabled",
+                        "autoRetry": true,
+                        "example": "cy.get('button[type=\"submit\"]').should('be.enabled');",
+                        "tags": [
+                            "state",
+                            "interactive"
+                        ]
+                    },
+                    "beDisabled": {
+                        "syntax": "cy.get(selector).should('be.disabled')",
+                        "description": "Assert element is disabled",
+                        "autoRetry": true,
+                        "example": "cy.get('button[type=\"submit\"]').should('be.disabled');",
+                        "tags": [
+                            "state",
+                            "interactive"
+                        ]
+                    },
+                    "beChecked": {
+                        "syntax": "cy.get(selector).should('be.checked')",
+                        "description": "Assert checkbox/radio is checked",
+                        "autoRetry": true,
+                        "example": "cy.get('#terms-checkbox').should('be.checked');",
+                        "tags": [
+                            "state",
+                            "form"
+                        ]
+                    },
+                    "beFocused": {
+                        "syntax": "cy.get(selector).should('be.focused')",
+                        "description": "Assert element has focus",
+                        "autoRetry": true,
+                        "example": "cy.get('#email-input').should('be.focused');",
+                        "tags": [
+                            "state",
+                            "focus"
+                        ]
+                    }
+                },
+                "content": {
+                    "haveText": {
+                        "syntax": "cy.get(selector).should('have.text', text)",
+                        "description": "Assert element has exact text",
+                        "autoRetry": true,
+                        "example": "cy.get('h1').should('have.text', 'Welcome');",
+                        "tags": [
+                            "content",
+                            "text"
+                        ]
+                    },
+                    "containText": {
+                        "syntax": "cy.get(selector).should('contain', text)",
+                        "description": "Assert element contains text",
+                        "autoRetry": true,
+                        "example": "cy.get('.alert').should('contain', 'Error');",
+                        "tags": [
+                            "content",
+                            "text"
+                        ]
+                    },
+                    "haveValue": {
+                        "syntax": "cy.get(selector).should('have.value', value)",
+                        "description": "Assert input has value",
+                        "autoRetry": true,
+                        "example": "cy.get('#email').should('have.value', 'test@example.com');",
+                        "tags": [
+                            "content",
+                            "form"
+                        ]
+                    },
+                    "haveLength": {
+                        "syntax": "cy.get(selector).should('have.length', count)",
+                        "description": "Assert number of elements",
+                        "autoRetry": true,
+                        "example": "cy.get('li').should('have.length', 5);",
+                        "tags": [
+                            "content",
+                            "count"
+                        ]
+                    }
+                },
+                "attribute": {
+                    "haveAttr": {
+                        "syntax": "cy.get(selector).should('have.attr', name, value)",
+                        "description": "Assert element has attribute with value",
+                        "autoRetry": true,
+                        "example": "cy.get('a').should('have.attr', 'href', '/dashboard');",
+                        "tags": [
+                            "attribute",
+                            "dom"
+                        ]
+                    },
+                    "haveClass": {
+                        "syntax": "cy.get(selector).should('have.class', className)",
+                        "description": "Assert element has CSS class",
+                        "autoRetry": true,
+                        "example": "cy.get('button').should('have.class', 'active');",
+                        "tags": [
+                            "attribute",
+                            "css"
+                        ]
+                    },
+                    "haveCss": {
+                        "syntax": "cy.get(selector).should('have.css', property, value)",
+                        "description": "Assert element has CSS property value",
+                        "autoRetry": true,
+                        "example": "cy.get('button').should('have.css', 'background-color', 'rgb(0, 128, 0)');",
+                        "tags": [
+                            "attribute",
+                            "css"
+                        ]
+                    },
+                    "haveId": {
+                        "syntax": "cy.get(selector).should('have.id', id)",
+                        "description": "Assert element has ID",
+                        "autoRetry": true,
+                        "example": "cy.get('header').should('have.id', 'main-header');",
+                        "tags": [
+                            "attribute",
+                            "id"
+                        ]
+                    }
+                },
+                "page": {
+                    "urlInclude": {
+                        "syntax": "cy.url().should('include', path)",
+                        "description": "Assert URL includes path",
+                        "autoRetry": true,
+                        "example": "cy.url().should('include', '/dashboard');",
+                        "tags": [
+                            "page",
+                            "url"
+                        ]
+                    },
+                    "urlEqual": {
+                        "syntax": "cy.url().should('eq', url)",
+                        "description": "Assert URL equals exactly",
+                        "autoRetry": true,
+                        "example": "cy.url().should('eq', 'https://example.com/dashboard');",
+                        "tags": [
+                            "page",
+                            "url"
+                        ]
+                    },
+                    "titleInclude": {
+                        "syntax": "cy.title().should('include', text)",
+                        "description": "Assert title includes text",
+                        "autoRetry": true,
+                        "example": "cy.title().should('include', 'Dashboard');",
+                        "tags": [
+                            "page",
+                            "title"
+                        ]
+                    }
+                }
+            },
+            "antiPatterns": [
+                {
+                    "id": "AP001",
+                    "pattern": "cy.wait(number)",
+                    "reason": "Arbitrary wait - use intercept + wait for route instead",
+                    "replacement": "cy.intercept('/api/**').as('api'); cy.wait('@api');",
+                    "severity": "high"
+                }
+            ],
+            "bestPractices": [
+                {
+                    "id": "BP001",
+                    "description": "Chain assertions for retry-ability",
+                    "example": "cy.get('button').should('be.visible').and('be.enabled');",
+                    "priority": "required"
+                },
+                {
+                    "id": "BP002",
+                    "description": "Use data-* attributes for stable selectors",
+                    "example": "cy.get('[data-testid=\"submit-button\"]').click();",
+                    "priority": "recommended"
+                }
+            ],
+            "selectorStrategies": {
+                "priority": [
+                    {
+                        "rank": 1,
+                        "strategy": "data-cy",
+                        "description": "Custom Cypress attribute",
+                        "example": "cy.get('[data-cy=\"submit\"]')"
+                    },
+                    {
+                        "rank": 2,
+                        "strategy": "data-testid",
+                        "description": "Generic test ID",
+                        "example": "cy.get('[data-testid=\"submit\"]')"
+                    },
+                    {
+                        "rank": 3,
+                        "strategy": "id",
+                        "description": "ID selector",
+                        "example": "cy.get('#submit')"
+                    },
+                    {
+                        "rank": 4,
+                        "strategy": "class",
+                        "description": "CSS class",
+                        "example": "cy.get('.btn-primary')"
+                    }
+                ]
+            }
+        },
+        "webdriverio": {
+            "name": "WebdriverIO",
+            "version": "^8.0.0",
+            "documentation": "https://webdriver.io/docs/api/expect-webdriverio",
+            "import": {
+                "statement": "const { expect } = require('@wdio/globals');",
+                "destructure": [
+                    "expect"
+                ]
+            },
+            "assertions": {
+                "visibility": {
+                    "toBeDisplayed": {
+                        "syntax": "await expect(element).toBeDisplayed()",
+                        "description": "Assert element is displayed",
+                        "autoRetry": true,
+                        "example": "await expect($('#submit')).toBeDisplayed();",
+                        "tags": [
+                            "visibility",
+                            "ui"
+                        ]
+                    },
+                    "toBeDisplayedInViewport": {
+                        "syntax": "await expect(element).toBeDisplayedInViewport()",
+                        "description": "Assert element is in viewport",
+                        "autoRetry": true,
+                        "example": "await expect($('header')).toBeDisplayedInViewport();",
+                        "tags": [
+                            "visibility",
+                            "viewport"
+                        ]
+                    },
+                    "toExist": {
+                        "syntax": "await expect(element).toExist()",
+                        "description": "Assert element exists in DOM",
+                        "autoRetry": true,
+                        "example": "await expect($('#hidden-input')).toExist();",
+                        "tags": [
+                            "dom",
+                            "existence"
+                        ]
+                    }
+                },
+                "state": {
+                    "toBeEnabled": {
+                        "syntax": "await expect(element).toBeEnabled()",
+                        "description": "Assert element is enabled",
+                        "autoRetry": true,
+                        "example": "await expect($('button[type=\"submit\"]')).toBeEnabled();",
+                        "tags": [
+                            "state",
+                            "interactive"
+                        ]
+                    },
+                    "toBeDisabled": {
+                        "syntax": "await expect(element).toBeDisabled()",
+                        "description": "Assert element is disabled",
+                        "autoRetry": true,
+                        "example": "await expect($('button[type=\"submit\"]')).toBeDisabled();",
+                        "tags": [
+                            "state",
+                            "interactive"
+                        ]
+                    },
+                    "toBeSelected": {
+                        "syntax": "await expect(element).toBeSelected()",
+                        "description": "Assert checkbox/option is selected",
+                        "autoRetry": true,
+                        "example": "await expect($('#terms')).toBeSelected();",
+                        "tags": [
+                            "state",
+                            "form"
+                        ]
+                    },
+                    "toBeFocused": {
+                        "syntax": "await expect(element).toBeFocused()",
+                        "description": "Assert element has focus",
+                        "autoRetry": true,
+                        "example": "await expect($('#email')).toBeFocused();",
+                        "tags": [
+                            "state",
+                            "focus"
+                        ]
+                    },
+                    "toBeClickable": {
+                        "syntax": "await expect(element).toBeClickable()",
+                        "description": "Assert element is clickable",
+                        "autoRetry": true,
+                        "example": "await expect($('button')).toBeClickable();",
+                        "tags": [
+                            "state",
+                            "interactive"
+                        ]
+                    }
+                },
+                "content": {
+                    "toHaveText": {
+                        "syntax": "await expect(element).toHaveText(text)",
+                        "description": "Assert element has text",
+                        "autoRetry": true,
+                        "example": "await expect($('h1')).toHaveText('Welcome');",
+                        "tags": [
+                            "content",
+                            "text"
+                        ]
+                    },
+                    "toHaveTextContaining": {
+                        "syntax": "await expect(element).toHaveTextContaining(text)",
+                        "description": "Assert element contains text",
+                        "autoRetry": true,
+                        "example": "await expect($('.alert')).toHaveTextContaining('Error');",
+                        "tags": [
+                            "content",
+                            "text"
+                        ]
+                    },
+                    "toHaveValue": {
+                        "syntax": "await expect(element).toHaveValue(value)",
+                        "description": "Assert input has value",
+                        "autoRetry": true,
+                        "example": "await expect($('#email')).toHaveValue('test@example.com');",
+                        "tags": [
+                            "content",
+                            "form"
+                        ]
+                    },
+                    "toHaveChildren": {
+                        "syntax": "await expect(element).toHaveChildren(count)",
+                        "description": "Assert element has N children",
+                        "autoRetry": true,
+                        "example": "await expect($('ul')).toHaveChildren(5);",
+                        "tags": [
+                            "content",
+                            "count"
+                        ]
+                    }
+                },
+                "attribute": {
+                    "toHaveAttribute": {
+                        "syntax": "await expect(element).toHaveAttribute(name, value)",
+                        "description": "Assert element has attribute",
+                        "autoRetry": true,
+                        "example": "await expect($('a')).toHaveAttribute('href', '/dashboard');",
+                        "tags": [
+                            "attribute",
+                            "dom"
+                        ]
+                    },
+                    "toHaveAttrContaining": {
+                        "syntax": "await expect(element).toHaveAttrContaining(name, value)",
+                        "description": "Assert attribute contains value",
+                        "autoRetry": true,
+                        "example": "await expect($('a')).toHaveAttrContaining('href', 'dashboard');",
+                        "tags": [
+                            "attribute",
+                            "dom"
+                        ]
+                    },
+                    "toHaveElementClass": {
+                        "syntax": "await expect(element).toHaveElementClass(className)",
+                        "description": "Assert element has CSS class",
+                        "autoRetry": true,
+                        "example": "await expect($('button')).toHaveElementClass('active');",
+                        "tags": [
+                            "attribute",
+                            "css"
+                        ]
+                    },
+                    "toHaveId": {
+                        "syntax": "await expect(element).toHaveId(id)",
+                        "description": "Assert element has ID",
+                        "autoRetry": true,
+                        "example": "await expect($('header')).toHaveId('main-header');",
+                        "tags": [
+                            "attribute",
+                            "id"
+                        ]
+                    }
+                },
+                "page": {
+                    "toHaveUrl": {
+                        "syntax": "await expect(browser).toHaveUrl(url)",
+                        "description": "Assert browser URL",
+                        "autoRetry": true,
+                        "example": "await expect(browser).toHaveUrl('https://example.com/dashboard');",
+                        "tags": [
+                            "page",
+                            "url"
+                        ]
+                    },
+                    "toHaveUrlContaining": {
+                        "syntax": "await expect(browser).toHaveUrlContaining(path)",
+                        "description": "Assert URL contains path",
+                        "autoRetry": true,
+                        "example": "await expect(browser).toHaveUrlContaining('/dashboard');",
+                        "tags": [
+                            "page",
+                            "url"
+                        ]
+                    },
+                    "toHaveTitle": {
+                        "syntax": "await expect(browser).toHaveTitle(title)",
+                        "description": "Assert page title",
+                        "autoRetry": true,
+                        "example": "await expect(browser).toHaveTitle('Dashboard');",
+                        "tags": [
+                            "page",
+                            "title"
+                        ]
+                    },
+                    "toHaveTitleContaining": {
+                        "syntax": "await expect(browser).toHaveTitleContaining(text)",
+                        "description": "Assert title contains text",
+                        "autoRetry": true,
+                        "example": "await expect(browser).toHaveTitleContaining('Dashboard');",
+                        "tags": [
+                            "page",
+                            "title"
+                        ]
+                    }
+                }
+            },
+            "bestPractices": [
+                {
+                    "id": "BP001",
+                    "description": "Use $ and $$ for element selection",
+                    "example": "const btn = await $('button'); await btn.click();",
+                    "priority": "required"
+                },
+                {
+                    "id": "BP002",
+                    "description": "Use expect-webdriverio for auto-retrying assertions",
+                    "example": "await expect($('button')).toBeDisplayed();",
+                    "priority": "required"
+                }
+            ],
+            "selectorStrategies": {
+                "priority": [
+                    {
+                        "rank": 1,
+                        "strategy": "data-testid",
+                        "description": "Test ID attribute",
+                        "example": "$('[data-testid=\"submit\"]')"
+                    },
+                    {
+                        "rank": 2,
+                        "strategy": "id",
+                        "description": "ID selector",
+                        "example": "$('#submit')"
+                    },
+                    {
+                        "rank": 3,
+                        "strategy": "css",
+                        "description": "CSS selector",
+                        "example": "$('.btn-primary')"
+                    },
+                    {
+                        "rank": 4,
+                        "strategy": "xpath",
+                        "description": "XPath",
+                        "example": "$('//button[text()=\"Submit\"]')"
+                    }
+                ]
+            }
+        }
+    }
+}
