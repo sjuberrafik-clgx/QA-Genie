@@ -1,0 +1,135 @@
+{
+  "ticketId": "AOTF-16461",
+  "popupsDetected": [
+    {
+      "handledBy": "PopupHandler.dismissWelcome()",
+      "type": "welcome-modal",
+      "selector": "ngb-modal-window.welcome-modal-container",
+      "dismissButton": "button:has-text('Continue')"
+    }
+  ],
+  "pagesVisited": [
+    "https://aotf-uat.corelogic.com/en-US/properties/map",
+    "https://aotf-uat.corelogic.com/en-US/legal#terms",
+    "https://aotf-uat.corelogic.com/en-US/legal#privacy"
+  ],
+  "source": "mcp-live-snapshot",
+  "timestamp": "2026-02-17T15:05:51.9239698Z",
+  "snapshots": [
+    {
+      "pageTitle": "OneHome",
+      "elements": [
+        {
+          "name": "Continue",
+          "text": "Continue",
+          "role": "button",
+          "ref": "s1e141"
+        }
+      ],
+      "url": "https://aotf-uat.corelogic.com/en-US/properties/map?token=..."
+    },
+    {
+      "pageTitle": "Legal",
+      "elements": [
+        {
+          "text": "Roomvo. Some of the Services may utilize the Roomvo visualizer to reimagine rooms. End Users' use of",
+          "ref": "s1e48",
+          "tag": "li"
+        },
+        {
+          "href": "http://get.roomvo.com/terms_of_use",
+          "text": "Terms of Use | Terms & Conditions Disclaimer | Roomvo",
+          "ref": "s1e49",
+          "tag": "a"
+        },
+        {
+          "href": "http://get.roomvo.com/privacy_policy",
+          "text": "Privacy Policy | Private Information Disclaimer | Roomvo",
+          "ref": "s1e50",
+          "tag": "a"
+        }
+      ],
+      "url": "https://aotf-uat.corelogic.com/en-US/legal?token=...#terms"
+    },
+    {
+      "pageTitle": "Legal",
+      "elements": [
+        {
+          "text": "Roomvo. Some of the Services may utilize the Roomvo visualizer to reimagine rooms. End Users' use of",
+          "ref": "s1e48",
+          "tag": "li"
+        },
+        {
+          "href": "http://get.roomvo.com/terms_of_use",
+          "text": "Terms of Use | Terms & Conditions Disclaimer | Roomvo",
+          "ref": "s1e49",
+          "tag": "a"
+        },
+        {
+          "href": "http://get.roomvo.com/privacy_policy",
+          "text": "Privacy Policy | Private Information Disclaimer | Roomvo",
+          "ref": "s1e50",
+          "tag": "a"
+        }
+      ],
+      "url": "https://aotf-uat.corelogic.com/en-US/legal?token=...#privacy"
+    }
+  ],
+  "deepExploration": {
+    "verifiedUrls": [
+      {
+        "page": "Home",
+        "urlPattern": "/en-US/properties/map"
+      },
+      {
+        "page": "Legal - Terms",
+        "urlPattern": "/en-US/legal#terms"
+      },
+      {
+        "page": "Legal - Privacy",
+        "urlPattern": "/en-US/legal#privacy"
+      }
+    ],
+    "extractedContent": [
+      {
+        "value": "Roomvo. Some of the Services may utilize the Roomvo visualizer to reimagine rooms. End Users' use of",
+        "type": "text_content",
+        "element": "Roomvo clause text"
+      },
+      {
+        "value": "http://get.roomvo.com/terms_of_use",
+        "type": "href",
+        "element": "Roomvo ToU link"
+      },
+      {
+        "value": "http://get.roomvo.com/privacy_policy",
+        "type": "href",
+        "element": "Roomvo Privacy link"
+      }
+    ],
+    "semanticSelectors": [
+      {
+        "strategy": "getByRole",
+        "name": "Continue",
+        "role": "button",
+        "ref": "s1e141",
+        "element": "Continue button"
+      },
+      {
+        "strategy": "getByRole",
+        "name": "Terms of Service",
+        "role": "link",
+        "ref": "s1e157",
+        "element": "Terms of Service link"
+      },
+      {
+        "strategy": "getByRole",
+        "name": "Privacy Policy",
+        "role": "link",
+        "ref": "s1e158",
+        "element": "Privacy Policy link"
+      }
+    ]
+  },
+  "selectorCount": 7
+}

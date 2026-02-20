@@ -1,0 +1,875 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "workflow-config.schema.json",
+    "title": "Workflow Configuration",
+    "description": "Configuration schema for the Jira to Automation Pipeline workflow",
+    "type": "object",
+    "required": [
+        "version",
+        "name",
+        "pipeline",
+        "preflightChecks",
+        "mcpExploration",
+        "testExecution"
+    ],
+    "properties": {
+        "$schema": {
+            "type": "string",
+            "description": "JSON Schema reference for validation"
+        },
+        "version": {
+            "type": "string",
+            "pattern": "^\\d+\\.\\d+\\.\\d+$",
+            "description": "Semantic version of the configuration format (e.g., 2.0.0)"
+        },
+        "name": {
+            "type": "string",
+            "description": "Human-readable name for the workflow pipeline"
+        },
+        "description": {
+            "type": "string",
+            "description": "Detailed description of the workflow purpose"
+        },
+        "projectPaths": {
+            "type": "object",
+            "description": "Host project directory structure configuration. All paths are relative to the project root. Override via .env or environment variables. Set frameworkMode to 'auto' to auto-detect.",
+            "properties": {
+                "specsDir": {
+                    "type": "string",
+                    "default": "tests/specs",
+                    "description": "Directory where test spec files are generated (e.g., tests/specs, specs, e2e/specs)"
+                },
+                "pageObjectsDir": {
+                    "type": "string",
+                    "default": "tests/pageobjects",
+                    "description": "Directory containing page object classes (e.g., tests/pageobjects)"
+                },
+                "configDir": {
+                    "type": "string",
+                    "default": "tests/config",
+                    "description": "Directory containing browser/test configuration (e.g., tests/config)"
+                },
+                "testDataFile": {
+                    "type": "string",
+                    "default": "tests/test-data/testData.js",
+                    "description": "Path to the test data file with tokens, credentials, and base URLs"
+                },
+                "businessFunctionsDir": {
+                    "type": "string",
+                    "default": "tests/business-functions",
+                    "description": "Directory containing reusable business function helpers"
+                },
+                "utilsDir": {
+                    "type": "string",
+                    "default": "tests/utils",
+                    "description": "Directory containing utility/helper functions"
+                },
+                "enumsDir": {
+                    "type": "string",
+                    "default": "tests/enums",
+                    "description": "Directory containing enum/constant definitions"
+                },
+                "importPrefix": {
+                    "type": "string",
+                    "default": "../../",
+                    "description": "Relative import prefix from spec files to project directories (e.g., '../../' when specs are at tests/specs/{ticket}/)"
+                },
+                "frameworkMode": {
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "full",
+                        "basic"
+                    ],
+                    "default": "auto",
+                    "description": "'full' = use existing framework (POmanager, launchBrowser, testData). 'basic' = standalone Playwright scripts. 'auto' = detect from filesystem."
+                }
+            }
+        },
+        "reliability": {
+            "type": "object",
+            "description": "Reliability tracking metrics",
+            "properties": {
+                "targetPassRate": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Target pass rate percentage (0-100)"
+                },
+                "currentPassRate": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Current measured pass rate percentage"
+                },
+                "lastUpdated": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "Date when metrics were last updated (YYYY-MM-DD)"
+                }
+            }
+        },
+        "pipeline": {
+            "type": "object",
+            "description": "Pipeline stage configuration",
+            "required": [
+                "stages",
+                "enforceSequence"
+            ],
+            "properties": {
+                "stages": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "testgenie",
+                            "scriptgenerator",
+                            "execute",
+                            "report",
+                            "buggenie"
+                        ]
+                    },
+                    "description": "Ordered list of pipeline stages"
+                },
+                "enforceSequence": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "If true, stages must execute in order"
+                },
+                "allowSkip": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "If true, allows skipping stages (not recommended)"
+                }
+            }
+        },
+        "preflightChecks": {
+            "type": "object",
+            "description": "Pre-flight validation configuration",
+            "required": [
+                "enabled",
+                "checks"
+            ],
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable or disable pre-flight validation"
+                },
+                "timeout": {
+                    "type": "number",
+                    "minimum": 1000,
+                    "maximum": 120000,
+                    "default": 30000,
+                    "description": "Timeout in milliseconds for pre-flight checks"
+                },
+                "checks": {
+                    "type": "array",
+                    "description": "List of pre-flight checks to perform",
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "id",
+                            "name",
+                            "type",
+                            "required"
+                        ],
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "Unique identifier for the check"
+                            },
+                            "name": {
+                                "type": "string",
+                                "description": "Human-readable check name"
+                            },
+                            "type": {
+                                "type": "string",
+                                "enum": [
+                                    "mcp",
+                                    "api",
+                                    "network",
+                                    "file"
+                                ],
+                                "description": "Type of check to perform"
+                            },
+                            "required": {
+                                "type": "boolean",
+                                "description": "If true, workflow halts on failure"
+                            },
+                            "validation": {
+                                "type": "string",
+                                "description": "Validation method or MCP tool name"
+                            },
+                            "url": {
+                                "type": "string",
+                                "format": "uri",
+                                "description": "URL to check for network type"
+                            },
+                            "path": {
+                                "type": "string",
+                                "description": "File path for file type checks"
+                            },
+                            "timeout": {
+                                "type": "number",
+                                "description": "Individual check timeout in milliseconds"
+                            },
+                            "errorMessage": {
+                                "type": "string",
+                                "description": "Error message shown on failure"
+                            },
+                            "recoveryAction": {
+                                "type": "string",
+                                "description": "Suggested recovery action or tool"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "mcpExploration": {
+            "type": "object",
+            "description": "MCP browser exploration configuration",
+            "required": [
+                "mandatory",
+                "snapshotRequired",
+                "checkpoints"
+            ],
+            "properties": {
+                "mandatory": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "If true, MCP exploration is required before script generation"
+                },
+                "enforceBeforeScriptGeneration": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Block script generation until MCP exploration completes"
+                },
+                "snapshotRequired": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Require at least one DOM snapshot"
+                },
+                "minSnapshotsBeforeGeneration": {
+                    "type": "number",
+                    "minimum": 1,
+                    "default": 1,
+                    "description": "Minimum snapshots required before proceeding"
+                },
+                "checkpoints": {
+                    "type": "array",
+                    "description": "Mandatory checkpoints for MCP exploration",
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "id",
+                            "description"
+                        ],
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "enum": [
+                                    "browser-launched",
+                                    "page-navigated",
+                                    "snapshot-captured",
+                                    "selectors-extracted"
+                                ],
+                                "description": "Checkpoint identifier"
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "What this checkpoint validates"
+                            },
+                            "validation": {
+                                "type": "string",
+                                "description": "Validation criteria"
+                            }
+                        }
+                    }
+                },
+                "fallbackStrategy": {
+                    "type": "object",
+                    "description": "Retry strategy for MCP exploration failures",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "default": true
+                        },
+                        "maxRetries": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 5,
+                            "default": 2
+                        },
+                        "retryDelay": {
+                            "type": "number",
+                            "minimum": 1000,
+                            "default": 3000,
+                            "description": "Delay between retries in milliseconds"
+                        }
+                    }
+                }
+            }
+        },
+        "mcpStrategy": {
+            "type": "object",
+            "description": "Hybrid MCP strategy configuration - Playwright for exploration, Chrome DevTools for recovery",
+            "properties": {
+                "version": {
+                    "type": "string",
+                    "description": "MCP strategy version"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "initialExploration": {
+                    "type": "object",
+                    "description": "Configuration for initial exploration phase using Playwright MCP",
+                    "properties": {
+                        "provider": {
+                            "type": "string",
+                            "enum": [
+                                "playwright"
+                            ],
+                            "description": "MCP provider for initial exploration"
+                        },
+                        "tools": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Playwright MCP tools to use"
+                        },
+                        "capabilities": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        },
+                        "useFor": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                },
+                "failureRecovery": {
+                    "type": "object",
+                    "description": "Configuration for failure recovery phase using Chrome DevTools MCP",
+                    "properties": {
+                        "provider": {
+                            "type": "string",
+                            "enum": [
+                                "chromeDevTools"
+                            ],
+                            "description": "MCP provider for failure recovery"
+                        },
+                        "triggerOn": {
+                            "type": "string",
+                            "enum": [
+                                "firstTestFailure",
+                                "anyFailure"
+                            ],
+                            "description": "When to trigger Chrome DevTools recovery"
+                        },
+                        "tools": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Chrome DevTools MCP tools to use"
+                        },
+                        "capabilities": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        },
+                        "useFor": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        },
+                        "selfHealing": {
+                            "type": "object",
+                            "description": "Self-healing selector configuration",
+                            "properties": {
+                                "enabled": {
+                                    "type": "boolean",
+                                    "default": true
+                                },
+                                "strategies": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {
+                                                "type": "string"
+                                            },
+                                            "description": {
+                                                "type": "string"
+                                            },
+                                            "script": {
+                                                "type": "string"
+                                            }
+                                        }
+                                    }
+                                },
+                                "maxHealingAttempts": {
+                                    "type": "number",
+                                    "minimum": 1,
+                                    "maximum": 5,
+                                    "default": 3
+                                }
+                            }
+                        }
+                    }
+                },
+                "switchConditions": {
+                    "type": "object",
+                    "description": "Conditions for switching between MCP providers",
+                    "properties": {
+                        "switchToDevToolsWhen": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        },
+                        "stayWithPlaywrightWhen": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                },
+                "integrationFlow": {
+                    "type": "object",
+                    "description": "Integration flow phases",
+                    "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                            "provider": {
+                                "type": "string"
+                            },
+                            "actions": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                }
+                            },
+                            "triggerCondition": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "selectorStrategy": {
+            "type": "object",
+            "description": "Selector reliability and priority configuration",
+            "properties": {
+                "priority": {
+                    "type": "array",
+                    "description": "Ordered list of selector types by reliability",
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "rank",
+                            "type",
+                            "reliability"
+                        ],
+                        "properties": {
+                            "rank": {
+                                "type": "number",
+                                "minimum": 1,
+                                "description": "Priority rank (1 = highest)"
+                            },
+                            "type": {
+                                "type": "string",
+                                "enum": [
+                                    "data-test-id",
+                                    "data-testid",
+                                    "aria-label",
+                                    "role",
+                                    "text-content",
+                                    "id",
+                                    "css-class"
+                                ],
+                                "description": "Selector type"
+                            },
+                            "reliability": {
+                                "type": "number",
+                                "minimum": 1,
+                                "maximum": 5,
+                                "description": "Reliability score (1-5, 5 = most reliable)"
+                            },
+                            "pattern": {
+                                "type": "string",
+                                "description": "Example pattern for this selector type"
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "When to use this selector type"
+                            }
+                        }
+                    }
+                },
+                "validation": {
+                    "type": "object",
+                    "properties": {
+                        "requireFallback": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Require fallback selectors in scripts"
+                        },
+                        "minReliabilityScore": {
+                            "type": "number",
+                            "minimum": 1,
+                            "maximum": 5,
+                            "default": 3,
+                            "description": "Minimum average reliability score"
+                        },
+                        "warnOnLowReliability": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Show warning for low reliability selectors"
+                        }
+                    }
+                }
+            }
+        },
+        "testExecution": {
+            "type": "object",
+            "description": "Test execution configuration",
+            "required": [
+                "maxIterations",
+                "timeout"
+            ],
+            "properties": {
+                "maxIterations": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 5,
+                    "default": 2,
+                    "description": "Maximum retry attempts before triggering BugGenie"
+                },
+                "selfHealingEnabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable self-healing between retry attempts"
+                },
+                "timeout": {
+                    "type": "object",
+                    "description": "Timeout settings in milliseconds",
+                    "properties": {
+                        "test": {
+                            "type": "number",
+                            "default": 60000,
+                            "description": "Per-test timeout"
+                        },
+                        "action": {
+                            "type": "number",
+                            "default": 15000,
+                            "description": "Per-action timeout (click, fill, etc.)"
+                        },
+                        "navigation": {
+                            "type": "number",
+                            "default": 30000,
+                            "description": "Page navigation timeout"
+                        },
+                        "expect": {
+                            "type": "number",
+                            "default": 10000,
+                            "description": "Assertion timeout"
+                        }
+                    }
+                },
+                "retryStrategy": {
+                    "type": "object",
+                    "properties": {
+                        "delayBetweenRetries": {
+                            "type": "number",
+                            "default": 5000,
+                            "description": "Delay between retries in milliseconds"
+                        },
+                        "captureSnapshotOnFailure": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Capture screenshot/snapshot on failure"
+                        },
+                        "analyzeErrorBeforeRetry": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Analyze error to inform self-healing"
+                        }
+                    }
+                },
+                "reporters": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "list",
+                            "line",
+                            "dot",
+                            "html",
+                            "json",
+                            "junit",
+                            "allure"
+                        ]
+                    },
+                    "default": [
+                        "list",
+                        "html"
+                    ],
+                    "description": "Playwright reporters to use"
+                },
+                "headless": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Run browser in headless mode"
+                },
+                "workers": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "default": 1,
+                    "description": "Number of parallel workers"
+                }
+            }
+        },
+        "bugGenie": {
+            "type": "object",
+            "description": "BugGenie auto-trigger configuration",
+            "properties": {
+                "autoTrigger": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically invoke BugGenie after max failures"
+                },
+                "triggerAfterFailures": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 5,
+                    "default": 2,
+                    "description": "Number of failures before triggering BugGenie"
+                },
+                "includeContext": {
+                    "type": "object",
+                    "description": "Context to include in bug reports",
+                    "properties": {
+                        "errorMessages": {
+                            "type": "boolean",
+                            "default": true
+                        },
+                        "screenshots": {
+                            "type": "boolean",
+                            "default": true
+                        },
+                        "domSnapshots": {
+                            "type": "boolean",
+                            "default": true
+                        },
+                        "networkLogs": {
+                            "type": "boolean",
+                            "default": true
+                        },
+                        "consoleErrors": {
+                            "type": "boolean",
+                            "default": true
+                        },
+                        "selfHealingAttempts": {
+                            "type": "boolean",
+                            "default": true
+                        }
+                    }
+                },
+                "suggestRootCause": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Include AI-suggested root cause analysis"
+                }
+            }
+        },
+        "environments": {
+            "type": "object",
+            "description": "Environment-specific configurations",
+            "additionalProperties": {
+                "type": "object",
+                "properties": {
+                    "baseUrl": {
+                        "type": "string",
+                        "format": "uri",
+                        "description": "Base URL for this environment"
+                    },
+                    "testDataSource": {
+                        "type": "string",
+                        "description": "Path to test data file"
+                    },
+                    "tokenPath": {
+                        "type": "string",
+                        "description": "Path to user tokens in test data"
+                    },
+                    "defaultMLS": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Default MLS for this environment"
+                    },
+                    "readOnly": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "If true, only read operations allowed"
+                    }
+                }
+            }
+        },
+        "testData": {
+            "type": "object",
+            "description": "Test data configurations by MLS",
+            "additionalProperties": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "mls": {
+                        "type": "string"
+                    },
+                    "environment": {
+                        "type": "string"
+                    },
+                    "tokenKey": {
+                        "type": "string"
+                    },
+                    "features": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "qualityGates": {
+            "type": "object",
+            "description": "Quality gate configurations per stage",
+            "additionalProperties": {
+                "type": "object",
+                "properties": {
+                    "required": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "validation": {
+                        "type": "object"
+                    }
+                }
+            }
+        },
+        "logging": {
+            "type": "object",
+            "description": "Logging configuration",
+            "properties": {
+                "level": {
+                    "type": "string",
+                    "enum": [
+                        "debug",
+                        "info",
+                        "warn",
+                        "error"
+                    ],
+                    "default": "info"
+                },
+                "includeTimestamps": {
+                    "type": "boolean",
+                    "default": true
+                },
+                "saveToFile": {
+                    "type": "boolean",
+                    "default": true
+                },
+                "logPath": {
+                    "type": "string"
+                },
+                "retainDays": {
+                    "type": "number",
+                    "minimum": 1,
+                    "default": 7
+                }
+            }
+        },
+        "cleanup": {
+            "type": "object",
+            "description": "Automatic cleanup configuration for temporary files",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable automatic cleanup of temp files"
+                },
+                "autoCleanOnComplete": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically clean temp files when workflow completes"
+                },
+                "tempFilePatterns": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "File patterns to delete (use {ticketId} placeholder)"
+                },
+                "tempDirectoryPatterns": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "Directory patterns to clean (use {ticketId} placeholder)"
+                },
+                "preserveArtifacts": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "Artifact patterns to preserve (never delete)"
+                }
+            }
+        },
+        "metrics": {
+            "type": "object",
+            "description": "Metrics tracking configuration",
+            "properties": {
+                "track": {
+                    "type": "boolean",
+                    "default": true
+                },
+                "metricsPath": {
+                    "type": "string"
+                },
+                "collect": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "totalWorkflows",
+                            "successRate",
+                            "averageDuration",
+                            "firstRunPassRate",
+                            "selfHealingSuccessRate",
+                            "bugGenieInvocations"
+                        ]
+                    }
+                }
+            }
+        }
+    }
+}

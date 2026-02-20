@@ -1,0 +1,811 @@
+﻿{
+    "$schema": "./workflow-config.schema.json",
+    "version": "2.0.0",
+    "name": "Jira to Automation Pipeline",
+    "description": "Configuration for reliable, consistent workflow execution",
+    "projectPaths": {
+        "_comment": "All paths are relative to the host project root. Override via .env or environment variables.",
+        "specsDir": "tests/specs",
+        "pageObjectsDir": "tests/pageobjects",
+        "configDir": "tests/config",
+        "testDataFile": "tests/test-data/testData.js",
+        "businessFunctionsDir": "tests/business-functions",
+        "utilsDir": "tests/utils",
+        "enumsDir": "tests/enums",
+        "importPrefix": "../../",
+        "frameworkMode": "auto"
+    },
+    "jira": {
+        "_comment": "Override these via .env: JIRA_CLOUD_ID, JIRA_BASE_URL, JIRA_PROJECT_KEY",
+        "cloudId": "<your-cloud-id>",
+        "defaultProject": {
+            "key": "<PROJECT_KEY>",
+            "name": "<Project Name>",
+            "id": "<project-id>"
+        },
+        "issueTypes": {
+            "bug": "Bug",
+            "story": "Story",
+            "task": "Task",
+            "spike": "Spike",
+            "test": "Test"
+        },
+        "baseUrl": "https://<your-org>.atlassian.net"
+    },
+    "reliability": {
+        "targetPassRate": 95,
+        "currentPassRate": 75,
+        "lastUpdated": "2026-01-28"
+    },
+    "pipeline": {
+        "stages": [
+            "testgenie",
+            "scriptgenerator",
+            "execute",
+            "report"
+        ],
+        "enforceSequence": true,
+        "allowSkip": false
+    },
+    "preflightChecks": {
+        "enabled": true,
+        "timeout": 30000,
+        "checks": [
+            {
+                "id": "mcp-available",
+                "name": "Playwright MCP Available",
+                "type": "mcp",
+                "required": true,
+                "validation": "unified_tabs",
+                "errorMessage": "Playwright MCP is not active. Please ensure MCP server is running.",
+                "recoveryAction": "activate_browser_navigation_tools"
+            },
+            {
+                "id": "jira-accessible",
+                "name": "Jira API Accessible",
+                "type": "api",
+                "required": true,
+                "validation": "mcp_atlassian_atl_getAccessibleAtlassianResources",
+                "errorMessage": "Cannot access Jira. Please check authentication."
+            },
+            {
+                "id": "uat-reachable",
+                "name": "UAT Environment Reachable",
+                "type": "network",
+                "required": true,
+                "url": "${UAT_URL}",
+                "timeout": 15000,
+                "errorMessage": "UAT environment is not reachable."
+            },
+            {
+                "id": "test-data-valid",
+                "name": "Test Data Tokens Valid",
+                "type": "file",
+                "required": true,
+                "path": "tests/test-data/testData.js",
+                "errorMessage": "Test data file not found or invalid."
+            }
+        ]
+    },
+    "mcpExploration": {
+        "mandatory": true,
+        "enforceBeforeScriptGeneration": true,
+        "blockScriptCreationWithoutExploration": true,
+        "orchestratorMustNeverCreateSpecFiles": true,
+        "orchestratorMustInvokeScriptgeneratorSubagent": true,
+        "snapshotRequired": true,
+        "minSnapshotsBeforeGeneration": 1,
+        "explorationSequence": {
+            "description": "MANDATORY steps that MUST be executed BEFORE creating any .spec.js file",
+            "steps": [
+                {
+                    "order": 1,
+                    "action": "mcp_unified-autom_unified_navigate",
+                    "description": "Open browser and navigate to application URL",
+                    "required": true
+                },
+                {
+                    "order": 2,
+                    "action": "mcp_unified-autom_unified_snapshot",
+                    "description": "Capture initial page accessibility tree snapshot",
+                    "required": true
+                },
+                {
+                    "order": 3,
+                    "action": "login-if-required",
+                    "description": "Login using unified_type and unified_click",
+                    "required": "conditional"
+                },
+                {
+                    "order": 4,
+                    "action": "navigate-to-target",
+                    "description": "Navigate to the page being tested",
+                    "required": true
+                },
+                {
+                    "order": 5,
+                    "action": "mcp_unified-autom_unified_snapshot",
+                    "description": "Capture target feature/element snapshot",
+                    "required": true
+                },
+                {
+                    "order": 6,
+                    "action": "semantic-selector-validation",
+                    "description": "Validate key elements with get_by_role / get_by_test_id / get_by_label / get_by_text — confirms elements exist and captures exact accessible names",
+                    "tools": [
+                        "unified_get_by_role",
+                        "unified_get_by_test_id",
+                        "unified_get_by_label",
+                        "unified_get_by_text"
+                    ],
+                    "required": true,
+                    "enforcedBy": "enforcement-hooks.js → mcpSelectorValidated"
+                },
+                {
+                    "order": 7,
+                    "action": "element-state-verification",
+                    "description": "Check element states with is_visible / is_enabled / is_checked to verify interactability",
+                    "tools": [
+                        "unified_is_visible",
+                        "unified_is_enabled",
+                        "unified_is_checked",
+                        "unified_is_hidden"
+                    ],
+                    "required": "recommended",
+                    "enforcedBy": "enforcement-hooks.js → mcpStateChecked"
+                },
+                {
+                    "order": 8,
+                    "action": "content-extraction",
+                    "description": "Extract REAL text/attribute values for assertions using get_text_content / get_attribute / get_input_value",
+                    "tools": [
+                        "unified_get_text_content",
+                        "unified_get_attribute",
+                        "unified_get_inner_text",
+                        "unified_get_input_value"
+                    ],
+                    "required": true,
+                    "enforcedBy": "enforcement-hooks.js → mcpContentExtracted"
+                },
+                {
+                    "order": 9,
+                    "action": "navigation-state-verification",
+                    "description": "Verify URL patterns with get_page_url / expect_url after navigation",
+                    "tools": [
+                        "unified_get_page_url",
+                        "unified_expect_url",
+                        "unified_get_page_title",
+                        "unified_expect_title"
+                    ],
+                    "required": "recommended",
+                    "enforcedBy": "enforcement-hooks.js → mcpUrlVerified"
+                },
+                {
+                    "order": 10,
+                    "action": "assertion-pre-validation",
+                    "description": "Use MCP expect_* tools to pre-validate assertions BEFORE writing them into the script — catches mismatches during exploration",
+                    "tools": [
+                        "unified_expect_element_text",
+                        "unified_expect_url",
+                        "unified_expect_title",
+                        "unified_verify_text_visible"
+                    ],
+                    "required": "recommended",
+                    "enforcedBy": "enforcement-hooks.js → mcpAssertionVerified"
+                }
+            ],
+            "onlyAfterAllStepsComplete": "create .spec.js file"
+        },
+        "checkpoints": [
+            {
+                "id": "browser-launched",
+                "description": "Browser must be launched via MCP",
+                "validation": "page object exists"
+            },
+            {
+                "id": "page-navigated",
+                "description": "Target URL must be loaded",
+                "validation": "URL matches expected pattern"
+            },
+            {
+                "id": "snapshot-captured",
+                "description": "DOM snapshot must be captured",
+                "validation": "snapshot contains elements"
+            },
+            {
+                "id": "selectors-extracted",
+                "description": "Selectors must be extracted from snapshot",
+                "validation": "selector count > 0"
+            }
+        ],
+        "fallbackStrategy": {
+            "enabled": true,
+            "maxRetries": 2,
+            "retryDelay": 3000
+        },
+        "explorationDataSchema": {
+            "description": "Required schema for exploration-data/{ticketId}-exploration.json — enforced by quality-gates.js",
+            "requiredFields": [
+                "source",
+                "snapshots",
+                "ticketId",
+                "timestamp"
+            ],
+            "sourceAllowedValues": [
+                "mcp-live-snapshot",
+                "mcp-snapshot"
+            ],
+            "sourceRejectedValues": [
+                "web-fetch-exploration"
+            ],
+            "minSnapshots": 1,
+            "snapshotRequiredFields": [
+                "url",
+                "elements"
+            ],
+            "elementRequiredFields": [
+                "ref",
+                "role",
+                "name"
+            ]
+        },
+        "mcpFirstArchitecture": {
+            "description": "ScriptGenerator's FIRST tool call must be MCP navigate — no file reads or web fetches first",
+            "firstToolCall": "mcp_unified-autom_unified_navigate",
+            "secondToolCall": "mcp_unified-autom_unified_snapshot",
+            "failurePolicy": "stop-and-report",
+            "neverFallBackTo": [
+                "web-fetch",
+                "fetch_webpage",
+                "guessed-selectors"
+            ]
+        }
+    },
+    "browserConfig": {
+        "ensureFreshState": true,
+        "closeExistingTabsBeforeExploration": true,
+        "description": "CRITICAL: Always start with fresh browser state to avoid interference from old tabs",
+        "cleanupSteps": [
+            "list-all-tabs",
+            "close-tabs-reverse-order",
+            "create-fresh-tab"
+        ],
+        "headlessExploration": false,
+        "headedExecution": true
+    },
+    "mcpStrategy": {
+        "version": "2.1",
+        "description": "Hybrid MCP strategy - Playwright for initial exploration, Chrome DevTools for failure recovery",
+        "freshBrowserRequired": true,
+        "initialExploration": {
+            "provider": "playwright",
+            "freshBrowserFirst": true,
+            "tools": [
+                "unified_tabs",
+                "unified_navigate",
+                "unified_snapshot",
+                "unified_click",
+                "unified_type"
+            ],
+            "capabilities": [
+                "fast-navigation",
+                "accessibility-snapshots",
+                "role-based-selectors"
+            ],
+            "useFor": [
+                "initial-exploration",
+                "page-navigation",
+                "element-discovery"
+            ],
+            "preExplorationSteps": [
+                "close-all-existing-tabs",
+                "create-fresh-browser-context"
+            ]
+        },
+        "failureRecovery": {
+            "provider": "chromeDevTools",
+            "triggerOn": "firstTestFailure",
+            "mandatory": true,
+            "description": "CRITICAL: When tests fail, MUST use Chrome DevTools MCP for self-healing",
+            "tools": [
+                "unified_evaluate_script",
+                "unified_snapshot",
+                "unified_click",
+                "unified_navigate",
+                "unified_wait_for",
+                "unified_performance_analyze"
+            ],
+            "capabilities": [
+                "evaluate_script",
+                "dynamic-selector-discovery",
+                "self-healing-locators",
+                "network-request-inspection",
+                "performance-analysis",
+                "console-message-capture"
+            ],
+            "useFor": [
+                "selector-healing",
+                "dynamic-element-detection",
+                "debugging",
+                "performance-issues"
+            ],
+            "selfHealing": {
+                "enabled": true,
+                "strategies": [
+                    {
+                        "name": "attribute-fallback",
+                        "description": "Find element by alternative attributes when primary selector fails",
+                        "script": "(selector) => { const el = document.querySelector(selector); if (!el) { return Array.from(document.querySelectorAll('*')).find(e => e.textContent.includes(selector.replace(/[\\[\\]'\"=]/g, ''))); } return el; }"
+                    },
+                    {
+                        "name": "parent-child-traverse",
+                        "description": "Navigate DOM tree to find element relative to known parent",
+                        "script": "(parentSelector, childText) => { const parent = document.querySelector(parentSelector); return parent?.querySelector(`*:contains(${childText})`); }"
+                    },
+                    {
+                        "name": "xpath-fallback",
+                        "description": "Use XPath when CSS selectors fail",
+                        "script": "(text) => { return document.evaluate(`//*[contains(text(),'${text}')]`, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue; }"
+                    }
+                ],
+                "maxHealingAttempts": 3
+            }
+        },
+        "switchConditions": {
+            "switchToDevToolsWhen": [
+                "test-execution-fails",
+                "selector-not-found",
+                "element-not-interactable",
+                "timeout-waiting-for-element",
+                "dynamic-content-not-loaded"
+            ],
+            "stayWithPlaywrightWhen": [
+                "initial-exploration",
+                "all-tests-passing",
+                "static-content-pages"
+            ]
+        },
+        "integrationFlow": {
+            "phase1_exploration": {
+                "provider": "playwright",
+                "actions": [
+                    "navigate",
+                    "capture-snapshot",
+                    "extract-selectors",
+                    "generate-script"
+                ]
+            },
+            "phase2_firstExecution": {
+                "provider": "playwright",
+                "actions": [
+                    "run-generated-script",
+                    "capture-results"
+                ]
+            },
+            "phase3_failureRecovery": {
+                "provider": "chromeDevTools",
+                "triggerCondition": "phase2_firstExecution.failed",
+                "actions": [
+                    "analyze-failure-reason",
+                    "capture-dom-with-evaluate-script",
+                    "discover-alternative-selectors",
+                    "apply-self-healing",
+                    "update-script-selectors",
+                    "re-execute-tests"
+                ]
+            },
+            "phase4_validation": {
+                "provider": "either",
+                "actions": [
+                    "verify-all-tests-pass",
+                    "generate-report"
+                ]
+            }
+        }
+    },
+    "selectorStrategy": {
+        "_note": "Unified priority order — aligned with SelectorEngine (mcp-server/utils/selector-engine.js). All consumers (bridge, script generator, exploration runner) use SelectorEngine as the single source of truth.",
+        "priority": [
+            {
+                "rank": 1,
+                "type": "data-testid",
+                "reliability": 5,
+                "stabilityScore": 10,
+                "pattern": "page.getByTestId('...')",
+                "cssPattern": "[data-testid='...']",
+                "description": "Most stable — explicitly added for testing. Also covers data-test-id and data-qa."
+            },
+            {
+                "rank": 2,
+                "type": "role+name",
+                "reliability": 5,
+                "stabilityScore": 9,
+                "pattern": "page.getByRole('button', { name: '...' })",
+                "description": "Semantic ARIA role + accessible name — Playwright recommended, auto-waits"
+            },
+            {
+                "rank": 3,
+                "type": "id",
+                "reliability": 4,
+                "stabilityScore": 8,
+                "pattern": "page.locator('#stable-id')",
+                "description": "HTML ID — only used when NOT dynamic (auto-generated IDs are rejected)"
+            },
+            {
+                "rank": 4,
+                "type": "aria-label",
+                "reliability": 4,
+                "stabilityScore": 7,
+                "pattern": "page.locator('[aria-label=\"...\"]')",
+                "description": "ARIA label — stable accessibility attribute"
+            },
+            {
+                "rank": 5,
+                "type": "label",
+                "reliability": 4,
+                "stabilityScore": 6,
+                "pattern": "page.getByLabel('...')",
+                "description": "Associated <label> for form inputs"
+            },
+            {
+                "rank": 6,
+                "type": "placeholder",
+                "reliability": 3,
+                "stabilityScore": 6,
+                "pattern": "page.getByPlaceholder('...')",
+                "description": "Input placeholder text"
+            },
+            {
+                "rank": 7,
+                "type": "alt-text",
+                "reliability": 3,
+                "stabilityScore": 6,
+                "pattern": "page.getByAltText('...')",
+                "description": "Image alt text"
+            },
+            {
+                "rank": 8,
+                "type": "title",
+                "reliability": 3,
+                "stabilityScore": 5,
+                "pattern": "page.getByTitle('...')",
+                "description": "Title attribute"
+            },
+            {
+                "rank": 9,
+                "type": "text-content",
+                "reliability": 3,
+                "stabilityScore": 4,
+                "pattern": "page.getByText('...', { exact: true })",
+                "description": "Visible text — only when stable (dynamic text uses regex variant)"
+            },
+            {
+                "rank": 10,
+                "type": "composite",
+                "reliability": 3,
+                "stabilityScore": 3,
+                "pattern": "page.locator('[data-testid=\"parent\"]').getByRole('button', { name: '...' })",
+                "description": "Parent-scoped chained selector — used when no single attribute is unique"
+            },
+            {
+                "rank": 11,
+                "type": "nth-index",
+                "reliability": 2,
+                "stabilityScore": 2,
+                "pattern": "page.getByRole('button', { name: '...' }).nth(0)",
+                "description": "Positional index — last resort, fragile to DOM reordering"
+            }
+        ],
+        "dynamicIdPatterns": [
+            "UUID: /[0-9a-f]{8}-[0-9a-f]{4}/",
+            "React: /^:r[0-9a-z]+:/",
+            "MUI/CSS-in-JS: /^(mui|css|jss|sc)-[a-z0-9]{4,}/",
+            "Numeric-heavy: digits > alphas"
+        ],
+        "dynamicTextPatterns": [
+            "Dates: /\\d{1,2}[\\/\\-\\.]\\d{1,2}/",
+            "Prices: /\\$[\\d,]+/",
+            "Counts: /\\d+ results?/",
+            "Relative time: /\\d+ (minutes?|hours?|days?) ago/"
+        ],
+        "validation": {
+            "requireFallback": true,
+            "minReliabilityScore": 3,
+            "warnOnLowReliability": true,
+            "validateUniqueness": true,
+            "rejectBrokenPatterns": [
+                "[data-mcp-ref=",
+                "[data-ref=",
+                "getByTestId('s1e"
+            ]
+        }
+    },
+    "testExecution": {
+        "maxIterations": 2,
+        "selfHealingEnabled": true,
+        "timeout": {
+            "test": 60000,
+            "action": 15000,
+            "navigation": 30000,
+            "expect": 10000
+        },
+        "retryStrategy": {
+            "delayBetweenRetries": 5000,
+            "captureSnapshotOnFailure": true,
+            "analyzeErrorBeforeRetry": true
+        },
+        "reporters": [
+            "list",
+            "html"
+        ],
+        "headless": false,
+        "workers": 1
+    },
+    "bugGenie": {
+        "autoTrigger": true,
+        "triggerAfterFailures": 2,
+        "includeContext": {
+            "errorMessages": true,
+            "screenshots": true,
+            "domSnapshots": true,
+            "networkLogs": true,
+            "consoleErrors": true,
+            "selfHealingAttempts": true
+        },
+        "suggestRootCause": true
+    },
+    "environments": {
+        "UAT": {
+            "_comment": "Override via .env: UAT_URL",
+            "baseUrl": "https://<your-app-uat>.example.com",
+            "testDataSource": "tests/test-data/testData.js",
+            "tokenPath": "userTokensUAT",
+            "defaultMLS": "canopy"
+        },
+        "PROD": {
+            "_comment": "Override via .env: PROD_URL",
+            "baseUrl": "https://<your-app>.example.com",
+            "testDataSource": "tests/test-data/testData.js",
+            "tokenPath": "userTokensPROD",
+            "defaultMLS": null,
+            "readOnly": true
+        }
+    },
+    "testData": {
+        "canopy": {
+            "name": "Canopy UAT",
+            "mls": "canopy",
+            "environment": "UAT",
+            "tokenKey": "userTokensUAT.canopy",
+            "features": [
+                "roomvo",
+                "onehome-search",
+                "saved-searches"
+            ]
+        },
+        "yesmls": {
+            "name": "YES MLS UAT",
+            "mls": "yesmls",
+            "environment": "UAT",
+            "tokenKey": "userTokensUAT.yesmls",
+            "features": [
+                "basic-search"
+            ]
+        }
+    },
+    "qualityGates": {
+        "stage1_testgenie": {
+            "required": [
+                "excel-file-exists",
+                "excel-has-test-cases"
+            ],
+            "validation": {
+                "minTestCases": 1,
+                "minTestSteps": 3,
+                "requireExpectedResults": true
+            }
+        },
+        "stage2_scriptgenerator": {
+            "required": [
+                "mcp-exploration-complete",
+                "script-file-exists",
+                "framework-compliant"
+            ],
+            "validation": {
+                "mcpSnapshotRequired": true,
+                "minLines": 50,
+                "maxLines": 300,
+                "requireImports": [
+                    "POmanager",
+                    "launchBrowser",
+                    "testData"
+                ],
+                "forbiddenPatterns": [
+                    "hardcoded-url",
+                    "hardcoded-token",
+                    "manual-browser-launch"
+                ]
+            }
+        },
+        "stage3_execute": {
+            "required": [
+                "tests-run"
+            ],
+            "validation": {
+                "timeout": 120000,
+                "captureArtifactsOnFailure": true
+            }
+        }
+    },
+    "logging": {
+        "level": "info",
+        "includeTimestamps": true,
+        "saveToFile": true,
+        "logPath": ".github/agents/state/workflow-logs/",
+        "retainDays": 7
+    },
+    "cleanup": {
+        "enabled": true,
+        "autoCleanOnComplete": true,
+        "tempFilePatterns": [
+            "generate-{ticketId}-testcases.js",
+            "{ticketId}-temp.js",
+            "{ticketId}-exploration-temp.json",
+            "{ticketId}-selectors-temp.json",
+            "{ticketId}-mcp-session.json"
+        ],
+        "tempDirectoryPatterns": [
+            "exploration-data/{ticketId}-*-temp.*",
+            "test-artifacts/{ticketId}-temp.*",
+            "tests/specs/{ticketId}/README.md",
+            "tests/specs/{ticketId}/TEST-EXECUTION-SUMMARY.md"
+        ],
+        "preserveArtifacts": [
+            "test-cases/{ticketId}.xlsx",
+            "tests/specs/{ticketId}/*.spec.js",
+            "exploration-data/{ticketId}-exploration.json"
+        ]
+    },
+    "metrics": {
+        "track": true,
+        "metricsPath": ".github/agents/state/workflow-metrics.json",
+        "collect": [
+            "totalWorkflows",
+            "successRate",
+            "averageDuration",
+            "firstRunPassRate",
+            "selfHealingSuccessRate",
+            "bugGenieInvocations"
+        ]
+    },
+    "sdk": {
+        "_comment": "Copilot SDK Orchestrator configuration — enables programmatic pipeline control",
+        "enabled": true,
+        "model": "claude-sonnet-4",
+        "maxHealingIterations": 3,
+        "parallelTickets": 1,
+        "enableLearning": true,
+        "learningStorePath": "agentic-workflow/learning-data/learning-store.json",
+        "provider": null,
+        "coordinator": {
+            "_comment": "AI Orchestration Layer — smart routing, agent collaboration, and supervisor oversight",
+            "enableSmartRouting": true,
+            "enableSupervisor": false,
+            "_supervisorNote": "Supervisor adds ~19 extra LLM calls per pipeline run (2 per stage + final summary). Enable only when debugging pipeline quality issues.",
+            "parallelCodeReview": true,
+            "maxMiniSessions": 5,
+            "supervisorTimeout": 90000,
+            "escalationStrategy": "regenerate",
+            "contextStore": {
+                "persist": true,
+                "maxEntries": 500,
+                "persistDir": "agentic-workflow/test-artifacts/context-stores"
+            }
+        },
+        "timeouts": {
+            "testgenie": 300000,
+            "scriptgenerator": 600000,
+            "buggenie": 180000,
+            "execution": 180000,
+            "healing": 300000,
+            "supervisor": 90000
+        },
+        "hooks": {
+            "enforceMCPFirst": true,
+            "autoValidateScripts": true,
+            "blockWaitForTimeout": true,
+            "blockNonRetryingAssertions": true
+        },
+        "mcpServer": {
+            "type": "local",
+            "command": "node",
+            "args": [
+                "agentic-workflow/mcp-server/server.js"
+            ],
+            "env": {}
+        },
+        "modes": {
+            "full": [
+                "preflight",
+                "testgenie",
+                "qg_excel",
+                "scriptgenerator",
+                "qg_script",
+                "execute",
+                "healing",
+                "buggenie",
+                "report"
+            ],
+            "generate": [
+                "preflight",
+                "scriptgenerator",
+                "qg_script",
+                "execute",
+                "healing",
+                "report"
+            ],
+            "heal": [
+                "execute",
+                "healing",
+                "report"
+            ],
+            "execute": [
+                "execute",
+                "report"
+            ]
+        },
+        "server": {
+            "_comment": "Headless HTTP/SSE pipeline server configuration",
+            "port": 3100,
+            "corsOrigins": [
+                "http://localhost:*",
+                "https://*.github.io"
+            ],
+            "maxConcurrentRuns": 3,
+            "maxStoredRuns": 200,
+            "sseHeartbeatMs": 15000
+        },
+        "notifications": {
+            "_comment": "Multi-channel notification settings for pipeline events",
+            "enabled": false,
+            "channels": {
+                "slack": {
+                    "enabled": false,
+                    "webhookUrlEnv": "SLACK_WEBHOOK_URL",
+                    "events": [
+                        "pipeline_complete",
+                        "pipeline_failed",
+                        "tests_failed",
+                        "bug_filed"
+                    ]
+                },
+                "teams": {
+                    "enabled": false,
+                    "webhookUrlEnv": "TEAMS_WEBHOOK_URL",
+                    "events": [
+                        "pipeline_complete",
+                        "pipeline_failed"
+                    ]
+                },
+                "console": {
+                    "enabled": true,
+                    "events": [
+                        "pipeline_complete",
+                        "pipeline_failed",
+                        "self_heal_success",
+                        "self_heal_failed"
+                    ]
+                }
+            }
+        },
+        "webhooks": {
+            "_comment": "Incoming webhook configuration for auto-triggering pipelines",
+            "jira": {
+                "enabled": false,
+                "triggerOnStatus": "Ready for QA",
+                "defaultMode": "full",
+                "secretEnv": "JIRA_WEBHOOK_SECRET"
+            }
+        }
+    }
+}

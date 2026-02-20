@@ -1,0 +1,149 @@
+# Nightly Regression — Scheduled pipeline for regression test suites
+# Runs all existing test specs against UAT environment
+name: Nightly Regression
+
+on:
+  schedule:
+    # Run at 2:00 AM UTC, Monday through Friday
+    - cron: '0 2 * * 1-5'
+
+  workflow_dispatch:
+    inputs:
+      spec_pattern:
+        description: 'Glob pattern for test specs (default: all specs)'
+        required: false
+        default: 'tests/specs/**/*.spec.js'
+        type: string
+      environment:
+        description: 'Target environment'
+        required: false
+        default: 'uat'
+        type: choice
+        options:
+          - uat
+          - int
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '18'
+  WORKING_DIR: agentic-workflow
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.WORKING_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIR }}
+        run: npm ci --prefer-offline
+
+      - name: Install Playwright browsers
+        working-directory: ${{ env.WORKING_DIR }}
+        run: npx playwright install --with-deps chromium
+
+      - name: Run regression tests (shard ${{ matrix.shard }}/2)
+        working-directory: ${{ env.WORKING_DIR }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UAT_URL: ${{ secrets.UAT_URL }}
+          INT_URL: ${{ secrets.INT_URL }}
+          MCP_HEADLESS: 'true'
+          CI: 'true'
+          HEADLESS: 'true'
+        run: |
+          SPEC_PATTERN="${{ github.event.inputs.spec_pattern || 'tests/specs/**/*.spec.js' }}"
+
+          npx playwright test \
+            --config=playwright.config.js \
+            --shard=${{ matrix.shard }}/2 \
+            --reporter=json,html \
+            --output=test-results/shard-${{ matrix.shard }} \
+            "$SPEC_PATTERN" || true
+
+      - name: Upload shard results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-shard-${{ matrix.shard }}-${{ github.run_number }}
+          path: |
+            agentic-workflow/test-results/
+          retention-days: 14
+
+  merge-results:
+    needs: regression
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: regression-shard-*
+          path: merged-results
+          merge-multiple: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Merge and summarize results
+        run: |
+          echo "## 🧪 Nightly Regression Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ github.event.inputs.environment || 'uat' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Shards | 2 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered | $(date -u '+%Y-%m-%d %H:%M UTC') |" >> $GITHUB_STEP_SUMMARY
+
+          # Count JSON result files
+          TOTAL_FILES=$(find merged-results -name "*.json" 2>/dev/null | wc -l)
+          echo "| Result files | $TOTAL_FILES |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload merged results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-full-${{ github.run_number }}
+          path: merged-results/
+          retention-days: 30
+
+      - name: Notify on failure
+        if: needs.regression.result == 'failure'
+        run: |
+          if [ -n "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            curl -s -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+              -H 'Content-Type: application/json' \
+              -d "{
+                \"text\": \"❌ Nightly regression failed\",
+                \"blocks\": [{
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*❌ Nightly Regression Failed*\n\nEnv: ${{ github.event.inputs.environment || 'uat' }}\nRun: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>\"
+                  }
+                }]
+              }"
+          fi

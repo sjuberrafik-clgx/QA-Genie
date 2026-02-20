@@ -1,0 +1,69 @@
+================================================================
+                AOTF UAT - TEST EXECUTION SUMMARY
+================================================================
+
+Test Suite: Major Functionality Tests
+App URL: https://aotf-uat.corelogic.com
+Total Tests: 10
+Duration: ~9.6 minutes
+
+RESULTS:
+✓ Passed: 2/10 (20%)
+✗ Failed: 8/10 (80%)
+
+PASSED TESTS:
+--------------
+✓ TC001 - Page Load and Welcome Dialog (7.0s)
+✓ TC010 - Map View Loads 
+
+FAILED TESTS:
+-------------
+✗ TC002 - Navigation Menu Visibility
+   - Issue: Elements not visible after dialog dismissal
+   
+✗ TC003 - Property Search Filters  
+   - Issue: Filter buttons not found/visible
+   
+✗ TC004 - Home Types Filter Interaction
+   - Issue: Filter panel interaction timeout
+   
+✗ TC005 - Price Filter Interaction
+   - Issue: Filter panel interaction timeout
+   
+✗ TC006 - Beds and Baths Filter
+   - Issue: Filter interaction timeout
+   
+✗ TC007 - Save Search Functionality
+   - Issue: Button visibility timeout
+   
+✗ TC008 - Clear Filters Functionality
+   - Issue: Button not found
+   
+✗ TC009 - My Properties Navigation
+   - Issue: Link not visible
+
+KEY FINDINGS:
+-------------
+1. ✓ Application loads successfully
+2. ✓ Welcome dialog appears and can be dismissed
+3. ✓ Map view renders correctly
+4. ✗ Most UI elements have timing/loading issues
+5. ✗ Navigation elements may load asynchronously
+6. ✗ Filter interactions timeout (30+ seconds)
+
+RECOMMENDATIONS:
+----------------
+1. Increase wait timeouts for UI element loading
+2. Add explicit wait for navigation menu to load
+3. Investigate filter panel loading delays
+4. Consider using network idle wait strategy
+5. Add retry logic with longer waits
+
+ARTIFACTS GENERATED:
+--------------------
+- Test Report: playwright-report/index.html
+- Screenshots: tests/screenshots/
+- Failure Videos: test-results/*/video.webm
+- Test Script: tests/aotf-major-functionality.spec.js
+
+================================================================

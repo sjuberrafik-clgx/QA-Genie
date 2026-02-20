@@ -1,0 +1,41 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Root .gitignore — QA Dashboard + Agentic Workflow
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Dependencies ─────────────────────────────────────────────────────────────
+node_modules/
+
+# ─── Environment / Secrets ────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ─── Test Output ──────────────────────────────────────────────────────────────
+test-results/
+playwright-report/
+my-report/
+allure-results/
+*.mp4
+*.webm
+
+# ─── Build Artifacts ─────────────────────────────────────────────────────────
+.next/
+out/
+dist/
+build/
+
+# ─── IDE / OS ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+*.code-workspace
+
+# ─── Agentic Workflow Runtime ─────────────────────────────────────────────────
+agentic-workflow/test-results/
+agentic-workflow/test-artifacts/
+agentic-workflow/learning-data/
+
+# ─── Playwright Cache ────────────────────────────────────────────────────────
+blob-report/

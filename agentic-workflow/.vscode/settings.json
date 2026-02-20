@@ -1,0 +1,34 @@
+{
+  // VS Code 1.107 Multi-Agent Orchestration Settings
+  // Enable custom agents as subagents (Experimental)
+  "chat.customAgentInSubagent.enabled": true,
+  // Enable Agent Skills (NEW - Progressive Disclosure)
+  "chat.useAgentSkills": true,
+  // Enable custom agents with background agents (Experimental)
+  "github.copilot.chat.cli.customAgents.enabled": true,
+  // Enable agent sessions view integration
+  "chat.viewSessions.enabled": true,
+  // Configure session view orientation (auto/stacked/sideBySide)
+  "chat.viewSessions.orientation": "stacked",
+  // Show organization and enterprise agents (if applicable)
+  "github.copilot.chat.customAgents.showOrganizationAndEnterpriseAgents": true,
+  // Configure tool auto-approval eligibility (security)
+  // Enabled for fully automated orchestrated workflows
+  "chat.tools.eligibleForAutoApproval": [
+    "readFile",
+    "fileSearch",
+    "textSearch",
+    "listDirectory",
+    "codebase",
+    "edit",
+    "create",
+    "runCommands",
+    "playwright/*",
+    "atlassian/*",
+    "unified-automation-mcp/*"
+  ],
+  // Auto-approve terminal commands in orchestrated workflows
+  "chat.tools.terminal.autoApprove": true,
+  // Enable automatic test execution
+  "chat.tools.runTests.autoApprove": true
+}

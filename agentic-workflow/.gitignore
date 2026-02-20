@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+mcp-server/node_modules/
+
+# Environment (contains secrets)
+.env
+
+# Test output artifacts
+test-results/
+my-report/
+playwright-report/
+allure-results/
+
+# Workflow runtime state (regenerated each run)
+.github/agents/state/*.json
+!.github/agents/state/.gitignore
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# IDE
+*.swp
+*.swo

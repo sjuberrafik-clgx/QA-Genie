@@ -1,0 +1,169 @@
+# QA Automation Pipeline — Manual Dispatch + Issue Comment Trigger
+# Runs the SDK orchestrator pipeline for a specific Jira ticket
+name: QA Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticketId:
+        description: 'Jira ticket ID (e.g., AOTF-12345)'
+        required: true
+        type: string
+      mode:
+        description: 'Pipeline mode'
+        required: false
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - generate
+          - heal
+          - execute
+      environment:
+        description: 'Target environment'
+        required: false
+        default: 'uat'
+        type: choice
+        options:
+          - uat
+          - int
+          - prod
+      verbose:
+        description: 'Enable verbose logging'
+        required: false
+        default: false
+        type: boolean
+
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  NODE_VERSION: '18'
+  WORKING_DIR: agentic-workflow
+
+jobs:
+  # Gate job: only run on issue_comment if it matches /qa-run pattern
+  check-trigger:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      ticket_id: ${{ steps.check.outputs.ticket_id }}
+      mode: ${{ steps.check.outputs.mode }}
+    steps:
+      - name: Check trigger
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "ticket_id=${{ github.event.inputs.ticketId }}" >> $GITHUB_OUTPUT
+            echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
+            COMMENT="${{ github.event.comment.body }}"
+            if echo "$COMMENT" | grep -qE '^/qa-run\s+[A-Z]+-[0-9]+'; then
+              TICKET=$(echo "$COMMENT" | grep -oE '[A-Z]+-[0-9]+' | head -1)
+              MODE=$(echo "$COMMENT" | grep -oE '(full|generate|heal|execute)' | head -1)
+              echo "should_run=true" >> $GITHUB_OUTPUT
+              echo "ticket_id=$TICKET" >> $GITHUB_OUTPUT
+              echo "mode=${MODE:-full}" >> $GITHUB_OUTPUT
+            else
+              echo "should_run=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+  pipeline:
+    needs: check-trigger
+    if: needs.check-trigger.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.WORKING_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIR }}
+        run: npm ci --prefer-offline
+
+      - name: Install Playwright browsers
+        working-directory: ${{ env.WORKING_DIR }}
+        run: npx playwright install --with-deps chromium
+
+      - name: Run QA Pipeline
+        working-directory: ${{ env.WORKING_DIR }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COPILOT_MODEL: ${{ vars.COPILOT_MODEL || 'claude-sonnet-4-20250514' }}
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_CLOUD_ID: ${{ secrets.JIRA_CLOUD_ID }}
+          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+          UAT_URL: ${{ secrets.UAT_URL }}
+          MCP_HEADLESS: 'true'
+          CI: 'true'
+        run: |
+          TICKET="${{ needs.check-trigger.outputs.ticket_id }}"
+          MODE="${{ needs.check-trigger.outputs.mode }}"
+          VERBOSE_FLAG=""
+          if [ "${{ github.event.inputs.verbose }}" = "true" ]; then
+            VERBOSE_FLAG="--verbose"
+          fi
+
+          node sdk-orchestrator/cli.js \
+            --ticket "$TICKET" \
+            --mode "$MODE" \
+            --ci \
+            --env "${{ github.event.inputs.environment || 'uat' }}" \
+            $VERBOSE_FLAG
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-pipeline-${{ needs.check-trigger.outputs.ticket_id }}-${{ github.run_number }}
+          path: |
+            agentic-workflow/test-artifacts/
+            agentic-workflow/test-results/
+            agentic-workflow/exploration-data/
+            tests/specs/
+          retention-days: 14
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ needs.check-trigger.outputs.ticket_id }}
+          path: agentic-workflow/test-results/
+          retention-days: 7
+
+      - name: Comment on issue (if triggered by comment)
+        if: always() && github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ job.status }}' === 'success' ? '✅' : '❌';
+            const ticket = '${{ needs.check-trigger.outputs.ticket_id }}';
+            const mode = '${{ needs.check-trigger.outputs.mode }}';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `${status} **QA Pipeline ${status === '✅' ? 'Passed' : 'Failed'}**\n\n` +
+                    `| Field | Value |\n|---|---|\n` +
+                    `| Ticket | \`${ticket}\` |\n` +
+                    `| Mode | \`${mode}\` |\n` +
+                    `| Run | [View logs](${runUrl}) |\n`
+            });

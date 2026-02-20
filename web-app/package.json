@@ -1,0 +1,29 @@
+{
+  "name": "qa-automation-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --port 3001",
+    "build": "next build",
+    "start": "next start --port 3001",
+    "lint": "next lint",
+    "dev:full": "concurrently \"npm run dev\" \"npm run dev:backend\"",
+    "dev:backend": "node ../agentic-workflow/sdk-orchestrator/cli.js --server --port 3100 --verbose"
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "^0.1.25",
+    "exceljs": "^4.4.0",
+    "next": "^15.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^9.0.1",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.16"
+  }
+}

@@ -1,0 +1,191 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "assertion-config.schema.json",
+    "title": "Assertion Configuration Schema",
+    "description": "Framework-agnostic assertion configuration for automated test generation",
+    "type": "object",
+    "required": [
+        "version",
+        "activeFramework",
+        "frameworks"
+    ],
+    "properties": {
+        "$schema": {
+            "type": "string",
+            "description": "JSON Schema reference for validation"
+        },
+        "version": {
+            "type": "string",
+            "pattern": "^\\d+\\.\\d+\\.\\d+$",
+            "description": "Semantic version of the configuration format"
+        },
+        "activeFramework": {
+            "type": "string",
+            "description": "Currently active framework for script generation",
+            "enum": ["playwright", "selenium", "cypress", "webdriverio", "puppeteer", "testcafe"]
+        },
+        "globalSettings": {
+            "type": "object",
+            "description": "Global assertion settings applicable to all frameworks",
+            "properties": {
+                "defaultTimeout": {
+                    "type": "number",
+                    "default": 30000,
+                    "description": "Default timeout for assertions in milliseconds"
+                },
+                "retryCount": {
+                    "type": "number",
+                    "default": 3,
+                    "description": "Number of retry attempts for flaky assertions"
+                },
+                "softAssertionsEnabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable soft assertions for non-critical checks"
+                },
+                "screenshotOnFailure": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Capture screenshot when assertion fails"
+                },
+                "customMessagesRequired": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Require custom error messages for all assertions"
+                }
+            }
+        },
+        "frameworks": {
+            "type": "object",
+            "description": "Framework-specific assertion configurations",
+            "additionalProperties": {
+                "$ref": "#/definitions/frameworkConfig"
+            }
+        }
+    },
+    "definitions": {
+        "frameworkConfig": {
+            "type": "object",
+            "required": ["name", "import", "assertions"],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Display name of the framework"
+                },
+                "version": {
+                    "type": "string",
+                    "description": "Recommended framework version"
+                },
+                "import": {
+                    "type": "object",
+                    "description": "Import statement configuration",
+                    "properties": {
+                        "statement": {
+                            "type": "string",
+                            "description": "Import statement to use in generated scripts"
+                        },
+                        "destructure": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Items to destructure from import"
+                        }
+                    }
+                },
+                "assertions": {
+                    "type": "object",
+                    "description": "Assertion categories and their implementations",
+                    "properties": {
+                        "visibility": { "$ref": "#/definitions/assertionCategory" },
+                        "state": { "$ref": "#/definitions/assertionCategory" },
+                        "content": { "$ref": "#/definitions/assertionCategory" },
+                        "attribute": { "$ref": "#/definitions/assertionCategory" },
+                        "page": { "$ref": "#/definitions/assertionCategory" },
+                        "network": { "$ref": "#/definitions/assertionCategory" },
+                        "accessibility": { "$ref": "#/definitions/assertionCategory" },
+                        "custom": { "$ref": "#/definitions/assertionCategory" }
+                    }
+                },
+                "antiPatterns": {
+                    "type": "array",
+                    "description": "Code patterns to avoid",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "pattern": { "type": "string" },
+                            "reason": { "type": "string" },
+                            "replacement": { "type": "string" }
+                        }
+                    }
+                },
+                "bestPractices": {
+                    "type": "array",
+                    "description": "Recommended patterns and practices",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "description": { "type": "string" },
+                            "example": { "type": "string" },
+                            "priority": { 
+                                "type": "string",
+                                "enum": ["required", "recommended", "optional"]
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "assertionCategory": {
+            "type": "object",
+            "description": "Category of assertions",
+            "additionalProperties": {
+                "$ref": "#/definitions/assertion"
+            }
+        },
+        "assertion": {
+            "type": "object",
+            "required": ["syntax", "description", "autoRetry"],
+            "properties": {
+                "syntax": {
+                    "type": "string",
+                    "description": "Code syntax for the assertion"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "What this assertion validates"
+                },
+                "autoRetry": {
+                    "type": "boolean",
+                    "description": "Whether this assertion auto-retries"
+                },
+                "parameters": {
+                    "type": "array",
+                    "description": "Parameters the assertion accepts",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "type": { "type": "string" },
+                            "required": { "type": "boolean" },
+                            "description": { "type": "string" }
+                        }
+                    }
+                },
+                "example": {
+                    "type": "string",
+                    "description": "Example usage"
+                },
+                "alternatives": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Alternative assertions that can be used"
+                },
+                "tags": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Tags for categorization and filtering"
+                }
+            }
+        }
+    }
+}
