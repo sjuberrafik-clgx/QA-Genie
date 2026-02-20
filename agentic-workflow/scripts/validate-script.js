@@ -91,6 +91,42 @@ function validateGeneratedScript(scriptPath, scriptContent) {
         console.log('✅ URLs: Using baseUrl from testData');
     }
 
+    // 8b. Hardcoded Token Check — detect token= in URLs (will expire)
+    const tokenInUrl = scriptContent.match(/['"`][^'"`]*token=[a-zA-Z0-9._-]{20,}[^'"`]*['"`]/g);
+    if (tokenInUrl && tokenInUrl.length > 0) {
+        errors.push(`❌ CRITICAL: Found ${tokenInUrl.length}x hardcoded token in URL — must use userTokens from testData.js`);
+        console.log(`❌ Tokens: ${tokenInUrl.length}x hardcoded token= in URL (MUST use userTokens)`);
+    }
+
+    // 8c. PopupHandler Check — must use PopupHandler utility, not inline popup code
+    if (!scriptContent.includes('PopupHandler') && !scriptContent.includes('popupHandler')) {
+        const hasInlinePopup = /async\s+function\s+dismiss\w*\s*\(/i.test(scriptContent) ||
+            scriptContent.includes('welcome-modal') ||
+            scriptContent.includes('welcomeModal') ||
+            scriptContent.includes('welcome-container');
+        if (hasInlinePopup) {
+            errors.push('❌ CRITICAL: Inline popup dismissal code detected — must use PopupHandler from utils/popupHandler.js');
+            console.log('❌ Popup handling: Inline code (MUST use PopupHandler)');
+        }
+    } else {
+        console.log('✅ Popup handling: PopupHandler utility');
+    }
+
+    // 8d. Context/Browser Cleanup Check — afterAll must close page + context + browser
+    if (scriptContent.includes('test.afterAll')) {
+        const missingCleanup = [];
+        if (!scriptContent.includes('context.close()') && !scriptContent.includes('context?.close()')) {
+            missingCleanup.push('context.close()');
+        }
+        if (!scriptContent.includes('browser.close()') && !scriptContent.includes('browser?.close()')) {
+            missingCleanup.push('browser.close()');
+        }
+        if (missingCleanup.length > 0) {
+            errors.push(`❌ CRITICAL: afterAll missing cleanup: ${missingCleanup.join(', ')} — will leak browser processes`);
+            console.log(`❌ Cleanup: Missing ${missingCleanup.join(', ')} in afterAll`);
+        }
+    }
+
     // 9. Helper Functions Check (code optimization)
     const helperFunctionMatches = scriptContent.match(/const \w+ = async \(/g) || [];
     const helperCount = helperFunctionMatches.length;

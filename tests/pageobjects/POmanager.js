@@ -99,7 +99,7 @@ class POmanager {
     propertyDetails() { return this.propertyDetailsInstance; }
 
     plannerPage() { return this.plannerPageInstance; }
-    
+
     favoritesPage() { return this.favoritesPageInstance; }
 
     offLimitsAgentPopUp() { return this.offLimitsAgentPopUpInstance; }
@@ -126,6 +126,25 @@ class POmanager {
 
     agentBranding() { return this.agentBrandingInstance; }
 
+    // ─── PopupHandler facade methods ─────────────────────────────
+    // These delegate to PopupHandler so generated scripts can call
+    // poManager.dismissAllPopups() as documented in copilot-instructions.
 
+    /**
+     * Dismiss ALL known popups. Delegates to PopupHandler.dismissAll().
+     */
+    async dismissAllPopups() {
+        const { PopupHandler } = require('../utils/popupHandler');
+        const handler = new PopupHandler(this.page);
+        await handler.dismissAll();
+    }
+
+    /**
+     * Return a PopupHandler instance bound to the current page.
+     */
+    popupHandler() {
+        const { PopupHandler } = require('../utils/popupHandler');
+        return new PopupHandler(this.page);
+    }
 }
 module.exports = POmanager;
