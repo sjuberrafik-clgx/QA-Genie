@@ -300,7 +300,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     const AssertionConfigHelper = require('../utils/assertionConfigHelper');
                     const helper = new AssertionConfigHelper();
                     const framework = helper.getActiveFramework();
-                    const assertions = helper.getAssertionsByType(pageType || 'default');
+                    const assertions = helper.getAssertionsByCategory(pageType || 'default');
                     const antiPatterns = helper.getAntiPatterns ? helper.getAntiPatterns() : [];
 
                     return JSON.stringify({

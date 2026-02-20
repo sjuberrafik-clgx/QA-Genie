@@ -207,6 +207,9 @@ ACTION from test case
 - Add header comment: `// Selectors validated via MCP live exploration on {date}`
 - Save to: `tests/specs/{ticketId-lowercase}/*.spec.js`
 
+> ⛔ **NEVER** write `.spec.js` files under `web-app/`. The `web-app/` directory is a separate Next.js project.
+> The ONLY valid output directory is `tests/specs/` at the workspace root.
+
 ### ❌ FAILURE MODES — WHEN TO STOP
 
 | Scenario | Action |
@@ -1129,6 +1132,29 @@ await page.goto(`${baseUrl}&token=${userTokens.registered}`);
 5. **Progressive fixing** — Quick fixes → Re-exploration → Bug report
 6. **Use test data** — Centralized tokens, URLs, credentials
 7. **MCP first** — Always explore live app before writing selectors
+
+---
+
+## ⚠️ POST-GENERATION SELF-CHECK (MANDATORY)
+
+**BEFORE presenting any generated `.spec.js` to the user, you MUST verify ALL of the following. If ANY check fails, fix the script before presenting it.**
+
+| # | Check | ✅ Valid | ❌ Invalid |
+|---|-------|---------|-----------|
+| 1 | File extension is `.spec.js` | `test.spec.js` | `test.spec.ts` |
+| 2 | Uses `require()` — NOT `import` | `const { test } = require(...)` | `import { test } from ...` |
+| 3 | Uses `launchBrowser()` from `../../config/config` | `const { launchBrowser } = require('../../config/config')` | `chromium.launch()` |
+| 4 | `POmanager` is default import (no braces) | `const POmanager = require(...)` | `const { POmanager } = require(...)` |
+| 5 | Auth uses `userTokens` (NOT `userTokensUAT`) | `const { userTokens } = require('../../test-data/testData')` | Hardcoded tokens |
+| 6 | `PopupHandler` imported and used | `const { PopupHandler } = require('../../utils/popupHandler')` | Inline popup dismiss code |
+| 7 | `afterAll` closes page + context + browser with guards | `if (page && !page.isClosed()) await page.close()` | Missing cleanup |
+| 8 | ZERO `page.waitForTimeout()` calls | `await el.waitFor({ state: 'visible' })` | `await page.waitForTimeout(2000)` |
+| 9 | All assertions use auto-retrying Playwright API | `await expect(el).toBeVisible()` | `expect(await el.isVisible()).toBe(true)` |
+| 10 | No `page.type()` calls (deprecated) | `await el.fill('text')` | `await el.type('text')` |
+| 11 | Selectors came from MCP snapshots (not guessed) | Header: `// Selectors validated via MCP live exploration` | No header or guessed selectors |
+| 12 | Uses `test.describe.serial()` when sharing browser state | `test.describe.serial("Feature", ...)` | `test.describe("Feature", ...)` |
+
+**If you cannot confirm all 12 checks pass, revise the script before outputting it.**
 
 ---
 

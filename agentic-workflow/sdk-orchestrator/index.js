@@ -44,7 +44,14 @@ function loadConfig() {
 
 function loadEnv() {
     try {
-        require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+        // Use override: true to ensure .env values always win, even if
+        // environment variables were set by a parent process (e.g., web-app
+        // spawning the backend). This fixes the "injecting env (0)" issue
+        // where dotenv v17 skips already-set vars.
+        require('dotenv').config({
+            path: path.join(__dirname, '..', '.env'),
+            override: true,
+        });
     } catch {
         // dotenv not installed — continue with process.env
     }

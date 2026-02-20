@@ -16,11 +16,9 @@ class Search {
     async openSearchViaDropDown() {
 
         //await this.homePage.buyRentDropDown.hover();
-        await this.page.waitForTimeout(2000);
         await this.homePage.buyRentDropDown.waitFor({ state: 'visible', timeout: 6000 });
         await this.homePage.buyRentDropDown.click();
-        await this.page.waitForTimeout(2000);
-        await this.homePage.newSearchOption.waitFor({ state: 'visible', timeout: 3000 });
+        await this.homePage.newSearchOption.waitFor({ state: 'visible', timeout: 5000 });
         await this.homePage.newSearchOption.click();
 
         return await this.generalFunctions.waitForGridIsDisplayed();

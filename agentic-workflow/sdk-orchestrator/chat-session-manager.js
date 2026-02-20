@@ -22,6 +22,71 @@ const { EventEmitter } = require('events');
 const fs = require('fs');
 const path = require('path');
 
+// ─── Instruction Extraction Helper ──────────────────────────────────────────
+
+/**
+ * Extract critical sections from copilot-instructions.md instead of blind
+ * truncation.  Returns a combined string containing only the sections the
+ * agent actually needs (framework patterns, import order, popup handling,
+ * selector strategy, code quality targets, terminology).
+ *
+ * If the file changes its heading structure, the function gracefully falls
+ * back to the first 12 000 characters so nothing is silently lost.
+ */
+function extractCriticalInstructions(fullText) {
+    // Extract ONLY the compact, rule-focused sections the agent needs.
+    // Deliberately EXCLUDES the giant MCP tool reference table (the pipeline
+    // prompt already lists the tools it needs).  The parent heading
+    // "## Automation Script Generation" is skipped because its child ###
+    // sections are captured individually below — avoids pulling in the full
+    // MCP table which alone is ~20 KB.
+    const SECTION_HEADINGS = [
+        '### Import Order',
+        '### Framework Pattern',
+        '### File Header Template',
+        '### Selector Strategy',
+        '### Popup Handling',
+        '### Automation Scope',
+        '### Code Quality Targets',
+        '## Naming Conventions',
+        '## Terminology',
+    ];
+
+    const MAX_SECTION_CHARS = 1500; // cap any single section to prevent bloat
+    const sections = [];
+    for (const heading of SECTION_HEADINGS) {
+        const idx = fullText.indexOf(heading);
+        if (idx === -1) continue;
+        const level = heading.startsWith('###') ? '###' : '##';
+        const rest = fullText.substring(idx + heading.length);
+        const escapedLevel = level.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const nextHeading = rest.search(new RegExp(`^${escapedLevel} `, 'm'));
+        let sectionText = nextHeading === -1
+            ? fullText.substring(idx)
+            : fullText.substring(idx, idx + heading.length + nextHeading);
+        sectionText = sectionText.trim();
+        if (sectionText.length > MAX_SECTION_CHARS) {
+            sectionText = sectionText.substring(0, MAX_SECTION_CHARS) + '\n… (truncated)';
+        }
+        sections.push(sectionText);
+    }
+
+    if (sections.length === 0) {
+        return fullText.substring(0, 6000);
+    }
+    return sections.join('\n\n');
+}
+
+/**
+ * When running inside the SDK (web app / pipeline), MCP tool names use the
+ * RAW format: unified_navigate.  The .agent.md files use the VS Code format:
+ * mcp_unified-autom_unified_navigate.  Strip the prefix so the LLM calls the
+ * correct tool name.
+ */
+function stripVSCodeToolPrefix(text) {
+    return text.replace(/mcp_unified-autom_unified_/g, 'unified_');
+}
+
 // Load .env for Jira credentials (Atlassian MCP auth)
 try {
     const envPath = path.join(__dirname, '..', '.env');
@@ -92,7 +157,16 @@ class ChatSessionManager extends EventEmitter {
             try {
                 const agentMdPath = path.join(__dirname, '..', '..', '.github', 'agents', `${agentMode}.agent.md`);
                 if (fs.existsSync(agentMdPath)) {
-                    const agentPrompt = fs.readFileSync(agentMdPath, 'utf-8');
+                    let agentPrompt = fs.readFileSync(agentMdPath, 'utf-8');
+
+                    // Strip chatagent frontmatter (```chatagent\n---\n...\n---\n)
+                    const fmMatch = agentPrompt.match(/^[`]{3,}chatagent\s*\n---[\s\S]*?---\s*\n/);
+                    if (fmMatch) {
+                        agentPrompt = agentPrompt.slice(fmMatch[0].length);
+                    }
+                    // Trim trailing ``` if present
+                    agentPrompt = agentPrompt.replace(/\n[`]{3,}\s*$/, '').trim();
+
                     // Prepend a role identifier + append project standards
                     const parts = [
                         `You are the ${agentMode} agent — a specialized QA Automation assistant.`,
@@ -106,11 +180,14 @@ class ChatSessionManager extends EventEmitter {
                         const instructionsPath = path.join(__dirname, '..', '..', '.github', 'copilot-instructions.md');
                         if (fs.existsSync(instructionsPath)) {
                             const instructions = fs.readFileSync(instructionsPath, 'utf-8');
-                            parts.push('', '<project_standards>', instructions.substring(0, 3000), '</project_standards>');
+                            const critical = extractCriticalInstructions(instructions);
+                            parts.push('', '<project_standards>', critical, '</project_standards>');
                         }
                     } catch { /* ignore */ }
+
+                    // SDK context: strip VS Code MCP tool prefix so LLM uses raw names
+                    return stripVSCodeToolPrefix(parts.join('\n'));
                     console.log(`[ChatManager] Loaded agent prompt: ${agentMode}.agent.md`);
-                    return parts.join('\n');
                 }
             } catch (err) {
                 console.warn(`[ChatManager] Failed to load ${agentMode}.agent.md: ${err.message}`);
@@ -177,14 +254,13 @@ class ChatSessionManager extends EventEmitter {
             '- Test data via userTokens from testData.js',
         ];
 
-        // Add copilot-instructions if available
+        // Add copilot-instructions if available (extract critical sections, not blind truncation)
         try {
             const instructionsPath = path.join(__dirname, '..', '..', '.github', 'copilot-instructions.md');
             if (fs.existsSync(instructionsPath)) {
                 const instructions = fs.readFileSync(instructionsPath, 'utf-8');
-                // Take a trimmed version (first 3000 chars for system prompt efficiency)
-                const trimmed = instructions.substring(0, 3000);
-                parts.push('', '<project_standards>', trimmed, '</project_standards>');
+                const critical = extractCriticalInstructions(instructions);
+                parts.push('', '<project_standards>', critical, '</project_standards>');
             }
         } catch { /* ignore */ }
 
