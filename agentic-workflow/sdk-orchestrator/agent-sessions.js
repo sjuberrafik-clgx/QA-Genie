@@ -205,11 +205,53 @@ class AgentSessionFactory {
         }
 
         // 6. Build session config
+        // ── PROMPT SIZE GUARD ──────────────────────────────────────────
+        // LLM context windows are finite. If the assembled system message
+        // exceeds MAX_SYSTEM_PROMPT_CHARS, progressively truncate the
+        // least-critical dynamic sections to stay within budget.
+        const MAX_SYSTEM_PROMPT_CHARS = 120_000; // ~30K tokens (safe for most models)
+        let assembledPrompt = basePrompt + dynamicCtx + sharedCtx;
+
+        if (assembledPrompt.length > MAX_SYSTEM_PROMPT_CHARS) {
+            this._log(`⚠️ System prompt too large (${assembledPrompt.length} chars > ${MAX_SYSTEM_PROMPT_CHARS}). Truncating dynamic context...`);
+
+            // Strategy: rebuild dynamic context with truncated sections
+            const truncatedSections = [];
+
+            // Keep framework inventory but limit to paths only (drop content)
+            if (context.frameworkInventory) {
+                const lines = context.frameworkInventory.split('\n');
+                const pathsOnly = lines.filter(l => l.includes('/') || l.includes('\\')).slice(0, 50);
+                truncatedSections.push('<framework_inventory>', pathsOnly.join('\n'), '</framework_inventory>');
+            }
+
+            // Keep last 5 historical failures only
+            if (context.historicalContext) {
+                const failures = context.historicalContext.split('\n---\n').slice(-5);
+                truncatedSections.push('<historical_failures>', failures.join('\n---\n'), '</historical_failures>');
+            }
+
+            // Keep ticket context (critical for task execution)
+            if (context.ticketContext) {
+                truncatedSections.push('<ticket_context>', context.ticketContext, '</ticket_context>');
+            }
+
+            dynamicCtx = truncatedSections.length > 0 ? '\n\n' + truncatedSections.join('\n') : '';
+
+            // Truncate shared context to last 10 entries if still too large
+            if (context.contextStore && (basePrompt + dynamicCtx + sharedCtx).length > MAX_SYSTEM_PROMPT_CHARS) {
+                sharedCtx = context.contextStore.buildContextSummary(agentName, { maxEntries: 10 });
+            }
+
+            assembledPrompt = basePrompt + dynamicCtx + sharedCtx;
+            this._log(`📏 Truncated prompt size: ${assembledPrompt.length} chars`);
+        }
+
         const sessionConfig = {
             model: this.model,
             tools,
             systemMessage: {
-                content: basePrompt + dynamicCtx + sharedCtx,
+                content: assembledPrompt,
             },
             hooks,
 

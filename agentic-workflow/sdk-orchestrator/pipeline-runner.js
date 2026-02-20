@@ -628,37 +628,87 @@ class PipelineRunner {
             // unified_snapshot (NOT mcp_unified-autom_unified_snapshot)
             const prompt =
                 `Generate a Playwright automation script for ticket ${context.ticketId}.\n\n` +
-                'MANDATORY STEPS:\n' +
-                '1. FIRST: Navigate to the application using the unified_navigate MCP tool\n' +
-                '2. Take accessibility snapshots using the unified_snapshot tool\n' +
-                '3. Extract real selectors from the snapshots\n' +
-                '4. Save exploration data using the save_exploration_data custom tool\n' +
-                '5. Generate the .spec.js file with captured selectors\n' +
-                '6. Validate the script using the validate_generated_script tool\n\n' +
-                'AVAILABLE MCP TOOLS (use these exact names):\n' +
+                'MANDATORY STEPS (in this exact order):\n' +
+                '0. FIRST: Call get_framework_inventory to discover reusable code (page objects, business functions, PopupHandler, test data)\n' +
+                '1. Navigate to the application using the unified_navigate MCP tool\n' +
+                '2. Take accessibility snapshots using unified_snapshot\n' +
+                '3. Validate key elements with SEMANTIC selectors (unified_get_by_role, unified_get_by_test_id, unified_get_by_label, unified_get_by_text)\n' +
+                '4. Extract REAL content for assertions (unified_get_text_content, unified_get_attribute, unified_get_input_value)\n' +
+                '5. Verify navigation state (unified_get_page_url or unified_expect_url)\n' +
+                '6. Navigate through ALL pages in the test flow, snapshot each one, repeat steps 3-5\n' +
+                '7. Save exploration data using save_exploration_data custom tool\n' +
+                '8. Generate the .spec.js file using CAPTURED selectors + EXISTING framework methods\n' +
+                '9. Validate the script using validate_generated_script\n\n' +
+                'AVAILABLE MCP TOOLS — Navigation & Page:\n' +
                 '- unified_navigate: Navigate to a URL\n' +
-                '- unified_snapshot: Capture accessibility tree with element refs\n' +
-                '- unified_click: Click an element\n' +
-                '- unified_type: Type text into an element\n' +
+                '- unified_navigate_back / unified_navigate_forward: History navigation\n' +
+                '- unified_reload: Reload current page\n' +
+                '- unified_get_page_url: Get current URL (for assertions)\n' +
+                '- unified_get_page_title: Get page title (for assertions)\n\n' +
+                'AVAILABLE MCP TOOLS — Snapshot & Discovery:\n' +
+                '- unified_snapshot: Capture full accessibility tree with element refs\n' +
+                '- unified_get_by_role: Find element by ARIA role + name (BEST for buttons, links, headings)\n' +
+                '- unified_get_by_test_id: Find element by data-testid (MOST STABLE)\n' +
+                '- unified_get_by_label: Find element by label text (BEST for form fields)\n' +
+                '- unified_get_by_text: Find element by visible text\n' +
+                '- unified_get_by_placeholder: Find element by placeholder text\n' +
+                '- unified_generate_locator: Auto-generate best locator for an element\n\n' +
+                'AVAILABLE MCP TOOLS — Content Extraction (for assertions):\n' +
+                '- unified_get_text_content: Extract text content from element\n' +
+                '- unified_get_inner_text: Extract rendered text only\n' +
+                '- unified_get_attribute: Extract element attribute (href, class, data-*)\n' +
+                '- unified_get_input_value: Extract current input field value\n\n' +
+                'AVAILABLE MCP TOOLS — Element State:\n' +
+                '- unified_is_visible / unified_is_hidden: Check element visibility\n' +
+                '- unified_is_enabled / unified_is_disabled: Check element interactability\n' +
+                '- unified_is_checked: Check checkbox/radio state\n' +
+                '- unified_is_editable: Check field editability\n\n' +
+                'AVAILABLE MCP TOOLS — Interaction:\n' +
+                '- unified_click: Click element\n' +
+                '- unified_type: Type text (triggers autocomplete)\n' +
                 '- unified_fill_form: Fill form fields\n' +
-                '- unified_wait_for_element: Wait for element state\n' +
-                '- unified_get_page_url: Get current URL\n' +
-                '- unified_get_page_title: Get page title\n\n' +
+                '- unified_clear_input: Clear input field\n' +
+                '- unified_select_option: Select dropdown option\n' +
+                '- unified_check / unified_uncheck: Toggle checkboxes\n' +
+                '- unified_press_key: Press keyboard key (Enter, Escape, Tab)\n' +
+                '- unified_scroll_into_view: Scroll element into view before interacting\n\n' +
+                'AVAILABLE MCP TOOLS — Waits & Assertions:\n' +
+                '- unified_wait_for_element: Wait for element state (visible/hidden/attached)\n' +
+                '- unified_wait_for: Wait for text/element/time\n' +
+                '- unified_expect_url: Assert URL pattern\n' +
+                '- unified_expect_title: Assert page title\n' +
+                '- unified_expect_element_text: Assert element text content\n' +
+                '- unified_expect_element_attribute: Assert element attribute\n' +
+                '- unified_verify_text_visible: Verify text is visible on page\n\n' +
+                'AVAILABLE MCP TOOLS — Advanced:\n' +
+                '- unified_screenshot: Capture screenshot for debugging\n' +
+                '- unified_evaluate: Execute JavaScript on page\n' +
+                '- unified_console_messages: Get browser console messages\n' +
+                '- unified_page_errors: Get page JS errors\n\n' +
                 'AVAILABLE CUSTOM TOOLS:\n' +
-                '- get_framework_inventory: Scan test framework codebase\n' +
+                '- get_framework_inventory: Scan test framework codebase (MANDATORY — call FIRST)\n' +
                 '- save_exploration_data: Save exploration JSON\n' +
                 '- validate_generated_script: Validate the .spec.js file\n' +
-                '- get_assertion_config: Get assertion patterns\n' +
-                '- suggest_popup_handler: Get popup handling recommendations\n\n' +
+                '- get_assertion_config: Get assertion patterns and rules\n' +
+                '- suggest_popup_handler: Get popup handling recommendations\n' +
+                '- get_historical_failures: Check for known failures on target pages\n\n' +
                 `${testCaseContext ? `Test cases reference: ${testCaseContext}\n\n` : ''}` +
+                'FRAMEWORK REQUIREMENTS (enforced — script will be REJECTED if violated):\n' +
+                '- Import launchBrowser from ../../config/config — NOT manual browser setup\n' +
+                '- Import POmanager from ../../pageobjects/POmanager — use existing page objects\n' +
+                '- Import { PopupHandler } from ../../utils/popupHandler — for popup dismissal\n' +
+                '- Import { userTokens, baseUrl } from ../../test-data/testData — NO hardcoded URLs/tokens\n' +
+                '- Use test.describe.serial() — NOT test.describe() — for shared browser state\n' +
+                '- Use auto-retrying assertions ONLY — NO expect(await el.textContent())\n' +
+                '- NO page.waitForTimeout() — use waitForLoadState, toBeVisible, waitForSelector\n' +
+                '- Close page, context, AND browser in afterAll with null/closed guards\n' +
+                '- REUSE existing business functions and page object methods from the framework inventory\n\n' +
                 'PROHIBITED ACTIONS (strictly enforced):\n' +
                 '- Do NOT use runInTerminal, powershell, or any shell/terminal tool\n' +
                 '- Do NOT run npx playwright test — test execution is a SEPARATE pipeline stage\n' +
                 '- Do NOT launch standalone Playwright browsers via require("playwright")\n' +
-                '- Use ONLY the MCP tools listed above for browser exploration\n' +
-                '- Use ONLY the custom tools listed above for framework inventory and validation\n\n' +
-                'Remember: Use PopupHandler for popup dismissal, test.describe.serial() for shared state, ' +
-                'auto-retrying assertions only, and NO waitForTimeout().';
+                '- Do NOT guess selectors — every selector MUST come from MCP snapshot/get_by_* output\n' +
+                '- Do NOT hardcode URLs containing token= — use userTokens from testData.js';
 
             onProgress(STAGES.SCRIPTGEN, 'Exploring application via MCP...');
             const scriptResponse = await this.sessionFactory.sendAndWait(session, prompt, {

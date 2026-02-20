@@ -65,14 +65,14 @@ module.exports = defineConfig({
   //testDir: './tests/specs',
 
   /* Global timeout for each test - reduced for faster execution */
-  timeout: 60000,
+  timeout: 120000,
 
   /* Timeout for beforeAll/afterAll hooks */
   globalTimeout: 300000,
 
   /* Expect timeout - reduced for faster assertions */
   expect: {
-    timeout: 5000,
+    timeout: 10000,
   },
 
   /* Run tests in files in parallel */

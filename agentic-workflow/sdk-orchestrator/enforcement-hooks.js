@@ -38,6 +38,7 @@ class SessionEnforcementState {
         this.mcpUrlVerified = false;         // get_page_url / expect_url called
         this.mcpStateChecked = false;        // is_visible / is_enabled / is_checked / is_hidden called
         this.mcpAssertionVerified = false;   // expect_element_text / expect_title / expect_checked / expect_enabled called
+        this.frameworkInventoryScanned = false; // get_framework_inventory called (Phase 1.5)
         this.snapshotData = [];          // Captured selector data from snapshots
         this.specFileCreated = false;
         this.toolCallCount = 0;
@@ -143,6 +144,12 @@ function createEnforcementHooks(agentName, options = {}) {
         // ── RULE 1: MCP-First for scriptgenerator ──────────────────
         // ScriptGenerator must navigate before creating any files
         if (agentName === 'scriptgenerator') {
+
+            // Track framework inventory scan (Phase 1.5)
+            if (toolName === 'get_framework_inventory') {
+                state.frameworkInventoryScanned = true;
+                log('✅ Framework inventory scanned — reusable code discovered');
+            }
 
             // Track MCP navigation
             if (toolName.includes('unified_navigate')) {
@@ -283,6 +290,28 @@ function createEnforcementHooks(agentName, options = {}) {
                         };
                     }
 
+                    // DENY script creation without framework inventory scan (Phase 1.5)
+                    if (isSpecFile && !state.frameworkInventoryScanned) {
+                        log('🚫 DENIED: No framework inventory scan before .spec.js creation');
+                        state.deniedCalls.push({
+                            tool: toolName,
+                            reason: 'Framework inventory scan required before script creation (Phase 1.5)',
+                            timestamp: new Date().toISOString(),
+                        });
+                        return {
+                            permissionDecision: 'deny',
+                            additionalContext:
+                                '⛔ BLOCKED: You must scan the existing framework codebase before creating the spec file.\n\n' +
+                                'Call the `get_framework_inventory` tool to discover:\n' +
+                                '- Page objects (POmanager, WelcomePopUp, AgentBranding, etc.)\n' +
+                                '- Business functions (login, search, general, propertyDetails, etc.)\n' +
+                                '- Utilities (PopupHandler for popup dismissal)\n' +
+                                '- Test data (userTokens, baseUrl, credentials)\n\n' +
+                                'You MUST use existing reusable methods instead of writing duplicated code.\n' +
+                                'This is Phase 1.5 — required AFTER MCP exploration and BEFORE script generation.',
+                        };
+                    }
+
                     // WARN (allow) if no element state checks were performed
                     if (isSpecFile && !state.mcpStateChecked) {
                         log('⚠️ WARN: No element state checks before .spec.js creation');
@@ -304,27 +333,32 @@ function createEnforcementHooks(agentName, options = {}) {
             }
         }
 
-        // ── RULE 2: Block waitForTimeout in generated code ─────────
+        // ── RULE 2: BLOCK waitForTimeout in generated code ─────────
         if (agentName === 'scriptgenerator') {
-            const isFileWrite = ['write_file', 'create_file', 'edit'].some(t =>
+            const isFileWrite2 = ['write_file', 'create_file', 'edit'].some(t =>
                 toolName.includes(t)
             );
 
-            if (isFileWrite) {
-                const content = toolArgs.content || toolArgs.newString || '';
-                if (content.includes('waitForTimeout')) {
-                    log('⚠️ waitForTimeout detected in generated code — injecting guidance');
+            if (isFileWrite2) {
+                const content2 = toolArgs.content || toolArgs.newString || '';
+                if (content2.includes('waitForTimeout')) {
+                    log('🚫 DENIED: waitForTimeout detected in generated code');
+                    state.deniedCalls.push({
+                        tool: toolName,
+                        reason: 'Code contains page.waitForTimeout() anti-pattern',
+                        timestamp: new Date().toISOString(),
+                    });
                     return {
-                        permissionDecision: 'allow',
-                        modifiedArgs: toolArgs,
+                        permissionDecision: 'deny',
                         additionalContext:
-                            '⚠️ WARNING: Your code contains page.waitForTimeout() which is an anti-pattern.\n' +
-                            'Replace with condition-based waits:\n' +
-                            '- await page.waitForLoadState("networkidle")\n' +
-                            '- await expect(element).toBeVisible()\n' +
-                            '- await page.waitForSelector(selector)\n' +
-                            '- await popups.waitForPageReady()\n\n' +
-                            'Please revise the code before writing it.',
+                            '⛔ BLOCKED: Your code contains page.waitForTimeout() which is a PROHIBITED anti-pattern (AP003).\n\n' +
+                            'Replace ALL occurrences with condition-based waits:\n' +
+                            '- await page.waitForLoadState("networkidle") — wait for all requests to settle\n' +
+                            '- await expect(element).toBeVisible() — wait for element to appear\n' +
+                            '- await page.waitForSelector(selector) — wait for DOM element\n' +
+                            '- await element.waitFor({ state: "visible" }) — explicit wait on locator\n' +
+                            '- await popups.waitForPageReady() — network idle + dismiss popups\n\n' +
+                            'Fix the code and try creating the file again.',
                     };
                 }
             }
@@ -383,7 +417,32 @@ function createEnforcementHooks(agentName, options = {}) {
             log(`Snapshot data cached (${state.snapshotData.length} total)`);
         }
 
-        // ── After .spec.js write: auto-validate ─────────────────────
+        // ── Dynamic ID Detection: warn when selectors contain random IDs ─
+        // Patterns like #input-text-hp0r4mgrm3v or #collapsible-yw91x0xqelm
+        // are dynamically generated and will break on the next page render.
+        if (toolName.includes('unified_get_by') || toolName.includes('unified_snapshot')) {
+            const resultStr = typeof input.result === 'string' ? input.result : JSON.stringify(input.result || '');
+            const dynamicIdPattern = /#[a-z]+-[a-z0-9]{6,}/gi;
+            const dynamicMatches = resultStr.match(dynamicIdPattern);
+            if (dynamicMatches && dynamicMatches.length > 0) {
+                const unique = [...new Set(dynamicMatches)].slice(0, 5);
+                log(`⚠️ Dynamic ID(s) detected in selectors: ${unique.join(', ')}`);
+                return {
+                    permissionDecision: 'deny',
+                    additionalContext:
+                        `🚫 DYNAMIC SELECTOR BLOCKED: Found ${dynamicMatches.length} dynamically-generated ID(s): ${unique.join(', ')}\n\n` +
+                        'These IDs change on every page render and WILL break your script.\n' +
+                        'You MUST use stable selectors instead:\n' +
+                        '- getByRole("button", { name: "..." }) — ARIA role + accessible name\n' +
+                        '- getByLabel("...") — form field labels\n' +
+                        '- getByText("...") — visible text content\n' +
+                        '- locator("[data-test-id=\\"...\\""]") — data-test-id attribute\n\n' +
+                        'Re-run get_by_role or get_by_label to find a stable alternative.',
+                };
+            }
+        }
+
+        // ── Path guard: block .spec.js writes to web-app/ ─────────
         if (agentName === 'scriptgenerator') {
             const isFileWrite = ['write_file', 'create_file', 'edit'].some(t =>
                 toolName.includes(t)
@@ -391,6 +450,27 @@ function createEnforcementHooks(agentName, options = {}) {
 
             if (isFileWrite) {
                 const filePath = input.toolArgs?.filePath || input.toolArgs?.path || '';
+                const normalizedPath = filePath.replace(/\\/g, '/');
+
+                if (normalizedPath.includes('web-app/') && filePath.endsWith('.spec.js')) {
+                    const correctedPath = normalizedPath.replace(
+                        /web-app\/tests\/specs\//,
+                        'tests/specs/'
+                    ).replace(
+                        /web-app\/tests\//,
+                        'tests/specs/'
+                    );
+                    log(`⛔ BLOCKED: spec write to web-app/ — suggested: ${correctedPath}`);
+                    return {
+                        permissionDecision: 'deny',
+                        additionalContext:
+                            '⛔ WRONG DIRECTORY: .spec.js files must NEVER be written under web-app/. ' +
+                            'web-app/ is a separate Next.js project. ' +
+                            `Write to: ${correctedPath}`,
+                    };
+                }
+
+                // ── After .spec.js write: auto-validate ─────────────────────
                 if (filePath.endsWith('.spec.js')) {
                     log('Auto-validating generated spec file...');
 

@@ -28,7 +28,7 @@ class ProfileFunctions {
 
     async saveProfileChanges() {
         await this.profilePage.saveButton.click();
-        await this.page.waitForTimeout(1000);
+        await this.page.waitForLoadState('networkidle');
     }
 
     async openEditProfile() {

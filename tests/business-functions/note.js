@@ -32,7 +32,7 @@ class NoteFunctions {
 
     async closeNotesWindow() {
         await this.addNotesWindow.closeButton.click();
-        await this.page.waitForTimeout(500);
+        await this.addNotesWindow.container.waitFor({ state: 'hidden', timeout: 5000 });
     }
 
     async enterNoteText(noteText) {

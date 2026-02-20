@@ -139,33 +139,11 @@ Environment: UAT | Test Data: canopy UAT`
 
 ---
 
-## 🚁 MANDATORY PRE-FLIGHT VALIDATION (NEW in v2.1)
+## 🚁 MANDATORY PRE-FLIGHT VALIDATION
 
-**Before EVERY workflow execution, orchestrator MUST run pre-flight checks:**
-
-```javascript
-// STEP 0: PRE-FLIGHT VALIDATION (MANDATORY)
-const { runPreflightChecks } = require('./.github/agents/lib/workflow-preflight');
-
-const preflightResults = await runPreflightChecks({
-    ticketId: ticketId,
-    environment: 'UAT',
-    testDataPath: 'tests/test-data/testData.js'
-});
-
-if (!preflightResults.passed) {
-    console.error('❌ PRE-FLIGHT FAILED - Cannot start workflow');
-    preflightResults.checks.filter(c => !c.passed).forEach(check => {
-        console.error(`   ❌ ${check.name}: ${check.message}`);
-        if (check.recoveryAction) {
-            console.error(`      💡 Recovery: ${check.recoveryAction}`);
-        }
-    });
-    return; // HALT workflow
-}
-
-console.log('✅ PRE-FLIGHT PASSED - Starting workflow');
-```
+**Before EVERY workflow execution, orchestrator MUST run pre-flight checks.**
+Use `runPreflightChecks({ ticketId, environment: 'UAT', testDataPath: 'tests/test-data/testData.js' })`.
+If pre-flight fails, display failing checks with recovery actions and HALT the workflow.
 
 ### Pre-flight Checks Performed:
 
@@ -196,106 +174,30 @@ Pre-flight checks are configured in `config/workflow-config.json`:
 
 ---
 
-## � CRITICAL: MANDATORY BUGGENIE AUTO-INVOCATION (v2.3)
+## 🐛 MANDATORY BUGGENIE AUTO-INVOCATION
 
-**EXPLICIT INSTRUCTION: When test execution FAILS after maximum iterations (2 attempts), the orchestrator MUST IMMEDIATELY invoke BugGenie using `runSubagent()`.**
+**When test execution FAILS after maximum iterations (3 attempts), invoke BugGenie via `runSubagent({ agentName: 'buggenie', ... })`.**
 
-### ⚠️ THIS IS NOT OPTIONAL - YOU MUST EXECUTE THIS CODE:
+Pass comprehensive failure context: ticketId, scriptPath, environment, MLS, all error messages from each iteration, and request a review copy (two-step process).
 
-```javascript
-// MANDATORY: After 2 failed test iterations, auto-invoke BugGenie
-if (testsFailed && iterationCount >= maxIterations) {
-    console.log('🐛 AUTO-INVOKING BUGGENIE - Tests failed after maximum iterations');
-    
-    // Collect failure context
-    const failureContext = {
-        ticketId: ticketId,
-        testScriptPath: scriptPath,
-        environment: environment,
-        attempts: errors.map((e, i) => ({ iteration: i + 1, error: e.message })),
-        mlsContext: testDataContext
-    };
-    
-    // ⚡ EXECUTE THIS IMMEDIATELY - DO NOT SKIP
-    runSubagent({
-        agentName: 'buggenie',
-        description: 'Create bug ticket for test failure',
-        prompt: `
-            AUTOMATED TEST FAILURE - Create bug ticket review copy
-            
-            Test automation failed after ${maxIterations} retry attempts.
-            
-            **Failure Context:**
-            - Jira Ticket: ${failureContext.ticketId}
-            - Test Script: ${failureContext.testScriptPath}
-            - Environment: ${failureContext.environment}
-            - MLS: ${failureContext.mlsContext}
-            
-            **Error Summary:**
-            ${failureContext.attempts.map(a => `Iteration ${a.iteration}: ${a.error}`).join('\n')}
-            
-            Generate a review copy of the bug ticket following the two-step process.
-            Include all error details in the bug description.
-            After review copy is presented, wait for user confirmation before creating the Jira ticket.
-        `
-    });
-}
-```
-
-### 🚨 RULES FOR BUGGENIE INVOCATION:
-
-1. **WHEN:** Test execution fails after `maxIterations` (configured as 2)
-2. **HOW:** Use `runSubagent()` with agentName: `'buggenie'`
-3. **WHAT:** Pass comprehensive failure context including all error details
-4. **WHY:** Automatic defect reporting is part of the complete automation pipeline
-
-### ❌ DO NOT:
-- Skip BugGenie invocation if tests fail
-- Only log the command without executing it
-- Wait for user to manually invoke BugGenie
-
-### ✅ DO:
-- Automatically invoke BugGenie via `runSubagent()` after 2 failed iterations
-- Include all error messages from each iteration
-- Include test script path, environment, and MLS context
+### Rules:
+1. **WHEN:** Tests fail after `maxIterations` (3)
+2. **HOW:** `runSubagent()` with `agentName: 'buggenie'`
+3. **WHAT:** Pass all error details, environment, and MLS context
+4. ❌ DO NOT skip BugGenie invocation
+5. ❌ DO NOT just log the command without executing
+6. ✅ Auto-invoke after max iterations exhausted
 
 ---
 
-## �🚨 CRITICAL: FRESH BROWSER REQUIREMENT (NEW in v2.2)
+## ⚠ FRESH BROWSER REQUIREMENT
 
-**BEFORE any MCP exploration, the orchestrator MUST ensure a clean browser state:**
+**Before MCP exploration, ensure a clean browser state:**
+1. List all existing tabs via `unified_tabs({ action: 'list' })`
+2. Close ALL existing tabs (reverse order to avoid index shifting)
+3. Create a NEW fresh tab via `unified_tabs({ action: 'new' })`
 
-```javascript
-// MANDATORY: Close all existing tabs before exploration
-async function ensureFreshBrowser() {
-    console.log('🧹 Ensuring fresh browser state...');
-    
-    // Step 1: List all existing tabs
-    const existingTabs = await unified_tabs({ action: 'list' });
-    console.log(`   Found ${existingTabs?.length || 0} existing tab(s)`);
-    
-    // Step 2: Close ALL existing tabs (reverse order to avoid index shifting)
-    if (existingTabs && existingTabs.length > 0) {
-        for (let i = existingTabs.length - 1; i >= 0; i--) {
-            await unified_tabs({ action: 'close', index: i });
-            console.log(`   ✅ Closed tab ${i}`);
-        }
-    }
-    
-    // Step 3: Create a NEW fresh tab
-    await unified_tabs({ action: 'new' });
-    console.log('   ✅ Fresh browser window created');
-    
-    return true;
-}
-```
-
-**WHY THIS IS CRITICAL:**
-- ❌ Old tabs from previous sessions can interfere with exploration
-- ❌ Cached pages may show stale content
-- ❌ Multiple tabs can cause selector ambiguity
-- ✅ Fresh browser ensures clean, predictable state
-- ✅ All explorations start from same baseline
+This prevents stale pages, cached content, and selector ambiguity from previous sessions.
 
 ---
 
@@ -346,70 +248,9 @@ async function ensureFreshBrowser() {
 │  Input:  Test results from Stage 3                                             │
 │  Action: Report final status                                                   │
 │  Output: Workflow completion summary                                           │
-│          If FAIL after 2 attempts → Auto-invoke BugGenie                       │
+│          If FAIL after 3 attempts → Auto-invoke BugGenie                       │
 │                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────┘
-```
-
-### MANDATORY AGENT INVOCATION SEQUENCE
-
-When `workflow=jira-to-automation` is triggered:
-
-```javascript
-// STEP 1: Invoke TESTGENIE
-runSubagent({
-  agentName: 'testgenie',
-  prompt: `Generate test cases for ${ticketUrl} with ${testData} test data.
-           Export to agentic-workflow/test-cases/${ticketId}.xlsx
-           
-           MANDATORY OUTPUT FORMAT: Display test cases in chat using this EXACT table:
-           | Test Step ID | Specific Activity or Action | Expected Results | Actual Results |
-           - Start with 1.1 Launch OneHome application
-           - Combine steps when they exceed 1.5 steps
-           - Cover all acceptance criteria completely — do NOT summarize or truncate
-           Also export to Excel using agentic-workflow/scripts/excel-template-generator.js`
-});
-
-// WAIT for testgenie to complete and verify Excel exists
-
-// STEP 2: Invoke SCRIPTGENERATOR (with MANDATORY MCP exploration)
-// ⚠️ CRITICAL: ScriptGenerator MUST explore app BEFORE creating any script file
-runSubagent({
-  agentName: 'scriptgenerator', 
-  prompt: `Generate Playwright automation for ${ticketId}.
-           
-           🚨🚨🚨 MCP-FIRST ARCHITECTURE — YOUR FIRST TOOL CALL MATTERS 🚨🚨🚨
-           
-           Your VERY FIRST action must be calling MCP tools to explore the live app:
-           
-           CALL 1: mcp_unified-autom_unified_navigate → open ${baseUrl}?token=${token}
-           CALL 2: mcp_unified-autom_unified_snapshot → capture accessibility tree
-           CALL 3: Navigate to target pages + snapshot each one
-           
-           AFTER exploration, save to exploration-data/${ticketId}-exploration.json with:
-           - "source": "mcp-live-snapshot" (NOT "web-fetch-exploration")
-           - "snapshots": [array of snapshot data from each page]
-           
-           ONLY THEN create the .spec.js using REAL selectors from snapshots.
-           Add header: // Selectors validated via MCP live exploration on ${new Date().toISOString().split('T')[0]}
-           
-           ❌ DO NOT read files or search codebase BEFORE calling MCP tools
-           ❌ DO NOT use fetch_webpage as exploration substitute
-           ❌ DO NOT create .spec.js before taking at least ONE MCP snapshot
-           ❌ If MCP fails: STOP and report — do NOT fall back to guessed selectors
-           
-           Input Excel: test-cases/${ticketId}.xlsx
-           Environment: ${environment}
-           Test Data: ${testData}`
-});
-
-// WAIT for scriptgenerator to complete and verify script exists
-
-// STEP 3: Execute tests (scriptgenerator auto-executes OR orchestrator runs)
-// Tests run with intelligent iteration
-
-// STEP 4: Report results
-// If 3 failures → invoke buggenie
 ```
 
 ### ❌ COMMON MISTAKES TO AVOID
@@ -473,68 +314,12 @@ runSubagent({
 
 ### Execution Pattern (MANDATORY)
 
-**When a workflow is initiated, the orchestrator MUST:**
-
-1. **Initialize the workflow:**
-   ```javascript
-   const { WorkflowCoordinator } = require('./.github/agents/lib/workflow-coordinator');
-   const coordinator = new WorkflowCoordinator();
-   const workflow = coordinator.initializeWorkflow(ticketId, 'jira-to-automation');
-   ```
-
-2. **Invoke TestGenie and WAIT for completion:**
-   ```
-   runSubagent({
-     agentName: 'testgenie',
-     description: 'Generate test cases from Jira',
-     prompt: `Generate test cases for ticket ${ticketId}. WorkflowId: ${workflow.id}
-              
-              MANDATORY OUTPUT FORMAT: Display test cases in chat using this EXACT table:
-              | Test Step ID | Specific Activity or Action | Expected Results | Actual Results |
-              - Start with 1.1 Launch OneHome application
-              - Combine steps when they exceed 1.5 steps
-              - Cover all acceptance criteria completely — do NOT summarize
-              Also export to Excel using agentic-workflow/scripts/excel-template-generator.js`
-   });
-   ```
-
-3. **IMMEDIATELY after TestGenie returns, check workflow state:**
-   ```javascript
-   // Load updated workflow state
-   const coordinator = new WorkflowCoordinator();
-   const updatedWorkflow = coordinator.getWorkflow(workflow.id);
-   
-   console.log(`Current stage: ${updatedWorkflow.currentStage}`);
-   console.log(`Status: ${updatedWorkflow.status}`);
-   ```
-
-4. **Validate stage and invoke next agent:**
-   ```javascript
-   if (updatedWorkflow.currentStage === 'EXCEL_CREATE' && updatedWorkflow.status === 'ACTIVE') {
-     console.log('✅ TestGenie completed successfully - Excel file validated');
-     console.log('🔄 Continuing workflow - invoking ScriptGenerator...');
-     
-     // Invoke ScriptGenerator immediately
-     runSubagent({
-       agentName: 'scriptgenerator',
-       description: 'Generate Playwright automation',
-       prompt: `
-         Generate Playwright automation for ticket ${ticketId}.
-         WorkflowId: ${workflow.id}
-         Excel file: ${updatedWorkflow.artifacts.excelPath}
-         Environment: Canopy UAT
-       `
-     });
-   } else if (updatedWorkflow.status === 'FAILED') {
-     console.error('❌ TestGenie stage failed - workflow aborted');
-     return;
-   } else {
-     console.error(`⚠️ Unexpected stage: ${updatedWorkflow.currentStage}`);
-     return;
-   }
-   ```
-
-5. **After ScriptGenerator returns, finalize workflow:**
+1. **Initialize:** `coordinator.initializeWorkflow(ticketId, 'jira-to-automation')` → get workflow ID
+2. **Invoke TestGenie:** `runSubagent({ agentName: 'testgenie', ... })` — WAIT for completion
+3. **Validate:** Check `workflow.currentStage === 'EXCEL_CREATE'` and `workflow.status === 'ACTIVE'`. If not, STOP.
+4. **Invoke ScriptGenerator:** `runSubagent({ agentName: 'scriptgenerator', ... })` — pass `excelPath` from artifacts
+5. **Finalize:** Check `workflow.currentStage === 'SCRIPT_EXECUTE'`. Call `transitionToNextStage()` → COMPLETED.
+6. **On failure:** Call `failWorkflow(workflowId, reason)` → execute rollback → invoke BugGenie
    ```javascript
    // Load final workflow state
    const finalWorkflow = coordinator.getWorkflow(workflow.id);
@@ -663,8 +448,8 @@ const multiTicketPattern = /([A-Z]+-\d+)[\s,]+/g;
 | **EXCEL_CREATE** | TestGenie | Generate test cases + Export to Excel | File exists, size > 0, `.xlsx` extension | ✅ |
 | **MCP_EXPLORE** | ScriptGenerator | Live app exploration via Playwright MCP | Selectors captured | ✅ |
 | **SCRIPT_GENERATE** | ScriptGenerator | Generate Playwright test | File exists, size > 0, `.spec.js` extension | ✅ |
-| **SCRIPT_EXECUTE** | ScriptGenerator | Execute test (2 retry attempts) | Test runs (pass/fail recorded) | ✅ |
-| **FAILED** (Optional) | BugGenie | Create defect ticket (if 2 attempts fail) | Bug ticket review copy generated | ✅ |
+| **SCRIPT_EXECUTE** | ScriptGenerator | Execute test (3 retry attempts) | Test runs (pass/fail recorded) | ✅ |
+| **FAILED** (Optional) | BugGenie | Create defect ticket (if 3 attempts fail) | Bug ticket review copy generated | ✅ |
 | **COMPLETED** | Orchestrator | Finalize workflow | All artifacts present | - |
 
 **Critical Rules:**
@@ -702,32 +487,10 @@ const multiTicketPattern = /([A-Z]+-\d+)[\s,]+/g;
      - ✅ Can paste from Excel to Jira, Confluence, or any destination
    - **BLOCKING:** Must complete EXCEL_CREATE before continuing
 
-2b. **CRITICAL: Check Workflow State After TestGenie**
-   - **IMMEDIATELY after TestGenie subagent returns:**
-   ```javascript
-   const coordinator = new WorkflowCoordinator();
-   const workflow = coordinator.getWorkflow(workflowId);
-   
-   if (workflow.currentStage !== 'EXCEL_CREATE') {
-     console.error(`❌ TestGenie did not reach EXCEL_CREATE. Current: ${workflow.currentStage}`);
-     console.error(`Status: ${workflow.status}`);
-     if (workflow.errors.length > 0) {
-       console.error('Errors:', workflow.errors);
-     }
-     return; // Stop workflow
-   }
-   
-   if (workflow.status !== 'ACTIVE') {
-     console.error(`❌ Workflow status is ${workflow.status}, expected ACTIVE`);
-     return; // Stop workflow
-   }
-   
-   console.log('✅ TestGenie completed successfully - EXCEL_CREATE stage validated');
-   console.log(`📁 Excel file: ${workflow.artifacts.excelPath || workflow.history.find(h => h.stage === 'EXCEL_CREATE')?.data?.excelPath}`);
-   console.log('🔄 Proceeding to automation generation...');
-   ```
-   - **IF validation passes:** Continue to step 3
-   - **IF validation fails:** Display error and stop workflow
+2b. **Check Workflow State After TestGenie**
+   - Verify `workflow.currentStage === 'EXCEL_CREATE'` and `workflow.status === 'ACTIVE'`
+   - If validation passes, continue to step 3
+   - If validation fails, display error and stop workflow
    
 3. **Invoke ScriptGenerator** (Stage: MCP_EXPLORE → SCRIPT_GENERATE → SCRIPT_EXECUTE)
    - **PREREQUISITE CHECK:** Workflow must be at EXCEL_CREATE stage
@@ -796,7 +559,7 @@ const multiTicketPattern = /([A-Z]+-\d+)[\s,]+/g;
      - ✅ File exists
      - ✅ File size > 0 bytes
      - ✅ Extension is `.spec.js`
-   - **IF VALIDATION FAILS:** Enter retry cycle (up to 2 attempts)
+   - **IF VALIDATION FAILS:** Enter retry cycle (up to 3 attempts)
    - → Transition to SCRIPT_GENERATE
    - **Automatically executes test using terminal command (NO approval)**
      ```bash
@@ -804,248 +567,24 @@ const multiTicketPattern = /([A-Z]+-\d+)[\s,]+/g;
      ```
    - → Transition to SCRIPT_EXECUTE
 
-3b. **CRITICAL: Verify MCP Exploration Was ACTUALLY Performed After ScriptGenerator Returns**
-   - **IMMEDIATELY after ScriptGenerator subagent returns, BEFORE checking workflow state:**
-   
-   ```javascript
-   // ══════════════════════════════════════════════════════════
-   // MANDATORY: VERIFY MCP EXPLORATION WAS LIVE (NOT WEB-FETCH)
-   // ══════════════════════════════════════════════════════════
-   const fs = require('fs');
-   const explorationPath = `exploration-data/${ticketId}-exploration.json`;
-   
-   let mcpVerified = false;
-   
-   if (fs.existsSync(explorationPath)) {
-     const exploration = JSON.parse(fs.readFileSync(explorationPath, 'utf8'));
-     
-     // CHECK 1: Source must be "mcp-live-snapshot" (NOT "web-fetch-exploration")
-     if (exploration.source === 'web-fetch-exploration') {
-       console.error('❌ FAILED: Exploration used web-fetch, NOT live MCP snapshot');
-       console.error('   ScriptGenerator must call mcp_unified-autom_unified_navigate + mcp_unified-autom_unified_snapshot');
-       mcpVerified = false;
-     }
-     // CHECK 2: Must have snapshots array with data
-     else if (!Array.isArray(exploration.snapshots) || exploration.snapshots.length === 0) {
-       console.error('❌ FAILED: No MCP snapshots found in exploration data');
-       console.error('   ScriptGenerator must call mcp_unified-autom_unified_snapshot at least once');
-       mcpVerified = false;
-     }
-     // CHECK 3: Source must be a recognized live source
-     else if (exploration.source !== 'mcp-live-snapshot' && exploration.source !== 'mcp-snapshot') {
-       console.error(`❌ FAILED: Unrecognized exploration source: "${exploration.source}"`);
-       mcpVerified = false;
-     }
-     else {
-       console.log('✅ MCP exploration verified: source=' + exploration.source + ', snapshots=' + exploration.snapshots.length);
-       mcpVerified = true;
-     }
-   } else {
-     console.error('❌ FAILED: No exploration data found at ' + explorationPath);
-     mcpVerified = false;
-   }
-   
-   // CHECK 4: Verify the generated .spec.js has the MCP exploration header comment
-   const specDir = `tests/specs/${ticketId.toLowerCase()}`;
-   if (fs.existsSync(specDir)) {
-     const specFiles = fs.readdirSync(specDir).filter(f => f.endsWith('.spec.js'));
-     if (specFiles.length > 0) {
-       const specContent = fs.readFileSync(`${specDir}/${specFiles[0]}`, 'utf8');
-       if (!specContent.includes('Selectors validated via MCP live exploration')) {
-         console.warn('⚠️ WARNING: Script missing MCP exploration header comment');
-       }
-     }
-   }
-   
-   // IF MCP VERIFICATION FAILED: Re-invoke ScriptGenerator with explicit error
-   if (!mcpVerified) {
-     console.log('🔄 RE-INVOKING ScriptGenerator — MCP exploration was NOT performed properly');
-     runSubagent({
-       agentName: 'scriptgenerator',
-       description: 'RE-RUN: MCP exploration was missing',
-       prompt: `⚠️ PREVIOUS ATTEMPT FAILED MCP VERIFICATION ⚠️
-       
-       Your previous script generation did NOT use live MCP exploration.
-       The exploration data is either missing, has source "web-fetch-exploration", 
-       or has no snapshots array.
-       
-       YOU MUST FIX THIS:
-       1. Your FIRST tool call must be: mcp_unified-autom_unified_navigate
-       2. Your SECOND tool call must be: mcp_unified-autom_unified_snapshot
-       3. Save exploration with "source": "mcp-live-snapshot" and "snapshots" array
-       4. Only THEN create/update the .spec.js file
-       
-       DO NOT use fetch_webpage or guess selectors.
-       
-       Ticket: ${ticketId}
-       Input Excel: test-cases/${ticketId}.xlsx
-       Output: tests/specs/${ticketId.toLowerCase()}/*.spec.js`
-     });
-     // After re-invocation, verify again before proceeding
-   }
-   ```
-   
-   **THEN check workflow state:**
-   ```javascript
-   const coordinator = new WorkflowCoordinator();
-   const workflow = coordinator.getWorkflow(workflowId);
-   
-   console.log(`Final stage: ${workflow.currentStage}`);
-   console.log(`Status: ${workflow.status}`);
-   
-   if (workflow.currentStage === 'SCRIPT_EXECUTE' && workflow.status === 'ACTIVE') {
-     console.log('✅ ScriptGenerator completed successfully - test executed');
-     console.log('🎯 Finalizing workflow...');
-     
-     // Transition to COMPLETED
-     coordinator.transitionToNextStage(workflowId, {
-       message: 'Workflow completed successfully'
-     });
-   } else if (workflow.currentStage === 'COMPLETED') {
-     console.log('✅ Workflow already marked as COMPLETED');
-   } else if (workflow.status === 'FAILED') {
-     console.error('❌ ScriptGenerator stage failed');
-     if (workflow.errors.length > 0) {
-       console.error('Errors:', workflow.errors);
-     }
-   }
-   ```
-   - **Display workflow summary to user**
+3b. **Verify MCP Exploration Was ACTUALLY Performed**
+   - After ScriptGenerator returns, check `exploration-data/{ticketId}-exploration.json`
+   - Verify: `source === 'mcp-live-snapshot'` (NOT `'web-fetch-exploration'`)
+   - Verify: `snapshots` array exists and is non-empty
+   - Verify: Generated `.spec.js` contains header comment `Selectors validated via MCP live exploration`
+   - If verification fails: re-invoke ScriptGenerator with explicit error context
+   - Then check `workflow.currentStage === 'SCRIPT_EXECUTE'` and finalize
 
-4. **Intelligent Error Handling & Auto-Retry (Up to 2 Attempts) with HYBRID MCP RECOVERY**
-   
-   **CRITICAL: When tests fail, orchestrator MUST invoke Chrome DevTools MCP for self-healing:**
-   
-   ```javascript
-   // STEP 1: First test execution fails
-   const firstResult = await executeScript(scriptPath);
-   
-   if (!firstResult.allPassed) {
-       console.log('⚠️ First execution failed - SWITCHING TO CHROME DEVTOOLS MCP');
-       console.log('🔧 Initiating self-healing with Chrome DevTools MCP...');
-       
-       // STEP 2: Parse failure details
-       const failureAnalysis = parseFailure(firstResult.error);
-       console.log(`   Failed element: ${failureAnalysis.elementText}`);
-       console.log(`   Failed selector: ${failureAnalysis.failedSelector}`);
-       
-       // STEP 3: Navigate to failing page with Chrome DevTools MCP
-       await unified_navigate({ url: failureAnalysis.failingUrl });
-       console.log('   ✅ Navigated to failing page with Chrome DevTools');
-       
-       // STEP 4: Capture detailed DOM snapshot
-       const snapshot = await unified_snapshot();
-       console.log('   ✅ DOM snapshot captured');
-       
-       // STEP 5: Self-healing selector discovery using evaluate_script
-       const healedSelectors = await unified_evaluate_script({
-           function: `() => {
-               const searchText = '${failureAnalysis.elementText}';
-               const elements = Array.from(document.querySelectorAll('a, button, span, div, li, p'))
-                   .filter(el => el.textContent.toLowerCase().includes(searchText.toLowerCase()))
-                   .filter(el => el.children.length === 0 || ['A','BUTTON'].includes(el.tagName));
-               
-               return elements.slice(0, 5).map(el => ({
-                   selector: el.getAttribute('data-test-id') || el.getAttribute('data-testid') || el.id,
-                   ariaLabel: el.getAttribute('aria-label'),
-                   tagName: el.tagName.toLowerCase(),
-                   role: el.getAttribute('role'),
-                   textContent: el.textContent.trim().substring(0, 50),
-                   xpath: getXPath(el)
-               }));
-               
-               function getXPath(el) {
-                   if (!el) return '';
-                   if (el.id) return '//*[@id="' + el.id + '"]';
-                   if (el === document.body) return '/html/body';
-                   let ix = 0;
-                   let siblings = el.parentNode.childNodes;
-                   for (let i = 0; i < siblings.length; i++) {
-                       let sibling = siblings[i];
-                       if (sibling === el) return getXPath(el.parentNode) + '/' + el.tagName.toLowerCase() + '[' + (ix + 1) + ']';
-                       if (sibling.nodeType === 1 && sibling.tagName === el.tagName) ix++;
-                   }
-               }
-           }`
-       });
-       
-       console.log(`   ✅ Found ${healedSelectors.length} alternative selector(s)`);
-       
-       // STEP 6: Update script with healed selector
-       if (healedSelectors && healedSelectors.length > 0) {
-           updateScriptWithHealedSelector(scriptPath, failureAnalysis.failedSelector, healedSelectors[0]);
-           console.log('   ✅ Script updated with healed selector');
-           
-           // STEP 7: Re-execute tests
-           const retryResult = await executeScript(scriptPath);
-           if (retryResult.allPassed) {
-               console.log('✅ Tests PASSED after Chrome DevTools self-healing!');
-               return retryResult;
-           }
-       }
-   }
-   ```
-   
-   - **Attempt 1 - Chrome DevTools Self-Healing:** Analyze error, use evaluate_script to discover alternative selectors, update script, auto-execute
-   - **Attempt 2 - Full MCP Re-Exploration:** Re-explore failing step with full Chrome DevTools MCP analysis, capture all DOM details, apply XPath fallbacks, auto-execute
-   - **If test passes:** Transition to COMPLETED ✅
-   - **If all 2 attempts fail:**** 
-     - Call `failWorkflow(workflowId, reason)`
-     - Execute rollback strategy (preserve Excel, cleanup scripts)
-     - **AUTOMATICALLY invoke BugGenie** (Default path)
+4. **Intelligent Error Handling & Self-Healing (Up to 3 Attempts)**
+   - **Attempt 1 — Chrome DevTools Self-Healing:** Parse failure, use `unified_evaluate` to discover alternative selectors, update script, auto-execute
+   - **Attempt 2 — Full MCP Re-Exploration:** Navigate to failing page, capture fresh DOM snapshot, apply selector fallbacks, auto-execute
+   - **Attempt 3 — Extended Analysis:** Deep snapshot analysis with XPath fallbacks
+   - If all attempts fail → `failWorkflow()` → execute rollback → auto-invoke BugGenie
 
-4b. **BugGenie Invocation After 2 Failed Attempts**
-   - **CRITICAL: After ScriptGenerator exhausts all 2 retry attempts:**
-   ```javascript
-   const coordinator = new WorkflowCoordinator();
-   const workflow = coordinator.getWorkflow(workflowId);
-   
-   if (workflow.status === 'FAILED' && workflow.errors.length >= 2) {
-     console.log('❌ Script execution failed after 2 attempts');
-     console.log('🐛 Automatically invoking BugGenie to create defect ticket...');
-     
-     // Collect failure context from all attempts
-     const failureContext = {
-       ticketId: workflow.ticketId,
-       testScriptPath: workflow.artifacts.scriptPath,
-       attempts: workflow.errors.map(e => ({
-         attempt: e.attempt || 'N/A',
-         error: e.message,
-         timestamp: e.timestamp
-       })),
-       environment: workflow.options.environment || 'UAT',
-       mlsContext: workflow.options.mlsContext || 'Canopy'
-     };
-     
-     // Invoke BugGenie with comprehensive failure details
-     runSubagent({
-       agentName: 'buggenie',
-       description: 'Create bug ticket for test failure',
-       prompt: `
-         AUTOMATED TEST FAILURE - Create bug ticket review copy
-         
-         Test automation failed after 2 retry attempts.
-         
-         **Failure Context:**
-         - Jira Ticket: ${failureContext.ticketId}
-         - Test Script: ${failureContext.testScriptPath}
-         - Environment: ${failureContext.environment}
-         - MLS: ${failureContext.mlsContext}
-         
-         **Attempt 1 Error:**
-         ${failureContext.attempts[0]?.error || 'N/A'}
-         
-         **Attempt 2 Error:**
-         ${failureContext.attempts[1]?.error || 'N/A'}
-         
-         Generate a review copy of the bug ticket following the two-step process.
-         Include all error details in the bug description.
-         
-         After review copy is presented, wait for user confirmation before creating the Jira ticket.
-       `
-     });
-   }
-   ```
+4b. **BugGenie Auto-Invocation After Failed Attempts**
+   - When `workflow.status === 'FAILED'` and `workflow.errors.length >= maxIterations`:
+   - Invoke `runSubagent({ agentName: 'buggenie', ... })` with failure context
+   - Include: ticketId, scriptPath, environment, MLS, all error messages from each iteration
    
    - **Two-Step Process (BugGenie Requirement):**
      1. BugGenie generates **review copy** with formatted bug details
@@ -1075,7 +614,7 @@ const multiTicketPattern = /([A-Z]+-\d+)[\s,]+/g;
    - Commands run immediately without prompts
 
 7. **🐛 CRITICAL: BugGenie Auto-Invocation on Failure**
-   - **IF** tests fail after 2 iterations → **MUST** invoke BugGenie via `runSubagent()`
+   - **IF** tests fail after 3 iterations → **MUST** invoke BugGenie via `runSubagent()`
    - **DO NOT** just log the command - actually execute `runSubagent({ agentName: 'buggenie', ... })`
    - This is a MANDATORY step, not optional
 
@@ -1083,7 +622,7 @@ const multiTicketPattern = /([A-Z]+-\d+)[\s,]+/g;
 - ✅ **Preserve:** `test-cases/*.xlsx` (TestGenie artifacts)
 - ✅ **Preserve:** Test scripts and error logs (for BugGenie context)
 - 🧹 **Cleanup:** Temporary files, intermediate results
-- 📊 **Record:** Error details in workflow state (all 2 attempts)
+- 📊 **Record:** Error details in workflow state (all 3 attempts)
 - 🐛 **Auto-invoke:** BugGenie agent for defect ticket creation via `runSubagent()`
 - 🎯 **Status:** Workflow marked as ROLLED_BACK
 - 📝 **Output:** Bug ticket review copy presented to user
@@ -1096,110 +635,7 @@ OR
 
 "Automate testing for Jira ticket AOTF-1234"
 
-**Orchestrator Response:**
-
-```
-🚀 Starting WORKFLOW: jira-to-automation for AOTF-1234
-📊 Workflow ID: AOTF-1234-1736294400000
-⏱️ Estimated time: 3-4 minutes
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Stage 1/8: PENDING → JIRA_FETCHED
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎯 Invoking TestGenie subagent...
-⏳ Waiting for TestGenie to complete...
-✅ Transition complete: JIRA_FETCHED
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Stage 2/8: JIRA_FETCHED → TESTCASES_GENERATED
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📝 Generating test cases...
-✅ Transition complete: EXCEL_CREATE
-
-# 🚀💙 **Powered by Doremon Team** 💙🚀
-
-## Test Case 1: Verify Search Functionality
-
-| Test Step ID | Specific Activity or Action | Expected Results | Actual Results |
-|--------------|----------------------------|------------------|----------------|
-| 1.1 | Launch OneHome application | App loads successfully | App loads successfully |
-| 1.2 | Apply search filters for City, Beds, Baths | Filters should apply correctly | Filters apply correctly |
-| 1.3 | Verify search results display | Results should match filters | Results match filters |
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Stage 3/8: EXCEL_CREATE → MCP_EXPLORE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 Exporting to Excel...
-✅ File created: test-cases/AOTF-1234.xlsx
-✅ Validation passed: File exists, size: 15.2 KB
-✅ Transition complete: EXCEL_CREATED
-
-[TestGenie subagent completes and returns control]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔍 ORCHESTRATOR: Checking workflow state...
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ Current stage: EXCEL_CREATED
-✅ Status: ACTIVE
-✅ Excel artifact validated: test-cases/AOTF-1234.xlsx
-🔄 Continuing to automation generation...
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Stage 4/8: EXCEL_CREATE → MCP_EXPLORE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎯 Invoking ScriptGenerator subagent...
-⏳ Waiting for ScriptGenerator to complete...
-✅ Pre-validation: Excel file found at test-cases/AOTF-1234.xlsx
-🔍 Exploring application with Playwright MCP...
-   → Navigating to application URL
-   → Executing test step 1.1: Launch OneHome
-   → ✅ Captured selector: [data-testid="home-button"]
-   → Executing test step 1.2: Apply filters
-   → ✅ Captured selector: button[aria-label="Apply Filters"]
-✅ Transition complete: SCRIPT_EXPLORATION
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Stage 5/8: SCRIPT_EXPLORATION → SCRIPT_GENERATED
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📝 Generating Playwright test with proven selectors...
-✅ File created: tests/specs/aotf-1234/verify-search-functionality.spec.js
-✅ Validation passed: File exists, size: 3.8 KB
-✅ Transition complete: SCRIPT_GENERATE
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Stage 6/8: SCRIPT_GENERATE → SCRIPT_EXECUTE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🏃 Auto-executing test...
-▶️ npx playwright test tests/specs/aotf-1234/verify-search-functionality.spec.js --reporter=list --headed
-
-Running 1 test using 1 worker
-  ✓  1 verify-search-functionality.spec.js:3:1 › Search Functionality (5.2s)
-
-1 passed (5.2s)
-
-✅ TEST PASSED on first attempt!
-✅ Transition complete: SCRIPT_EXECUTE
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Stage 7/8: SCRIPT_EXECUTE → COMPLETED
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎉 Finalizing workflow...
-✅ Transition complete: COMPLETED
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 WORKFLOW SUMMARY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ Status: COMPLETED
-⏱️ Duration: 3m 45s
-📊 Progress: 8/8 stages (100%)
-
-📁 Artifacts Generated:
-   ✅ test-cases/AOTF-1234.xlsx (15.2 KB)
-   ✅ tests/specs/aotf-1234/verify-search-functionality.spec.js (3.8 KB)
-   ✅ playwright-report/index.html
-
-🚀💙 Powered by Doremon Team 💙🚀
-```
+**Orchestrator outputs:** Workflow ID, stage-by-stage progress (PENDING → JIRA_FETCHED → EXCEL_CREATE → MCP_EXPLORE → SCRIPT_GENERATE → SCRIPT_EXECUTE → COMPLETED), test case tables in chat, artifact paths, final summary with duration and status.
 
 ---
 
@@ -1337,79 +773,17 @@ Stage 7/8: SCRIPT_EXECUTE → COMPLETED
 
 ## 🎯 Workflow Initialization & State Management
 
-### Loading Workflow Coordinator
+### WorkflowCoordinator API
 
-**At workflow start, the orchestrator MUST:**
-
-1. **Load the workflow coordinator module:**
-   ```javascript
-   const { WorkflowCoordinator } = require('./.github/agents/lib/workflow-coordinator');
-   const coordinator = new WorkflowCoordinator();
-   ```
-
-2. **Initialize workflow for ticket:**
-   ```javascript
-   const workflow = coordinator.initializeWorkflow('AOTF-1234', 'jira-to-automation');
-   console.log(`Workflow ID: ${workflow.id}`);
-   console.log(`Current Stage: ${workflow.currentStage}`); // PENDING
-   ```
-
-3. **Pass workflow ID to subagents:**
-   - Include `workflowId` in subagent context
-   - Subagents report back stage transitions
-   - Orchestrator calls `transitionToNextStage(workflowId, data)`
-
-4. **Validate before stage transitions:**
-   ```javascript
-   // After TestGenie completes Excel export
-   coordinator.transitionToNextStage(workflowId, {
-     message: 'Excel file created',
-     excelPath: 'test-cases/AOTF-1234.xlsx'
-   });
-   // → Automatically validates file existence, size, extension
-   // → Transitions to next stage only if valid
-   // → Throws error if validation fails
-   ```
-
-5. **Handle validation failures:**
-   ```javascript
-   try {
-     coordinator.transitionToNextStage(workflowId, data);
-   } catch (error) {
-     // Validation failed
-     coordinator.failWorkflow(workflowId, error.message);
-     // → Executes rollback strategy
-     // → Preserves TestGenie artifacts
-     // → Reports error to user
-   }
-   ```
-
-6. **Get workflow summary for user:**
-   ```javascript
-   const summary = coordinator.getWorkflowSummary(workflowId);
-   console.log(`Status: ${summary.status}`);
-   console.log(`Progress: ${summary.progress}`);
-   console.log(`Duration: ${summary.duration}`);
-   console.log(`Artifacts: ${JSON.stringify(summary.artifacts)}`);
-   ```
+1. **Load:** `const coordinator = new WorkflowCoordinator()` (from `.github/agents/lib/workflow-coordinator`)
+2. **Initialize:** `coordinator.initializeWorkflow(ticketId, 'jira-to-automation')` → returns `{ id, currentStage: 'PENDING' }`
+3. **Pass** `workflowId` to subagents. They report stage transitions.
+4. **Transition:** `coordinator.transitionToNextStage(workflowId, { excelPath, scriptPath })` — auto-validates file existence, size, extension
+5. **On failure:** `coordinator.failWorkflow(workflowId, reason)` — executes rollback, preserves artifacts
+6. **Summary:** `coordinator.getWorkflowSummary(workflowId)` — returns status, progress, duration, artifacts
 
 ### State Persistence
-
-**Workflow state is automatically saved to:**
-`.github/agents/workflow-state.json`
-
-**State is persisted after every:**
-- ✅ Workflow initialization
-- ✅ Stage transition
-- ✅ Artifact recording
-- ✅ Error recording
-- ✅ Workflow failure/completion
-
-**Benefits:**
-- ✅ Survives VS Code restarts
-- ✅ Enables workflow resumption
-- ✅ Provides audit trail
-- ✅ Supports parallel workflows
+Workflow state saved to `.github/agents/workflow-state.json` after every initialization, transition, error, and completion. Survives VS Code restarts and supports parallel workflows.
 
 ---
 

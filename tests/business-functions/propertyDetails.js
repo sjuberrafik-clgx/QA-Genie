@@ -11,9 +11,8 @@ class PropertyDetailsFunctions {
     async openRandomPropertyFromGrid() {
         try {
             const displayedProperties = this.propertiesGrid.displayedProperties;
-            await this.page.waitForTimeout(1500);
             await displayedProperties.first().waitFor({ state: 'visible', timeout: 10000 });
-            
+
             const count = await displayedProperties.count();
             if (count === 0) {
                 console.log('No properties found');
@@ -50,7 +49,6 @@ class PropertyDetailsFunctions {
 
             // Click to open details
             await randomProperty.click();
-            await this.page.waitForTimeout(2000);
             await this.propertyDetails.propertyDetails.waitFor({ state: 'visible', timeout: 15000 });
 
             return propertyData;
@@ -66,7 +64,7 @@ class PropertyDetailsFunctions {
             await displayedProperties.first().waitFor({ state: 'visible', timeout: 10000 });
 
             const property = displayedProperties.nth(propertyNumber - 1);
-            
+
             let propertyPrice = '';
             try {
                 const priceElement = property.locator('[data-qa="house-price"]');

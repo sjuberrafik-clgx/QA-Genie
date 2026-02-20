@@ -10,7 +10,7 @@ const userProfilePopUp = require('../pageobjects/userProfilePopUp');
 const activateAccount = require('../pageobjects/activateAccount');
 // const { expect } = require('allure-playwright');
 const { stat } = require('fs');
-const {test, expect} = require('@playwright/test');
+const { test, expect } = require('@playwright/test');
 
 
 
@@ -41,7 +41,7 @@ class LoginFunctions {
         }
 
         await this.openSignInPageAndLogin(credentials);
-        await this.page.waitForTimeout(1000);
+        await this.page.waitForLoadState('domcontentloaded');
         await this.compareAllPopUp.skipAllComparePopUp();
         return await this.generalFunctions.waitForGridIsDisplayed();
     }
@@ -53,7 +53,7 @@ class LoginFunctions {
         }
         await this.openSignInPageAndLogin(credentials);
         await this.page.waitForLoadState('load');
-        await this.page.waitForTimeout(2000);
+        await this.page.waitForLoadState('networkidle');
         await this.compareAllPopUp.skipAllComparePopUp();
         return await this.generalFunctions.waitForMapIsLoaded();
 
@@ -78,13 +78,13 @@ class LoginFunctions {
 
     async enterCredentialsClickSignIn(credentials) {
 
-        await this.page.waitForTimeout(1500);
+        await this.loginPage.emailInput.waitFor({ state: 'visible', timeout: 10000 });
         await this.loginPage.emailInput.fill(credentials.email);
         await this.loginPage.passwordInput.fill(credentials.password);
         await this.loginPage.signInButton.click();
         await this.page.waitForLoadState('load');
-        await this.page.waitForTimeout(2000);
-        
+        await this.page.waitForLoadState('networkidle');
+
         // Handle agent branding popup if displayed
         try {
             await this.agentBranding.continueCTA.waitFor({ state: 'visible', timeout: 5000 });
@@ -92,7 +92,7 @@ class LoginFunctions {
         } catch (e) {
             // Agent branding not displayed, continue
         }
-        
+
         // Handle welcome popup if displayed
         try {
             await this.welcomePopUp.container.waitFor({ state: 'visible', timeout: 5000 });
@@ -104,12 +104,11 @@ class LoginFunctions {
 
 
     async signOut() {
-       
-        await this.page.waitForTimeout(3000);
+        await this.page.waitForLoadState('networkidle');
         await this.homePage.userProfile.waitFor({ state: 'visible', timeout: 10000 });
         await this.homePage.userProfile.click({ force: true });
         await this.userProfilePopUp.signOutButton.click();
-        await this.page.waitForTimeout(2000);
+        await this.page.waitForLoadState('load');
         await expect(this.logoutPage.signInButton).toBeVisible();
 
     }

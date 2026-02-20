@@ -38,12 +38,7 @@
         "lastUpdated": "2026-01-28"
     },
     "pipeline": {
-        "stages": [
-            "testgenie",
-            "scriptgenerator",
-            "execute",
-            "report"
-        ],
+        "_comment": "Actual pipeline stages are managed by the orchestrator agent (9 stages). This config controls enforcement.",
         "enforceSequence": true,
         "allowSkip": false
     },
@@ -521,7 +516,7 @@
         }
     },
     "testExecution": {
-        "maxIterations": 2,
+        "maxIterations": 3,
         "selfHealingEnabled": true,
         "timeout": {
             "test": 60000,
@@ -559,14 +554,14 @@
             "_comment": "Override via .env: UAT_URL",
             "baseUrl": "https://<your-app-uat>.example.com",
             "testDataSource": "tests/test-data/testData.js",
-            "tokenPath": "userTokensUAT",
+            "tokenPath": "userTokens",
             "defaultMLS": "canopy"
         },
         "PROD": {
             "_comment": "Override via .env: PROD_URL",
             "baseUrl": "https://<your-app>.example.com",
             "testDataSource": "tests/test-data/testData.js",
-            "tokenPath": "userTokensPROD",
+            "tokenPath": "userTokens",
             "defaultMLS": null,
             "readOnly": true
         }

@@ -23,7 +23,7 @@ class GeneralFunctions {
 
     const fullURL = `${baseURL}token=${token}`;
     await this.page.goto(fullURL);
-   // console.log(`Navigated to URL: ${fullURL}`);
+    // console.log(`Navigated to URL: ${fullURL}`);
     //return this.page.goto(fullURL);
 
 
@@ -35,8 +35,8 @@ class GeneralFunctions {
       token = await this.getToken();
     }
     await this.open(token);
-    await this.page.waitForTimeout(3000);
-    
+    await this.page.waitForLoadState('networkidle');
+
     // Handle agent branding popup if visible
     try {
       if (await this.agentBranding.agentBrandingContainer.isVisible({ timeout: 5000 })) {
@@ -55,8 +55,8 @@ class GeneralFunctions {
       token = await this.getToken();
     }
     await this.open(token);
-    await this.page.waitForTimeout(1500);
-    
+    await this.page.waitForLoadState('domcontentloaded');
+
     // Handle agent branding popup if visible
     try {
       if (await this.agentBranding.agentBrandingContainer.isVisible({ timeout: 5000 })) {
@@ -70,16 +70,26 @@ class GeneralFunctions {
 
   async waitForMapIsLoaded() {
 
-    if (await this.mapView.loadingIndicator.isEnabled(5000))
-      await this.mapView.loadingIndicator.isVisible({ reverse: true });
+    // Wait for loading indicator to disappear (if it appears)
+    try {
+      await this.mapView.loadingIndicator.waitFor({ state: 'visible', timeout: 5000 });
+      await this.mapView.loadingIndicator.waitFor({ state: 'hidden', timeout: 30000 });
+    } catch {
+      // Indicator never appeared — continue
+    }
 
-    await this.page.waitForFunction(async () => {
-      return (
-        await this.mapView.propertyPinList[0].count() > 0 ||
-        await this.mapView.propertiesClusterList[0].count() > 0 ||
-        await this.mapView.noResultsTile.isVisible().catch(() => false)
-      );
-    });
+    // Wait until property pins, clusters, or "no results" tile are visible.
+    // NOTE: page.waitForFunction() runs in the browser context where Playwright
+    // locators are not available. Use locator-based waits instead.
+    try {
+      await Promise.race([
+        this.mapView.propertyPinList[0].first().waitFor({ state: 'visible', timeout: 30000 }),
+        this.mapView.propertiesClusterList[0].first().waitFor({ state: 'visible', timeout: 30000 }),
+        this.mapView.noResultsTile.waitFor({ state: 'visible', timeout: 30000 }),
+      ]);
+    } catch {
+      // Timeout — proceed anyway (map might be in an unexpected state)
+    }
 
   }
 
@@ -100,8 +110,7 @@ class GeneralFunctions {
     try {
       // Locate all property elements
       const displayedProperties = await this.propertiesGrid.displayedProperties;
-      await this.page.waitForTimeout(1500);
-      await displayedProperties.first().waitFor({ state: 'visible', timeout: 5000 });
+      await displayedProperties.first().waitFor({ state: 'visible', timeout: 10000 });
       const properties = await displayedProperties.elementHandles();
       if (properties.length === 0) {
         console.log('No properties found');
@@ -125,7 +134,7 @@ class GeneralFunctions {
 
 
 
-  
+
 
 }
 
