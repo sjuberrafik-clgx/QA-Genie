@@ -24,6 +24,87 @@ function loadEnvVars() {
     } catch { /* dotenv not installed */ }
 }
 
+// ─── TTL Cache for Tool Results ─────────────────────────────────────────────
+
+/**
+ * Lightweight TTL cache for idempotent tool results.
+ * Prevents redundant I/O when the same tool is called multiple times
+ * across sessions within a pipeline run (e.g., get_framework_inventory
+ * called by scriptgenerator then codereviewer within minutes).
+ *
+ * Default TTL: 5 minutes. Cache is per-process (singleton).
+ */
+class ToolResultCache {
+    constructor(defaultTTL = 5 * 60 * 1000) {
+        this._cache = new Map();
+        this._defaultTTL = defaultTTL;
+        this._hits = 0;
+        this._misses = 0;
+    }
+
+    /**
+     * Get a cached result, or compute and cache it.
+     *
+     * @param {string} key         - Cache key (typically tool name + serialized args)
+     * @param {Function} compute   - async function to compute the result if not cached
+     * @param {number} [ttl]       - Custom TTL in ms (default: 5 min)
+     * @returns {Promise<*>}       - The cached or freshly computed result
+     */
+    async getOrCompute(key, compute, ttl) {
+        const entry = this._cache.get(key);
+        const now = Date.now();
+
+        if (entry && (now - entry.timestamp) < (ttl || this._defaultTTL)) {
+            this._hits++;
+            return entry.value;
+        }
+
+        this._misses++;
+        const value = await compute();
+        this._cache.set(key, { value, timestamp: now });
+
+        // Evict stale entries periodically (keep cache size bounded)
+        if (this._cache.size > 50) {
+            this._evictStale();
+        }
+
+        return value;
+    }
+
+    /** Remove entries older than their TTL */
+    _evictStale() {
+        const now = Date.now();
+        for (const [key, entry] of this._cache) {
+            if ((now - entry.timestamp) > this._defaultTTL) {
+                this._cache.delete(key);
+            }
+        }
+    }
+
+    /** Clear the entire cache (useful after config changes) */
+    clear() {
+        this._cache.clear();
+        this._hits = 0;
+        this._misses = 0;
+    }
+
+    /** Get cache statistics for diagnostics */
+    getStats() {
+        return {
+            size: this._cache.size,
+            hits: this._hits,
+            misses: this._misses,
+            hitRate: this._hits + this._misses > 0
+                ? ((this._hits / (this._hits + this._misses)) * 100).toFixed(1) + '%'
+                : 'N/A',
+        };
+    }
+}
+
+// Singleton cache instance
+const _toolCache = new ToolResultCache();
+function getToolCache() { return _toolCache; }
+
 // ─── Tool Definitions ───────────────────────────────────────────────────────
 
 /**
@@ -157,26 +238,31 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                 },
             },
             handler: async ({ page, ticketId, limit }) => {
-                try {
-                    let failures;
-                    if (ticketId) {
-                        failures = learningStore.getFailuresForTicket(ticketId);
-                    } else if (page) {
-                        failures = learningStore.getFailuresForPage(page);
-                    } else {
-                        failures = learningStore.getRecentFailures(limit || 20);
+                const cache = getToolCache();
+                const cacheKey = `historical_failures:${ticketId || ''}:${page || ''}:${limit || 20}`;
+
+                return cache.getOrCompute(cacheKey, async () => {
+                    try {
+                        let failures;
+                        if (ticketId) {
+                            failures = learningStore.getFailuresForTicket(ticketId);
+                        } else if (page) {
+                            failures = learningStore.getFailuresForPage(page);
+                        } else {
+                            failures = learningStore.getRecentFailures(limit || 20);
+                        }
+
+                        const stableMappings = learningStore.getStableSelectors(page);
+
+                        return JSON.stringify({
+                            failures,
+                            stableSelectors: stableMappings,
+                            summary: `${failures.length} historical failures found, ${stableMappings.length} stable selector mappings`,
+                        }, null, 2);
+                    } catch (error) {
+                        return JSON.stringify({ failures: [], error: error.message });
                     }
-
-                    const stableMappings = learningStore.getStableSelectors(page);
-
-                    return JSON.stringify({
-                        failures,
-                        stableSelectors: stableMappings,
-                        summary: `${failures.length} historical failures found, ${stableMappings.length} stable selector mappings`,
-                    }, null, 2);
-                } catch (error) {
-                    return JSON.stringify({ failures: [], error: error.message });
-                }
+                }, 2 * 60 * 1000); // 2 min TTL — failures update more frequently
             },
         }));
     }
@@ -296,26 +382,31 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                 },
             },
             handler: async ({ pageType }) => {
-                try {
-                    const AssertionConfigHelper = require('../utils/assertionConfigHelper');
-                    const helper = new AssertionConfigHelper();
-                    const framework = helper.getActiveFramework();
-                    const assertions = helper.getAssertionsByCategory(pageType || 'default');
-                    const antiPatterns = helper.getAntiPatterns ? helper.getAntiPatterns() : [];
+                const cache = getToolCache();
+                const cacheKey = `assertion_config:${pageType || 'default'}`;
 
-                    return JSON.stringify({
-                        framework,
-                        assertions,
-                        antiPatterns,
-                        tips: [
-                            'Always use auto-retrying assertions (toBeVisible, toContainText, toBeEnabled)',
-                            'Never use expect(await el.textContent()).toContain() — use await expect(el).toContainText()',
-                            'Never use expect(await el.isVisible()).toBe(true) — use await expect(el).toBeVisible()',
-                        ],
-                    }, null, 2);
-                } catch (error) {
-                    return JSON.stringify({ error: `Config load failed: ${error.message}` });
-                }
+                return cache.getOrCompute(cacheKey, async () => {
+                    try {
+                        const AssertionConfigHelper = require('../utils/assertionConfigHelper');
+                        const helper = new AssertionConfigHelper();
+                        const framework = helper.getActiveFramework();
+                        const assertions = helper.getAssertionsByCategory(pageType || 'default');
+                        const antiPatterns = helper.getAntiPatterns ? helper.getAntiPatterns() : [];
+
+                        return JSON.stringify({
+                            framework,
+                            assertions,
+                            antiPatterns,
+                            tips: [
+                                'Always use auto-retrying assertions (toBeVisible, toContainText, toBeEnabled)',
+                                'Never use expect(await el.textContent()).toContain() — use await expect(el).toContainText()',
+                                'Never use expect(await el.isVisible()).toBe(true) — use await expect(el).toBeVisible()',
+                            ],
+                        }, null, 2);
+                    } catch (error) {
+                        return JSON.stringify({ error: `Config load failed: ${error.message}` });
+                    }
+                });
             },
         }));
     }
@@ -1558,4 +1649,4 @@ function _countSpecFiles(dir) {
     return count;
 }
 
-module.exports = { createCustomTools };
+module.exports = { createCustomTools, getToolCache };

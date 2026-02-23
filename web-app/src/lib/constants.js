@@ -50,6 +50,7 @@ export const SSE_EVENT_TYPES = {
     CHAT_REASONING: 'chat_reasoning',
     CHAT_IDLE: 'chat_idle',
     CHAT_ERROR: 'chat_error',
+    CHAT_FOLLOWUP: 'chat_followup',
 };
 
 /** Flat list of all SSE event type strings — used for EventSource.addEventListener */

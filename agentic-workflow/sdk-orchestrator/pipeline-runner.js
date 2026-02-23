@@ -26,6 +26,7 @@ const { extractJSON, getStageTimeout } = require('./utils');
 const { getContextStoreManager } = require('./shared-context-store');
 const { AgentCoordinator, ROUTE } = require('./agent-coordinator');
 const { SupervisorSession } = require('./supervisor-session');
+const { getEventBridge } = require('./event-bridge');
 
 // ─── Pipeline Stage Definitions ─────────────────────────────────────────────
 
@@ -81,6 +82,7 @@ class PipelineRunner {
         this.verbose = options.verbose || false;
         this.projectRoot = path.join(__dirname, '..', '..');
         this._contextStoreManager = getContextStoreManager();
+        this._eventBridge = options.eventBridge || getEventBridge();
     }
 
     /**
@@ -527,6 +529,15 @@ class PipelineRunner {
             onProgress(STAGES.TESTGENIE, 'Generating test cases...');
             const responseText = await this.sessionFactory.sendAndWait(session, prompt, {
                 timeout: getStageTimeout(this.config, 'testgenie', 300000),
+                onDelta: (delta) => {
+                    if (delta && this._eventBridge) {
+                        this._eventBridge.push('ai_delta', context.runId, {
+                            agent: 'testgenie',
+                            stage: STAGES.TESTGENIE,
+                            delta,
+                        });
+                    }
+                },
             });
 
             // Check for Excel output
@@ -714,7 +725,14 @@ class PipelineRunner {
             const scriptResponse = await this.sessionFactory.sendAndWait(session, prompt, {
                 timeout: getStageTimeout(this.config, 'scriptgenerator', 600000),
                 onDelta: (delta) => {
-                    // Could stream to progress callback if needed
+                    // Forward AI streaming tokens to EventBridge for real-time dashboard display
+                    if (delta && this._eventBridge) {
+                        this._eventBridge.push('ai_delta', context.runId, {
+                            agent: 'scriptgenerator',
+                            stage: STAGES.SCRIPTGEN,
+                            delta,
+                        });
+                    }
                 },
             });
 
@@ -1053,6 +1071,15 @@ class PipelineRunner {
             onProgress(STAGES.BUGGENIE, 'Creating bug ticket...');
             const response = await this.sessionFactory.sendAndWait(session, prompt, {
                 timeout: getStageTimeout(this.config, 'buggenie', 180000),
+                onDelta: (delta) => {
+                    if (delta && this._eventBridge) {
+                        this._eventBridge.push('ai_delta', context.runId, {
+                            agent: 'buggenie',
+                            stage: STAGES.BUGGENIE,
+                            delta,
+                        });
+                    }
+                },
             });
 
             return {

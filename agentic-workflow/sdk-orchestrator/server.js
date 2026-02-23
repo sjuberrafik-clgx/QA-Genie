@@ -35,6 +35,7 @@ const { RunStore, RUN_STATUS } = require('./run-store');
 const { EventBridge, EVENT_TYPES, getEventBridge } = require('./event-bridge');
 const { LearningStore } = require('./learning-store');
 const { ChatSessionManager, CHAT_EVENTS } = require('./chat-session-manager');
+const { getFollowupProvider } = require('./followup-provider');
 const {
     loadEnv, isValidTicketId, isValidMode, generateBatchId, truncate,
 } = require('./utils');
@@ -1058,6 +1059,21 @@ async function startServer(options = {}) {
     });
 
     /**
+     * GET /api/chat/sessions/:sessionId/followups
+     * Returns contextual follow-up suggestions for the current conversation state.
+     */
+    router.get('/api/chat/sessions/:sessionId/followups', (req, res) => {
+        if (!chatManager) return json(res, 503, { error: 'Chat manager not ready' });
+        try {
+            const followups = chatManager.getFollowups(req.params.sessionId);
+            ok(res, { followups });
+        } catch (error) {
+            if (error.message.includes('not found')) return notFound(res, error.message);
+            json(res, 500, { error: error.message });
+        }
+    });
+
+    /**
      * GET /api/chat/sessions/:sessionId/stream
      * SSE stream for chat session events (deltas, tool calls, reasoning)
      */
@@ -1170,6 +1186,7 @@ async function startServer(options = {}) {
         log(`    POST /api/chat/sessions           — Create chat session`);
         log(`    GET  /api/chat/sessions           — List chat sessions`);
         log(`    POST /api/chat/sessions/:id/messages — Send message`);
+        log(`    GET  /api/chat/sessions/:id/followups — Get followup suggestions`);
         log(`    GET  /api/chat/sessions/:id/stream — Chat SSE stream`);
         log(`    GET  /api/chat/sessions/:id/history — Chat history`);
         log(`    POST /api/chat/sessions/:id/abort  — Abort chat`);
@@ -1216,6 +1233,7 @@ function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBr
             eventBridge.push(EVENT_TYPES.RUN_START, runId, { ticketId, mode });
 
             // Create progress callback that updates both RunStore and EventBridge
+            const followupProvider = getFollowupProvider();
             const onProgress = (stage, message) => {
                 if (cancelled) return;
 
@@ -1224,8 +1242,22 @@ function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBr
                     runStore.updateStage(runId, stage, 'running', { message });
                 } else if (message === 'Completed' || message.includes('passed') || message.includes('generated')) {
                     runStore.updateStage(runId, stage, 'passed', { message });
+                    // Generate and push followup suggestions on stage success
+                    const followups = followupProvider.getPipelineFollowups({
+                        stage, success: true, ticketId,
+                    });
+                    if (followups.length > 0) {
+                        eventBridge.push(EVENT_TYPES.FOLLOWUP, runId, { stage, followups });
+                    }
                 } else if (message.startsWith('BLOCKED') || message.startsWith('ERROR')) {
                     runStore.updateStage(runId, stage, 'failed', { message });
+                    // Generate and push followup suggestions on stage failure
+                    const followups = followupProvider.getPipelineFollowups({
+                        stage, success: false, ticketId,
+                    });
+                    if (followups.length > 0) {
+                        eventBridge.push(EVENT_TYPES.FOLLOWUP, runId, { stage, followups });
+                    }
                 } else {
                     runStore.updateStage(runId, stage, 'running', { message });
                 }

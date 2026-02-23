@@ -21,6 +21,7 @@
 const { EventEmitter } = require('events');
 const fs = require('fs');
 const path = require('path');
+const { getFollowupProvider } = require('./followup-provider');
 
 // ─── Instruction Extraction Helper ──────────────────────────────────────────
 
@@ -105,6 +106,7 @@ const CHAT_EVENTS = {
     REASONING: 'chat_reasoning',
     IDLE: 'chat_idle',
     ERROR: 'chat_error',
+    FOLLOWUP: 'chat_followup',
 };
 
 // ─── Chat Session Manager ───────────────────────────────────────────────────
@@ -130,6 +132,9 @@ class ChatSessionManager extends EventEmitter {
 
         // Track active sessions: sessionId → { session, sseClients[], createdAt }
         this._sessions = new Map();
+
+        // Followup provider for context-aware suggestions
+        this._followupProvider = getFollowupProvider();
 
         // ── Chat history persistence ──
         this._historyPath = path.join(
@@ -364,11 +369,20 @@ class ChatSessionManager extends EventEmitter {
             if (needsBrowser) {
                 const mcpServerPath = path.join(__dirname, '..', 'mcp-server', 'server.js');
                 if (fs.existsSync(mcpServerPath)) {
+                    // Dynamic Tool Scoping: pass the agent's tool profile to the MCP server.
+                    // ScriptGenerator gets 'core' (~65 tools instead of 141), saving ~25K tokens.
+                    // The tools/call handler still routes ANY valid tool name regardless of
+                    // listing — filtering optimizes context, not capabilities.
+                    const AGENT_PROFILES = { scriptgenerator: 'core', testgenie: 'core', buggenie: 'core', codereviewer: 'core' };
+                    const toolProfile = AGENT_PROFILES[agentMode] || 'full';
                     mcpServers['unified-automation'] = {
                         type: 'local',
                         command: 'node',
                         args: [mcpServerPath],
                         tools: ['*'],
+                        env: {
+                            MCP_TOOL_PROFILE: toolProfile,
+                        },
                     };
                 }
             }
@@ -429,7 +443,10 @@ class ChatSessionManager extends EventEmitter {
         // Persist to disk
         this._persistHistory();
 
-        return { sessionId, model, createdAt, agentMode };
+        // Generate welcome followups for the new session
+        const welcomeFollowups = this._followupProvider.getWelcomeFollowups(agentMode || 'default');
+
+        return { sessionId, model, createdAt, agentMode, followups: welcomeFollowups };
     }
 
     /**
@@ -461,6 +478,20 @@ class ChatSessionManager extends EventEmitter {
                 });
                 // Persist after assistant message
                 this._persistHistory();
+
+                // Generate and broadcast followup suggestions based on message content
+                try {
+                    const followups = this._followupProvider.getChatFollowups({
+                        sessionId,
+                        agentMode: entry.agentMode,
+                        lastMessage: content,
+                        messages: entry.messages,
+                        maxFollowups: 3,
+                    });
+                    if (followups.length > 0) {
+                        this._broadcastToSSE(sessionId, CHAT_EVENTS.FOLLOWUP, { followups });
+                    }
+                } catch { /* followups are non-critical */ }
             });
             if (u2) unsubscribers.push(u2);
 
@@ -498,6 +529,21 @@ class ChatSessionManager extends EventEmitter {
             // Session idle (processing complete)
             const u6 = session.on('session.idle', () => {
                 this._broadcastToSSE(sessionId, CHAT_EVENTS.IDLE, {});
+
+                // Broadcast final followup suggestions on idle (ensures they arrive after message)
+                try {
+                    const lastMsg = entry.messages.filter(m => m.role === 'assistant').pop();
+                    const followups = this._followupProvider.getChatFollowups({
+                        sessionId,
+                        agentMode: entry.agentMode,
+                        lastMessage: lastMsg?.content || '',
+                        messages: entry.messages,
+                        maxFollowups: 3,
+                    });
+                    if (followups.length > 0) {
+                        this._broadcastToSSE(sessionId, CHAT_EVENTS.FOLLOWUP, { followups });
+                    }
+                } catch { /* followups are non-critical */ }
             });
             if (u6) unsubscribers.push(u6);
 
@@ -589,6 +635,26 @@ class ChatSessionManager extends EventEmitter {
     }
 
     /**
+     * Get contextual follow-up suggestions for the current conversation state.
+     *
+     * @param {string} sessionId
+     * @returns {Followup[]}
+     */
+    getFollowups(sessionId) {
+        const entry = this._sessions.get(sessionId);
+        if (!entry) throw new Error(`Session ${sessionId} not found`);
+
+        const lastMsg = entry.messages.filter(m => m.role === 'assistant').pop();
+        return this._followupProvider.getChatFollowups({
+            sessionId,
+            agentMode: entry.agentMode,
+            lastMessage: lastMsg?.content || '',
+            messages: entry.messages,
+            maxFollowups: 3,
+        });
+    }
+
+    /**
      * Abort current processing in a session.
      */
     async abort(sessionId) {
@@ -653,6 +719,9 @@ class ChatSessionManager extends EventEmitter {
         }
 
         this._sessions.delete(sessionId);
+
+        // Clean up followup tracking for this session
+        this._followupProvider.clearSession(sessionId);
 
         // Persist removal to disk
         this._persistHistory();
