@@ -13,6 +13,7 @@ import AgentSelect from '@/components/AgentSelect';
 import { getAgentConfig } from '@/lib/agent-options';
 import { DocumentIcon, CodeIcon, GlobeIcon, PlayIcon, SparkleIcon, MenuIcon, ChatBubbleIcon, WrenchIcon, CheckIcon, XIcon } from '@/components/Icons';
 import ErrorBanner from '@/components/ErrorBanner';
+import FollowupChips from '@/components/FollowupChips';
 
 const CAPABILITY_CARDS = [
     { icon: <DocumentIcon />, title: 'Generate Test Cases', desc: 'From Jira tickets to structured test steps with Excel export' },
@@ -33,6 +34,8 @@ export default function ChatPage() {
     const [model, setModel] = useState(DEFAULT_MODEL);
     const [agentMode, setAgentMode] = useState(null);       // null = default, 'testgenie', 'scriptgenerator', 'buggenie'
     const [sidebarOpen, setSidebarOpen] = useState(true);
+    const [followups, setFollowups] = useState([]);         // [{ label, prompt, category, icon, prefill? }]
+    const [prefillText, setPrefillText] = useState('');      // text to pre-fill into the chat input
 
     const messagesEndRef = useRef(null);
     const streamingContentRef = useRef('');
@@ -122,6 +125,12 @@ export default function ChatPage() {
                 setIsProcessing(false);
                 break;
 
+            case 'chat_followup':
+                if (Array.isArray(data.followups) && data.followups.length > 0) {
+                    setFollowups(data.followups);
+                }
+                break;
+
             case 'user_message':
                 if (data.role === 'assistant') {
                     setMessages(prev => {
@@ -171,6 +180,7 @@ export default function ChatPage() {
             setActiveSessionId(session.sessionId);
             setMessages([]);
             setToolGroups([]);
+            setFollowups([]);
             currentToolGroupRef.current = null;
             streamingContentRef.current = '';
             setStreamingContent('');
@@ -183,6 +193,10 @@ export default function ChatPage() {
             setIsProcessing(false);
             const session = await apiClient.createChatSession(model, agentForSession);
             applyNewSession(session);
+            // Show welcome followup suggestions from the server
+            if (Array.isArray(session.followups) && session.followups.length > 0) {
+                setFollowups(session.followups);
+            }
         } catch (err) {
             // Retry once on abort/signal errors (common with MCP server cold-start)
             if (err.message && (err.message.includes('abort') || err.message.includes('signal'))) {
@@ -190,6 +204,9 @@ export default function ChatPage() {
                 try {
                     const session = await apiClient.createChatSession(model, agentForSession);
                     applyNewSession(session);
+                    if (Array.isArray(session.followups) && session.followups.length > 0) {
+                        setFollowups(session.followups);
+                    }
                     setError(null);
                     return;
                 } catch (retryErr) {
@@ -213,6 +230,7 @@ export default function ChatPage() {
         setStreamingContent('');
         streamingContentRef.current = '';
         setToolGroups([]);
+        setFollowups([]);
         currentToolGroupRef.current = null;
         setIsProcessing(false);
 
@@ -260,6 +278,8 @@ export default function ChatPage() {
         setMessages(prev => [...prev, { role: 'user', content, timestamp: new Date().toISOString() }]);
         setIsProcessing(true);
         setError(null);
+        setFollowups([]);  // Clear followups when user sends a new message
+        setPrefillText(''); // Clear any prefill text
         streamingContentRef.current = '';
         setStreamingContent('');
         setStreamingReasoning('');
@@ -300,6 +320,7 @@ export default function ChatPage() {
 
         // Clear stale UI state from previous session
         setToolGroups([]);
+        setFollowups([]);
         currentToolGroupRef.current = null;
         setStreamingContent('');
         streamingContentRef.current = '';
@@ -320,6 +341,21 @@ export default function ChatPage() {
 
         // Create new session with the new agent
         await createSession(newAgent);
+    };
+
+    const handleFollowupSelect = (followup) => {
+        if (!activeSessionId || isProcessing) return;
+        setFollowups([]);
+        // Prefill if explicitly flagged OR if prompt ends with an incomplete placeholder (e.g., "AOTF-")
+        const needsInput = followup.prefill || /AOTF-\s*$/i.test(followup.prompt);
+        if (needsInput) {
+            // Populate input box so user can complete the prompt (e.g., add ticket ID)
+            setPrefillText(followup.prompt);
+        } else {
+            // Complete prompt — send directly
+            setPrefillText('');
+            sendMessage(followup.prompt);
+        }
     };
 
     const activeAgentConfig = getAgentConfig(agentMode);
@@ -534,6 +570,19 @@ export default function ChatPage() {
                     </div>
                 </div>
 
+                {/* Followup suggestion chips */}
+                {activeSessionId && followups.length > 0 && !isProcessing && (
+                    <div className="px-6 py-2 border-t border-surface-100/60 bg-white/60 backdrop-blur-sm">
+                        <div className="max-w-3xl mx-auto">
+                            <FollowupChips
+                                followups={followups}
+                                onSelect={handleFollowupSelect}
+                                disabled={isProcessing}
+                            />
+                        </div>
+                    </div>
+                )}
+
                 {/* Input */}
                 {activeSessionId && (
                     <ChatInput
@@ -542,6 +591,7 @@ export default function ChatPage() {
                         isProcessing={isProcessing}
                         disabled={!activeSessionId}
                         placeholder={activeAgentConfig.placeholder}
+                        prefillText={prefillText}
                     />
                 )}
             </div>

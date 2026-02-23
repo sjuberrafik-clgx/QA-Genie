@@ -172,7 +172,11 @@ class AgentSessionFactory {
             // MCP_HEADLESS, MCP_TIMEOUT, etc. from .env — the browser always launches
             // with hardcoded defaults (headed mode), which hangs in headless/CI contexts.
             const mcpHeadless = process.env.MCP_HEADLESS || 'false';
-            this._log(`🖥️  Unified MCP: headless=${mcpHeadless}, browser=${process.env.MCP_BROWSER || 'chromium'}`);
+            // Dynamic Tool Scoping: pass the agent's tool profile to the MCP server.
+            // ScriptGenerator gets 'core' (~65 tools instead of 141), saving ~25K tokens.
+            const AGENT_PROFILES = { scriptgenerator: 'core', testgenie: 'core', buggenie: 'core', codereviewer: 'core' };
+            const toolProfile = AGENT_PROFILES[agentName] || 'full';
+            this._log(`🖥️  Unified MCP: headless=${mcpHeadless}, browser=${process.env.MCP_BROWSER || 'chromium'}, toolProfile=${toolProfile}`);
             mcpServers['unified-automation'] = {
                 type: 'local',
                 command: 'node',
@@ -184,6 +188,7 @@ class AgentSessionFactory {
                     MCP_BROWSER: process.env.MCP_BROWSER || 'chromium',
                     MCP_TOOL_TIMEOUT: process.env.MCP_TOOL_TIMEOUT || '120000',
                     MCP_LOG_LEVEL: process.env.MCP_LOG_LEVEL || 'info',
+                    MCP_TOOL_PROFILE: toolProfile,
                 },
             };
         }

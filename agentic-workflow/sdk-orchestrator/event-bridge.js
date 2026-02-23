@@ -40,6 +40,7 @@ const EVENT_TYPES = {
     AI_DELTA: 'ai_delta',
     ERROR: 'error',
     REPORT_SAVED: 'report_saved',
+    FOLLOWUP: 'followup',
 };
 
 // ─── Event Bridge ───────────────────────────────────────────────────────────
