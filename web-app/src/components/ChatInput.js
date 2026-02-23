@@ -2,9 +2,24 @@
 
 import { useState, useRef, useEffect } from 'react';
 
-export default function ChatInput({ onSend, onAbort, isProcessing, disabled, placeholder: customPlaceholder }) {
+export default function ChatInput({ onSend, onAbort, isProcessing, disabled, placeholder: customPlaceholder, prefillText }) {
     const [input, setInput] = useState('');
     const textareaRef = useRef(null);
+
+    // Accept external prefill text — populate input and focus the textarea
+    useEffect(() => {
+        if (prefillText && prefillText !== input) {
+            setInput(prefillText);
+            // Focus + place cursor at end after a tick (so the value is set first)
+            setTimeout(() => {
+                const ta = textareaRef.current;
+                if (ta) {
+                    ta.focus();
+                    ta.selectionStart = ta.selectionEnd = prefillText.length;
+                }
+            }, 0);
+        }
+    }, [prefillText]);
 
     useEffect(() => {
         const ta = textareaRef.current;

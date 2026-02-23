@@ -22,15 +22,21 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import {
     CallToolRequestSchema,
     ListToolsRequestSchema,
+    ListResourcesRequestSchema,
+    ReadResourceRequestSchema,
     ErrorCode,
     McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import http from 'node:http';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { PlaywrightBridge } from './bridges/playwright-bridge-direct.js';
 import { ChromeDevToolsBridge } from './bridges/chromedevtools-bridge-direct.js';
 import { IntelligentRouter } from './router/intelligent-router.js';
 import { ALL_TOOLS, UNIFIED_TOOLS, getToolStats } from './tools/tool-definitions.js';
+import { getProfileCategories } from './config/tool-profiles.js';
 import { ServerConfig } from './config/server-config.js';
 import { EventManager } from './utils/event-manager.js';
 
@@ -64,7 +70,11 @@ class UnifiedAutomationServer {
             {
                 capabilities: {
                     tools: {
-                        listChanged: true,
+                        listChanged: false,
+                    },
+                    resources: {
+                        subscribe: false,
+                        listChanged: false,
                     },
                     logging: {},
                 },
@@ -88,6 +98,7 @@ class UnifiedAutomationServer {
         // Register handlers
         this.registerToolListHandler();
         this.registerToolCallHandler();
+        this.registerResourceHandlers();
 
         // Setup error handling
         this.server.onerror = (error) => {
@@ -102,11 +113,46 @@ class UnifiedAutomationServer {
      * Register the tools/list handler
      */
     registerToolListHandler() {
+        // Read tool profile from environment variable (set by SDK session manager).
+        // Profiles: 'core' (~65 tools), 'advanced' (~141 tools), 'full' (all 141).
+        // Default: 'full' for backward compatibility.
+        const toolProfile = process.env.MCP_TOOL_PROFILE || 'full';
+        const allowedCategories = getProfileCategories(toolProfile);
+
         this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-            const stats = getToolStats();
-            console.error(`[UnifiedMCP] Handling tools/list request - Exposing ${stats.total} tools (${stats.core} core + ${stats.enhanced} enhanced + ${stats.advanced} advanced)`);
+            // Filter tools by profile categories (if a profile is active)
+            let toolsToExpose = ALL_TOOLS;
+            if (allowedCategories) {
+                toolsToExpose = ALL_TOOLS.filter(tool => {
+                    const category = tool._meta?.category || 'unknown';
+                    return allowedCategories.includes(category);
+                });
+            }
+
+            const statsInfo = allowedCategories
+                ? `${toolsToExpose.length}/${ALL_TOOLS.length} tools (profile: ${toolProfile})`
+                : `${toolsToExpose.length} tools (profile: full)`;
+            console.error(`[UnifiedMCP] Handling tools/list request - Exposing ${statsInfo}`);
+
+            // Sanitize tools for MCP protocol compliance:
+            // 1. Strip non-standard _meta field (used internally for routing)
+            // 2. Add additionalProperties:false to schemas with explicit properties
+            //    to catch LLM-hallucinated parameters early
+            const sanitizedTools = toolsToExpose.map(tool => {
+                const { _meta, ...cleanTool } = tool;
+                if (cleanTool.inputSchema &&
+                    cleanTool.inputSchema.properties &&
+                    Object.keys(cleanTool.inputSchema.properties).length > 0) {
+                    cleanTool.inputSchema = {
+                        ...cleanTool.inputSchema,
+                        additionalProperties: false,
+                    };
+                }
+                return cleanTool;
+            });
+
             return {
-                tools: ALL_TOOLS,
+                tools: sanitizedTools,
             };
         });
     }
@@ -149,6 +195,138 @@ class UnifiedAutomationServer {
                 throw new McpError(
                     ErrorCode.InternalError,
                     `Tool execution failed: ${error.message}`
+                );
+            }
+        });
+    }
+
+    /**
+     * Register MCP resources/list and resources/read handlers.
+     * Exposes exploration data, test artifacts, and reports as native
+     * MCP resources so SDK sessions can read them via protocol instead
+     * of custom tool calls.
+     */
+    registerResourceHandlers() {
+        const baseDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+        // Helper: recursively list JSON files in a directory
+        const listJsonFiles = async (dir, uriPrefix) => {
+            const resources = [];
+            try {
+                const entries = await fs.readdir(dir, { withFileTypes: true });
+                for (const entry of entries) {
+                    if (entry.isFile() && entry.name.endsWith('.json')) {
+                        resources.push({
+                            uri: `${uriPrefix}/${entry.name}`,
+                            name: entry.name,
+                            mimeType: 'application/json',
+                            description: `${uriPrefix.split('://')[1]} — ${entry.name}`,
+                        });
+                    } else if (entry.isDirectory()) {
+                        const subResources = await listJsonFiles(
+                            path.join(dir, entry.name),
+                            `${uriPrefix}/${entry.name}`
+                        );
+                        resources.push(...subResources);
+                    }
+                }
+            } catch { /* dir missing — skip */ }
+            return resources;
+        };
+
+        // ── resources/list ──────────────────────────────────────────────
+        this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
+            const resources = [];
+
+            // Exploration data (MCP snapshots)
+            const explorationDir = path.join(baseDir, 'exploration-data');
+            resources.push(...await listJsonFiles(explorationDir, 'exploration://data'));
+
+            // Test artifacts (run-store, chat-history, reports)
+            const artifactsDir = path.join(baseDir, 'test-artifacts');
+            resources.push(...await listJsonFiles(artifactsDir, 'artifact://data'));
+
+            // Playwright HTML report index
+            const reportIndex = path.join(baseDir, '..', 'playwright-report', 'index.html');
+            try {
+                await fs.access(reportIndex);
+                resources.push({
+                    uri: 'report://playwright/index.html',
+                    name: 'Playwright Report',
+                    mimeType: 'text/html',
+                    description: 'Latest Playwright HTML test report',
+                });
+            } catch { /* no report yet */ }
+
+            // Workflow config (read-only reference)
+            resources.push({
+                uri: 'config://workflow/workflow-config.json',
+                name: 'workflow-config.json',
+                mimeType: 'application/json',
+                description: 'Pipeline workflow configuration',
+            });
+
+            // Assertion config (read-only reference)
+            resources.push({
+                uri: 'config://workflow/assertion-config.json',
+                name: 'assertion-config.json',
+                mimeType: 'application/json',
+                description: 'Assertion patterns and rules',
+            });
+
+            console.error(`[UnifiedMCP] resources/list — exposing ${resources.length} resources`);
+            return { resources };
+        });
+
+        // ── resources/read ──────────────────────────────────────────────
+        this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+            const { uri } = request.params;
+            console.error(`[UnifiedMCP] resources/read — ${uri}`);
+
+            // Map URI schemes to file system paths
+            const uriMapping = {
+                'exploration://data': path.join(baseDir, 'exploration-data'),
+                'artifact://data': path.join(baseDir, 'test-artifacts'),
+                'report://playwright': path.join(baseDir, '..', 'playwright-report'),
+                'config://workflow': path.join(baseDir, 'config'),
+            };
+
+            // Find matching scheme
+            let filePath = null;
+            for (const [scheme, dir] of Object.entries(uriMapping)) {
+                if (uri.startsWith(scheme + '/')) {
+                    const relativePath = uri.slice(scheme.length + 1);
+                    // Security: prevent path traversal
+                    const resolved = path.resolve(dir, relativePath);
+                    if (!resolved.startsWith(path.resolve(dir))) {
+                        throw new McpError(ErrorCode.InvalidRequest, 'Path traversal not allowed');
+                    }
+                    filePath = resolved;
+                    break;
+                }
+            }
+
+            if (!filePath) {
+                throw new McpError(ErrorCode.InvalidRequest, `Unknown resource URI scheme: ${uri}`);
+            }
+
+            try {
+                const content = await fs.readFile(filePath, 'utf-8');
+                const mimeType = filePath.endsWith('.json') ? 'application/json'
+                    : filePath.endsWith('.html') ? 'text/html'
+                        : 'text/plain';
+
+                return {
+                    contents: [{
+                        uri,
+                        mimeType,
+                        text: content,
+                    }],
+                };
+            } catch (error) {
+                throw new McpError(
+                    ErrorCode.InvalidRequest,
+                    `Resource not found: ${uri} (${error.message})`
                 );
             }
         });

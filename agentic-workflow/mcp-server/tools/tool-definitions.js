@@ -1134,3 +1134,16 @@ export function getToolStats() {
         byCategory: categories
     };
 }
+
+/**
+ * Filter tools by an array of allowed category names.
+ * Used by Dynamic Tool Scoping to reduce context window consumption.
+ * 
+ * @param {string[]} categories - Array of _meta.category values to include
+ * @returns {object[]} Filtered tools matching any of the specified categories
+ */
+export function getToolsByCategories(categories) {
+    if (!categories || categories.length === 0) return ALL_TOOLS;
+    const categorySet = new Set(categories);
+    return ALL_TOOLS.filter(t => categorySet.has(t._meta?.category || 'unknown'));
+}

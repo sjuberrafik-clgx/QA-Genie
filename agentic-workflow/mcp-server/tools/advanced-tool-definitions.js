@@ -29,7 +29,7 @@ export const ADVANCED_TOOLS = [
     {
         name: 'unified_list_frames',
         description: 'List all iframes on the current page with their names, URLs, and indices',
-        inputSchema: { type: 'object', properties: {}, required: [] },
+        inputSchema: { type: 'object', properties: {} },
         _meta: { source: 'playwright', category: 'iframe' },
     },
     {
@@ -48,7 +48,7 @@ export const ADVANCED_TOOLS = [
     {
         name: 'unified_switch_to_main_frame',
         description: 'Switch focus back to the main frame (top-level page)',
-        inputSchema: { type: 'object', properties: {}, required: [] },
+        inputSchema: { type: 'object', properties: {} },
         _meta: { source: 'playwright', category: 'iframe' },
     },
     {
@@ -141,7 +141,7 @@ export const ADVANCED_TOOLS = [
     {
         name: 'unified_route_list',
         description: 'List all active route intercepts',
-        inputSchema: { type: 'object', properties: {}, required: [] },
+        inputSchema: { type: 'object', properties: {} },
         _meta: { source: 'playwright', category: 'network-interception' },
     },
     {
@@ -310,7 +310,7 @@ export const ADVANCED_TOOLS = [
     {
         name: 'unified_list_contexts',
         description: 'List all browser contexts with their names and page counts',
-        inputSchema: { type: 'object', properties: {}, required: [] },
+        inputSchema: { type: 'object', properties: {} },
         _meta: { source: 'playwright', category: 'multi-context' },
     },
     {
@@ -382,7 +382,7 @@ export const ADVANCED_TOOLS = [
     {
         name: 'unified_stop_video',
         description: 'Stop video recording and save the file',
-        inputSchema: { type: 'object', properties: {}, required: [] },
+        inputSchema: { type: 'object', properties: {} },
         _meta: { source: 'playwright', category: 'video-recording' },
     },
 
@@ -467,7 +467,7 @@ export const ADVANCED_TOOLS = [
     {
         name: 'unified_clear_permissions',
         description: 'Clear all granted browser permissions',
-        inputSchema: { type: 'object', properties: {}, required: [] },
+        inputSchema: { type: 'object', properties: {} },
         _meta: { source: 'playwright', category: 'geolocation-permissions' },
     },
     {
@@ -502,7 +502,7 @@ export const ADVANCED_TOOLS = [
     {
         name: 'unified_list_downloads',
         description: 'List files downloaded during the current session',
-        inputSchema: { type: 'object', properties: {}, required: [] },
+        inputSchema: { type: 'object', properties: {} },
         _meta: { source: 'playwright', category: 'download-management' },
     },
     {
@@ -554,7 +554,7 @@ export const ADVANCED_TOOLS = [
     {
         name: 'unified_stop_mutation_observer',
         description: 'Stop the DOM mutation observer',
-        inputSchema: { type: 'object', properties: {}, required: [] },
+        inputSchema: { type: 'object', properties: {} },
         _meta: { source: 'playwright', category: 'dom-mutations' },
     },
 
