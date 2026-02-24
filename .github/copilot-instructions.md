@@ -17,6 +17,9 @@ applyTo: '**'
 | `docs/` | `agentic-workflow/docs/` |
 | `utils/assertionConfigHelper.js` | `agentic-workflow/utils/assertionConfigHelper.js` |
 | `mcp-server/` | `agentic-workflow/mcp-server/` |
+| `grounding/` | `agentic-workflow/grounding/` |
+| `grounding-data/` | `agentic-workflow/grounding-data/` |
+| `config/grounding-config.json` | `agentic-workflow/config/grounding-config.json` |
 | `.env` | `agentic-workflow/.env` |
 | `.github/agents/lib/` | `.github/agents/lib/` (already at root) |
 | `tests/` | `tests/` (already at root) |
@@ -51,9 +54,79 @@ This workspace uses a 5-agent orchestrated workflow for end-to-end QA automation
 **Key config files:**
 * `agentic-workflow/config/workflow-config.json` — Pipeline configuration (browser, MCP strategy, quality gates, **project paths**)
 * `agentic-workflow/config/assertion-config.json` — Assertion patterns and rules for generated scripts
+* `agentic-workflow/config/grounding-config.json` — Local context grounding (feature map, domain terminology, index settings)
 * `agentic-workflow/.env` — Environment-specific values (Jira credentials, URLs, MCP settings)
 
+## Grounding System (Local Context for LLM Accuracy)
+
+The grounding system provides local project context to LLM agents, reducing hallucinations by giving agents accurate knowledge about the codebase, selectors, domain terminology, and existing test coverage.
+
+**Key components:**
+* `agentic-workflow/config/grounding-config.json` — Per-project config (feature map, domain terms, rules, index settings). **This is the primary file users customize for their application.**
+* `agentic-workflow/grounding/text-indexer.js` — TF-IDF/BM25 full-text search engine with class-aware chunking
+* `agentic-workflow/grounding/selector-registry.js` — Centralized selector knowledge base (page objects + MCP snapshots)
+* `agentic-workflow/grounding/grounding-store.js` — Main orchestrator tying index + selectors + config together
+* `agentic-workflow/grounding-data/` — Persisted index files (auto-generated, gitignored)
+
+**SDK tools for agents (available when grounding is enabled):**
+* `search_project_context` — BM25 search across page objects, business functions, utilities
+* `get_feature_map` — Feature-specific context (pages, page objects, business functions, keywords)
+* `get_selector_recommendations` — Ranked selectors by reliability for a page/element
+* `check_existing_coverage` — Find existing spec files to avoid duplicate automation
+
+**CLI management:**
+```bash
+node agentic-workflow/scripts/grounding-setup.js init      # Create config + build index
+node agentic-workflow/scripts/grounding-setup.js rebuild   # Force re-index
+node agentic-workflow/scripts/grounding-setup.js stats     # Show index statistics
+node agentic-workflow/scripts/grounding-setup.js validate  # Validate config
+node agentic-workflow/scripts/grounding-setup.js query "search filter locators"  # Test query
+```
+
 **Jira project:** Configured in `agentic-workflow/.env` as `JIRA_PROJECT_KEY` | **Cloud ID:** Configured in `agentic-workflow/.env` as `JIRA_CLOUD_ID`
+
+## OODA Loop (Observe–Orient–Decide–Act)
+
+The OODA module provides deterministic feedback loops at two critical pipeline bottlenecks — **zero LLM calls, zero token cost**.
+
+**Key components:**
+* `agentic-workflow/sdk-orchestrator/ooda-loop.js` — Core module with `EnvironmentHealthCheck` and `ExplorationQualityAnalyzer`
+* `agentic-workflow/config/workflow-config.json` → `ooda` section — Tunable thresholds
+
+### EnvironmentHealthCheck (Pre-Pipeline)
+Runs before the stage loop in `pipeline-runner.js`. Validates:
+- **UAT reachability** — HTTP HEAD to `UAT_URL` (weight: 30)
+- **MCP server config** — server.js exists, env vars set (weight: 25)
+- **Jira API** — REST call to `/rest/api/3/myself` (weight: 20)
+- **Framework files** — testData.js, POmanager.js, config.js, popupHandler.js (weight: 15)
+- **Auth tokens** — token exports present in testData.js (weight: 10)
+
+Decisions: `ABORT` (score < 40) | `WARN` (score < 70) | `PROCEED` (score >= 70). ABORT prevents wasted 12+ minute pipeline runs.
+
+### ExplorationQualityAnalyzer (Post-Snapshot)
+Runs inside `enforcement-hooks.js` after each MCP `unified_snapshot`. Assesses:
+- Element count and ARIA role diversity
+- Loading/spinner indicator detection
+- Popup/modal dominance detection
+- Dynamic ID presence
+- Feature map comparison (expected vs actual complexity from grounding config)
+
+Decisions: `ACCEPT` (score >= 60) | `WARN` (score 30–59) | `RETRY_RECOMMENDED` (score < 30). Agents receive actionable remediation steps in their context.
+
+### Configuration (`workflow-config.json → ooda`)
+```json
+{
+    "ooda": {
+        "environmentHealth": { "enabled": true, "abortThreshold": 40, "warnThreshold": 70, "timeoutMs": 10000 },
+        "explorationQuality": { "enabled": true, "minElements": 5, "minRoleDiversity": 3, "retryThreshold": 30, "warnThreshold": 60 }
+    }
+}
+```
+
+### Testing
+```bash
+node agentic-workflow/sdk-orchestrator/test-ooda-loop.js   # Run 63 unit tests
+```
 
 ## Test Case Generation Format
 
@@ -90,8 +163,10 @@ Example Rows:
 * Remember, if test steps in specific activity & action column crossed 1.5 steps then going forward combine next two steps into one step.
 * If you feel test steps are more, then add them in the same row with a comma.
 * Generate optimized test cases that are efficient and effective.
+* **🚨 NEVER leave the Actual Results column blank. EVERY test step MUST have Actual Results populated.** Use the format "User is able to [action]" always.
 * When user uses Atlassian MCP tools to fetch Jira ticket information then walkthrough complete Jira ticket information from URL given by user.
 * Don't truncate information received from Jira ticket — mention it in test case completely. For example, if acceptance criteria lists specific fields, list ALL fields individually in test steps rather than summarizing as "specified fields".
+* **🔗 Always display Jira ticket URLs as clickable markdown hyperlinks** using `[display text](url)` format so users can see them as links and click/copy.
 
 ## Automation Script Generation
 
@@ -309,9 +384,15 @@ Token-based URLs are constructed using `userTokens` from `tests/test-data/testDa
 
 ## Jira Interaction Policy
 * Agents may READ from Jira tickets (fetch ticket details)
-* Agents NEVER WRITE to existing Jira tickets (no comments)
-* Only BugGenie creates NEW tickets (defects)
-* All results/updates presented in chat for manual Jira updates
+* Agents may CREATE new Jira tickets (bugs, testing tasks)
+* Agents may UPDATE existing Jira tickets (edit description, summary, labels, priority, add comments) using the `update_jira_ticket` tool
+* BugGenie can create, read, and update tickets
+* TestGenie can read, update, and create tickets (Testing tasks with linking and auto-assignment)
+* When creating Testing tasks, agents MUST:
+  - Call `get_jira_current_user` to get the user's accountId for assignment
+  - Use `linkedIssueKey` parameter to link the Testing task to the parent ticket
+  - Use `assigneeAccountId` parameter to assign to the requesting user
+* **Always display Jira URLs as clickable markdown hyperlinks** using `[text](url)` format
 
 ## Bug Ticket Format (BugGenie)
 When creating defect tickets, use this structure:

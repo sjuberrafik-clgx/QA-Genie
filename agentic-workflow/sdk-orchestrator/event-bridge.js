@@ -41,6 +41,10 @@ const EVENT_TYPES = {
     ERROR: 'error',
     REPORT_SAVED: 'report_saved',
     FOLLOWUP: 'followup',
+    // OODA Loop events
+    OODA_HEALTH_CHECK: 'ooda_health_check',
+    OODA_HEALTH_ABORT: 'ooda_health_abort',
+    OODA_SNAPSHOT_QUALITY: 'ooda_snapshot_quality',
 };
 
 // ─── Event Bridge ───────────────────────────────────────────────────────────

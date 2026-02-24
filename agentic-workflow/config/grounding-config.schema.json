@@ -1,0 +1,324 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "grounding-config.schema.json",
+    "title": "Grounding Configuration Schema",
+    "description": "Customizable local context grounding configuration for LLM-powered QA automation. Each project defines its domain knowledge, feature map, and retrieval settings here.",
+    "type": "object",
+    "required": [
+        "version",
+        "project"
+    ],
+    "properties": {
+        "$schema": {
+            "type": "string",
+            "description": "JSON Schema reference for validation"
+        },
+        "version": {
+            "type": "string",
+            "pattern": "^\\d+\\.\\d+\\.\\d+$",
+            "description": "Semantic version of the configuration format"
+        },
+        "project": {
+            "type": "object",
+            "required": [
+                "id",
+                "applicationName"
+            ],
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9_-]*$",
+                    "description": "Unique project identifier (lowercase, alphanumeric with hyphens/underscores)"
+                },
+                "applicationName": {
+                    "type": "string",
+                    "description": "Human-readable application name"
+                },
+                "applicationDescription": {
+                    "type": "string",
+                    "description": "Brief description of the application under test"
+                },
+                "primaryUrl": {
+                    "type": "string",
+                    "format": "uri",
+                    "description": "Primary application URL"
+                },
+                "authMethod": {
+                    "type": "string",
+                    "enum": [
+                        "token-url",
+                        "form-login",
+                        "sso",
+                        "api-key",
+                        "none"
+                    ],
+                    "description": "Authentication method used by the application"
+                },
+                "authNotes": {
+                    "type": "string",
+                    "description": "Additional notes about authentication patterns"
+                }
+            }
+        },
+        "featureMap": {
+            "type": "array",
+            "description": "Structured feature-to-page-to-component mapping for the application",
+            "items": {
+                "type": "object",
+                "required": [
+                    "name"
+                ],
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Feature name (e.g., 'Property Search')"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "What this feature does"
+                    },
+                    "pages": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "URL paths where this feature is accessible"
+                    },
+                    "pageObjects": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Page object files that model this feature's UI"
+                    },
+                    "businessFunctions": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Business function files with reusable flows for this feature"
+                    },
+                    "keywords": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Search keywords that identify this feature in queries"
+                    }
+                }
+            }
+        },
+        "domainTerminology": {
+            "type": "object",
+            "description": "Project-specific terms and their definitions. Keys are abbreviations/terms, values are explanations.",
+            "additionalProperties": {
+                "type": "string"
+            }
+        },
+        "customGroundingRules": {
+            "type": "array",
+            "description": "User-defined grounding snippets that get high-priority injection into agent context. These are always included regardless of query relevance.",
+            "items": {
+                "type": "string"
+            }
+        },
+        "indexSources": {
+            "type": "array",
+            "description": "Directories and files to index for grounding retrieval",
+            "items": {
+                "type": "object",
+                "required": [
+                    "path",
+                    "type"
+                ],
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path from project root"
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": [
+                            "pageObject",
+                            "businessFunction",
+                            "utility",
+                            "config",
+                            "testData",
+                            "exploration",
+                            "custom"
+                        ],
+                        "description": "Content type classification for retrieval boosting"
+                    },
+                    "description": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "indexSettings": {
+            "type": "object",
+            "description": "Controls how source files are chunked and indexed",
+            "properties": {
+                "chunkSize": {
+                    "type": "number",
+                    "default": 80,
+                    "minimum": 20,
+                    "maximum": 500,
+                    "description": "Number of lines per chunk"
+                },
+                "chunkOverlap": {
+                    "type": "number",
+                    "default": 20,
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Number of overlapping lines between adjacent chunks"
+                },
+                "maxIndexEntries": {
+                    "type": "number",
+                    "default": 5000,
+                    "minimum": 100,
+                    "maximum": 50000,
+                    "description": "Maximum number of chunks in the index"
+                },
+                "classAwareChunking": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Keep class methods together in chunks (prevents splitting mid-method)"
+                },
+                "extractMethodSignatures": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Extract and index method signatures for precise retrieval"
+                },
+                "extractLocators": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Extract and index locator definitions from page objects"
+                },
+                "fileExtensions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [
+                        ".js",
+                        ".json"
+                    ],
+                    "description": "File extensions to include in indexing"
+                },
+                "excludePatterns": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [
+                        "node_modules",
+                        "package-lock"
+                    ],
+                    "description": "File/directory name patterns to exclude"
+                }
+            }
+        },
+        "retrievalSettings": {
+            "type": "object",
+            "description": "Controls how queries are matched and results are ranked",
+            "properties": {
+                "maxChunksPerQuery": {
+                    "type": "number",
+                    "default": 10,
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "Maximum chunks returned per query"
+                },
+                "minRelevanceScore": {
+                    "type": "number",
+                    "default": 0.12,
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": "Minimum BM25 score to include a chunk in results"
+                },
+                "boostFactors": {
+                    "type": "object",
+                    "description": "Multipliers for different match types",
+                    "properties": {
+                        "exactMatch": {
+                            "type": "number",
+                            "default": 3.0
+                        },
+                        "fileNameMatch": {
+                            "type": "number",
+                            "default": 2.0
+                        },
+                        "methodNameMatch": {
+                            "type": "number",
+                            "default": 2.5
+                        },
+                        "locatorMatch": {
+                            "type": "number",
+                            "default": 2.0
+                        },
+                        "featureKeywordMatch": {
+                            "type": "number",
+                            "default": 1.5
+                        }
+                    }
+                },
+                "agentBoosts": {
+                    "type": "object",
+                    "description": "Per-agent keyword boost terms. When an agent queries, these terms get additional weight.",
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "selectorRegistry": {
+            "type": "object",
+            "description": "Centralized selector knowledge base configuration",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "default": true
+                },
+                "priorityOrder": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "Selector types ranked by preference (most stable first)"
+                },
+                "reliabilityScores": {
+                    "type": "object",
+                    "description": "Reliability score (0-1) for each selector type",
+                    "additionalProperties": {
+                        "type": "number"
+                    }
+                }
+            }
+        },
+        "explorationFreshness": {
+            "type": "object",
+            "description": "Controls TTL and staleness for MCP exploration data",
+            "properties": {
+                "maxAgeDays": {
+                    "type": "number",
+                    "default": 14,
+                    "description": "Exploration data older than this is considered stale"
+                },
+                "warnAgeDays": {
+                    "type": "number",
+                    "default": 7,
+                    "description": "Warn when exploration data is older than this"
+                },
+                "autoInvalidate": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Automatically discard stale exploration data"
+                }
+            }
+        }
+    }
+}

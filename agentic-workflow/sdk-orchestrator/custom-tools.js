@@ -16,11 +16,12 @@
 
 const fs = require('fs');
 const path = require('path');
+const { markdownToAdf } = require('./adf-converter');
 
 // ─── Environment loader ─────────────────────────────────────────────────────
 function loadEnvVars() {
     try {
-        require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+        require('dotenv').config({ path: path.join(__dirname, '..', '.env'), override: true });
     } catch { /* dotenv not installed */ }
 }
 
@@ -116,7 +117,7 @@ function getToolCache() { return _toolCache; }
  * @returns {Array}  Array of tool definitions
  */
 function createCustomTools(defineTool, agentName, deps = {}) {
-    const { learningStore, config, contextStore } = deps;
+    const { learningStore, config, contextStore, groundingStore } = deps;
     const tools = [];
 
     // ───────────────────────────────────────────────────────────────────
@@ -624,9 +625,9 @@ function createCustomTools(defineTool, agentName, deps = {}) {
 
     // ───────────────────────────────────────────────────────────────────
     // TOOL 11: fetch_jira_ticket
-    // Available to: testgenie
+    // Available to: testgenie, buggenie
     // ───────────────────────────────────────────────────────────────────
-    if (['testgenie'].includes(agentName)) {
+    if (['testgenie', 'buggenie'].includes(agentName)) {
         tools.push(defineTool('fetch_jira_ticket', {
             description:
                 'Fetches Jira ticket details (summary, description, acceptance criteria, labels, ' +
@@ -703,14 +704,86 @@ function createCustomTools(defineTool, agentName, deps = {}) {
     }
 
     // ───────────────────────────────────────────────────────────────────
-    // TOOL 11b: create_jira_ticket
-    // Available to: buggenie
+    // TOOL 11a2: get_jira_current_user
+    // Available to: buggenie, testgenie
+    // Returns the authenticated Jira user's accountId and displayName.
+    // Use this before create_jira_ticket to auto-assign tickets to the
+    // requesting user.
     // ───────────────────────────────────────────────────────────────────
-    if (['buggenie'].includes(agentName)) {
+    if (['buggenie', 'testgenie'].includes(agentName)) {
+        tools.push(defineTool('get_jira_current_user', {
+            description:
+                'Returns the currently authenticated Jira user\'s account ID and display name. ' +
+                'Call this BEFORE create_jira_ticket when you need to assign the new ticket ' +
+                'to the user who is requesting the task. The returned accountId can be passed ' +
+                'as assigneeAccountId to create_jira_ticket.',
+            parameters: {
+                type: 'object',
+                properties: {},
+            },
+            handler: async () => {
+                try {
+                    loadEnvVars();
+                    const cloudId = (process.env.JIRA_CLOUD_ID || '').replace(/"/g, '');
+                    const baseUrl = process.env.JIRA_BASE_URL;
+                    const email = process.env.JIRA_EMAIL || process.env.ATLASSIAN_EMAIL || '';
+                    const apiToken = process.env.JIRA_API_TOKEN || process.env.ATLASSIAN_API_TOKEN || '';
+
+                    if (!email || !apiToken) {
+                        return JSON.stringify({
+                            success: false,
+                            error: 'JIRA_EMAIL and JIRA_API_TOKEN are required',
+                        });
+                    }
+
+                    const headers = {
+                        'Accept': 'application/json',
+                        'Authorization': 'Basic ' + Buffer.from(`${email}:${apiToken}`).toString('base64'),
+                    };
+
+                    const url = cloudId
+                        ? `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/myself`
+                        : `${(baseUrl || '').replace(/\/$/, '')}/rest/api/3/myself`;
+
+                    const response = await fetch(url, { method: 'GET', headers });
+
+                    if (!response.ok) {
+                        const errorBody = await response.text();
+                        return JSON.stringify({
+                            success: false,
+                            error: `Failed to fetch current user: HTTP ${response.status}`,
+                            details: errorBody,
+                        });
+                    }
+
+                    const userData = await response.json();
+                    return JSON.stringify({
+                        success: true,
+                        accountId: userData.accountId,
+                        displayName: userData.displayName,
+                        emailAddress: userData.emailAddress || email,
+                        active: userData.active,
+                    }, null, 2);
+                } catch (error) {
+                    return JSON.stringify({
+                        success: false,
+                        error: `Error fetching current user: ${error.message}`,
+                    });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 11b: create_jira_ticket
+    // Available to: buggenie, testgenie
+    // ───────────────────────────────────────────────────────────────────
+    if (['buggenie', 'testgenie'].includes(agentName)) {
         tools.push(defineTool('create_jira_ticket', {
             description:
-                'Creates a new Jira defect ticket via the Atlassian REST API. ' +
-                'Used by BugGenie to file defect tickets from test failures. ' +
+                'Creates a new Jira ticket via the Atlassian REST API. ' +
+                'Used by BugGenie to file defect tickets and by TestGenie to create Testing tasks. ' +
+                'Supports linking to a parent ticket and assigning to a specific user. ' +
                 'Returns the created ticket key and URL.',
             parameters: {
                 type: 'object',
@@ -743,10 +816,26 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         type: 'string',
                         description: 'Environment where defect was found (e.g., "UAT", "INT", "PROD")',
                     },
+                    jiraBaseUrl: {
+                        type: 'string',
+                        description: 'Jira base URL extracted from user-provided ticket URLs (e.g., "https://corelogic.atlassian.net"). Overrides JIRA_BASE_URL env var for the returned ticket URL. Extract this from any Jira URL the user pastes — take everything before "/browse/".',
+                    },
+                    linkedIssueKey: {
+                        type: 'string',
+                        description: 'Key of an existing Jira issue to link this ticket to (e.g., "AOTF-17250"). Creates a "relates to" link by default. Use this when creating Testing tasks to link them to the parent ticket.',
+                    },
+                    linkType: {
+                        type: 'string',
+                        description: 'Jira issue link type name (default: "Relates"). Common values: "Relates", "Blocks", "is tested by". Only used when linkedIssueKey is provided.',
+                    },
+                    assigneeAccountId: {
+                        type: 'string',
+                        description: 'Atlassian account ID of the user to assign the ticket to. Get this from the get_jira_current_user tool to assign to yourself.',
+                    },
                 },
                 required: ['summary', 'description'],
             },
-            handler: async ({ projectKey, summary, description, issueType, priority, labels, environment }) => {
+            handler: async ({ projectKey, summary, description, issueType, priority, labels, environment, jiraBaseUrl, linkedIssueKey, linkType, assigneeAccountId }) => {
                 try {
                     loadEnvVars();
                     const cloudId = (process.env.JIRA_CLOUD_ID || '').replace(/"/g, '');
@@ -771,19 +860,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     const resolvedType = issueType || 'Bug';
                     const resolvedPriority = priority || 'Medium';
 
-                    // Build issue payload
+                    // Build issue payload — convert markdown description to ADF for rich Jira rendering
                     const issuePayload = {
                         fields: {
                             project: { key: resolvedProject },
                             summary,
-                            description: {
-                                type: 'doc',
-                                version: 1,
-                                content: [{
-                                    type: 'paragraph',
-                                    content: [{ type: 'text', text: description }],
-                                }],
-                            },
+                            description: markdownToAdf(description),
                             issuetype: { name: resolvedType },
                             priority: { name: resolvedPriority },
                         },
@@ -794,14 +876,10 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         issuePayload.fields.labels = labels.split(',').map(l => l.trim());
                     }
                     if (environment) {
-                        issuePayload.fields.environment = {
-                            type: 'doc',
-                            version: 1,
-                            content: [{
-                                type: 'paragraph',
-                                content: [{ type: 'text', text: environment }],
-                            }],
-                        };
+                        issuePayload.fields.environment = markdownToAdf(environment);
+                    }
+                    if (assigneeAccountId) {
+                        issuePayload.fields.assignee = { accountId: assigneeAccountId };
                     }
 
                     // Build URL
@@ -836,9 +914,45 @@ function createCustomTools(defineTool, agentName, deps = {}) {
 
                     const data = await response.json();
                     const ticketKey = data.key;
-                    const ticketUrl = cloudId
-                        ? `https://${process.env.JIRA_SITE_NAME || 'jira'}.atlassian.net/browse/${ticketKey}`
-                        : `${baseUrl.replace(/\/$/, '')}/browse/${ticketKey}`;
+
+                    // URL priority: jiraBaseUrl (user input) → JIRA_BASE_URL (env) → JIRA_SITE_NAME construct
+                    // URL priority: jiraBaseUrl (user input) → JIRA_BASE_URL (env) → JIRA_SITE_NAME construct
+                    const resolvedBaseUrl = (jiraBaseUrl || baseUrl || '').replace(/\/+$/, '');
+                    const ticketUrl = resolvedBaseUrl
+                        ? `${resolvedBaseUrl}/browse/${ticketKey}`
+                        : `https://${process.env.JIRA_SITE_NAME || 'jira'}.atlassian.net/browse/${ticketKey}`;
+
+                    // ── Issue Linking: Link new ticket to a parent/related ticket ──
+                    let linkResult = null;
+                    if (linkedIssueKey) {
+                        try {
+                            const linkApiUrl = cloudId
+                                ? `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issueLink`
+                                : `${baseUrl.replace(/\/$/, '')}/rest/api/3/issueLink`;
+
+                            const resolvedLinkType = linkType || 'Relates';
+                            const linkPayload = {
+                                type: { name: resolvedLinkType },
+                                inwardIssue: { key: ticketKey },
+                                outwardIssue: { key: linkedIssueKey },
+                            };
+
+                            const linkResp = await fetch(linkApiUrl, {
+                                method: 'POST',
+                                headers,
+                                body: JSON.stringify(linkPayload),
+                            });
+
+                            if (linkResp.ok || linkResp.status === 201) {
+                                linkResult = { success: true, linkedTo: linkedIssueKey, linkType: resolvedLinkType };
+                            } else {
+                                const linkErr = await linkResp.text();
+                                linkResult = { success: false, error: `Link failed: HTTP ${linkResp.status}`, details: linkErr };
+                            }
+                        } catch (linkError) {
+                            linkResult = { success: false, error: `Link error: ${linkError.message}` };
+                        }
+                    }
 
                     return JSON.stringify({
                         success: true,
@@ -849,11 +963,186 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         issueType: resolvedType,
                         priority: resolvedPriority,
                         project: resolvedProject,
+                        assignee: assigneeAccountId ? { accountId: assigneeAccountId } : undefined,
+                        link: linkResult || undefined,
                     }, null, 2);
                 } catch (error) {
                     return JSON.stringify({
                         success: false,
                         error: `Jira creation error: ${error.message}`,
+                        hint: 'Check network connectivity and Jira credentials in agentic-workflow/.env',
+                    });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 11c: update_jira_ticket
+    // Available to: buggenie, testgenie
+    // ───────────────────────────────────────────────────────────────────
+    if (['buggenie', 'testgenie'].includes(agentName)) {
+        tools.push(defineTool('update_jira_ticket', {
+            description:
+                'Updates an existing Jira ticket via the Atlassian REST API. ' +
+                'Can update summary, description, labels, priority, or add comments. ' +
+                'Use this when the user asks to edit, update, or modify an existing Jira ticket.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    ticketId: {
+                        type: 'string',
+                        description: 'Jira ticket ID to update (e.g., "AOTF-17250")',
+                    },
+                    summary: {
+                        type: 'string',
+                        description: 'New summary/title for the ticket (optional \u2014 only if changing title)',
+                    },
+                    description: {
+                        type: 'string',
+                        description: 'New description for the ticket in markdown format (optional). Supports bold, tables, headings, lists \u2014 automatically converted to Jira ADF.',
+                    },
+                    comment: {
+                        type: 'string',
+                        description: 'Add a comment to the ticket (optional). Supports markdown formatting.',
+                    },
+                    priority: {
+                        type: 'string',
+                        description: 'New priority: Highest, High, Medium, Low, Lowest (optional)',
+                    },
+                    labels: {
+                        type: 'string',
+                        description: 'Comma-separated labels to SET on the ticket (replaces existing labels). Optional.',
+                    },
+                    addLabels: {
+                        type: 'string',
+                        description: 'Comma-separated labels to ADD to existing labels (without removing current ones). Optional.',
+                    },
+                    jiraBaseUrl: {
+                        type: 'string',
+                        description: 'Jira base URL extracted from user-provided ticket URLs. Overrides JIRA_BASE_URL env var for the returned ticket URL.',
+                    },
+                },
+                required: ['ticketId'],
+            },
+            handler: async ({ ticketId, summary, description, comment, priority, labels, addLabels, jiraBaseUrl }) => {
+                try {
+                    loadEnvVars();
+                    const cloudId = (process.env.JIRA_CLOUD_ID || '').replace(/"/g, '');
+                    const baseUrl = process.env.JIRA_BASE_URL;
+                    const email = process.env.JIRA_EMAIL || process.env.ATLASSIAN_EMAIL || '';
+                    const apiToken = process.env.JIRA_API_TOKEN || process.env.ATLASSIAN_API_TOKEN || '';
+
+                    if (!cloudId && !baseUrl) {
+                        return JSON.stringify({
+                            success: false,
+                            error: 'JIRA_BASE_URL or JIRA_CLOUD_ID must be set in agentic-workflow/.env',
+                        });
+                    }
+                    if (!email || !apiToken) {
+                        return JSON.stringify({
+                            success: false,
+                            error: 'JIRA_EMAIL and JIRA_API_TOKEN are required for ticket updates',
+                        });
+                    }
+
+                    const headers = {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Basic ' + Buffer.from(`${email}:${apiToken}`).toString('base64'),
+                    };
+
+                    const apiBase = cloudId
+                        ? `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3`
+                        : `${baseUrl.replace(/\/$/, '')}/rest/api/3`;
+
+                    const results = { updated: [], errors: [] };
+
+                    // \u2500\u2500 Update issue fields (summary, description, priority, labels) \u2500\u2500
+                    const fieldsUpdate = {};
+                    if (summary) fieldsUpdate.summary = summary;
+                    if (description) fieldsUpdate.description = markdownToAdf(description);
+                    if (priority) fieldsUpdate.priority = { name: priority };
+                    if (labels) fieldsUpdate.labels = labels.split(',').map(l => l.trim());
+
+                    if (Object.keys(fieldsUpdate).length > 0) {
+                        const updateUrl = `${apiBase}/issue/${ticketId}`;
+                        const updateResp = await fetch(updateUrl, {
+                            method: 'PUT',
+                            headers,
+                            body: JSON.stringify({ fields: fieldsUpdate }),
+                        });
+                        if (!updateResp.ok) {
+                            const errBody = await updateResp.text();
+                            results.errors.push(`Field update failed: HTTP ${updateResp.status} \u2014 ${errBody}`);
+                        } else {
+                            results.updated.push('fields');
+                        }
+                    }
+
+                    // \u2500\u2500 Add labels without removing existing ones \u2500\u2500
+                    if (addLabels) {
+                        const addUrl = `${apiBase}/issue/${ticketId}`;
+                        const addResp = await fetch(addUrl, {
+                            method: 'PUT',
+                            headers,
+                            body: JSON.stringify({
+                                update: {
+                                    labels: addLabels.split(',').map(l => ({ add: l.trim() })),
+                                },
+                            }),
+                        });
+                        if (!addResp.ok) {
+                            const errBody = await addResp.text();
+                            results.errors.push(`Add labels failed: HTTP ${addResp.status} \u2014 ${errBody}`);
+                        } else {
+                            results.updated.push('labels-added');
+                        }
+                    }
+
+                    // \u2500\u2500 Add comment \u2500\u2500
+                    if (comment) {
+                        const commentUrl = `${apiBase}/issue/${ticketId}/comment`;
+                        const commentResp = await fetch(commentUrl, {
+                            method: 'POST',
+                            headers,
+                            body: JSON.stringify({ body: markdownToAdf(comment) }),
+                        });
+                        if (!commentResp.ok) {
+                            const errBody = await commentResp.text();
+                            results.errors.push(`Comment failed: HTTP ${commentResp.status} \u2014 ${errBody}`);
+                        } else {
+                            results.updated.push('comment');
+                        }
+                    }
+
+                    // Build ticket URL
+                    const resolvedBaseUrl = (jiraBaseUrl || baseUrl || '').replace(/\/+$/, '');
+                    const ticketUrl = resolvedBaseUrl
+                        ? `${resolvedBaseUrl}/browse/${ticketId}`
+                        : `https://${process.env.JIRA_SITE_NAME || 'jira'}.atlassian.net/browse/${ticketId}`;
+
+                    if (results.errors.length > 0 && results.updated.length === 0) {
+                        return JSON.stringify({
+                            success: false,
+                            ticketId,
+                            ticketUrl,
+                            errors: results.errors,
+                            hint: 'Verify JIRA_EMAIL and JIRA_API_TOKEN have write permissions for this ticket',
+                        }, null, 2);
+                    }
+
+                    return JSON.stringify({
+                        success: true,
+                        ticketId,
+                        ticketUrl,
+                        updated: results.updated,
+                        errors: results.errors.length > 0 ? results.errors : undefined,
+                    }, null, 2);
+                } catch (error) {
+                    return JSON.stringify({
+                        success: false,
+                        error: `Jira update error: ${error.message}`,
                         hint: 'Check network connectivity and Jira credentials in agentic-workflow/.env',
                     });
                 }
@@ -921,12 +1210,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                                 const jiraInfo = {
                                     number: ticketId,
                                     title: testSuiteName,
-                                    url: `${process.env.JIRA_BASE_URL || 'https://jira.atlassian.net/'}browse/${ticketId}`,
+                                    url: `${(process.env.JIRA_BASE_URL || 'https://jira.atlassian.net/').replace(/\/+$/, '')}/browse/${ticketId}`,
                                 };
 
                                 // Convert flat steps array into the testCases shape the generator expects
                                 // Input steps: [{ stepId, action, expected, actual }]
-                                // Generator expects: [{ id, title, steps: [{ id, action, expected }] }]
+                                // Generator expects: [{ id, title, steps: [{ id, action, expected, actual }] }]
                                 const testCases = [{
                                     id: 'TC-01',
                                     title: testSuiteName,
@@ -934,6 +1223,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                                         id: s.stepId || s.id || '',
                                         action: s.action || s.activity || '',
                                         expected: s.expected || s.expectedResult || '',
+                                        actual: s.actual || s.actualResults || s.actualResult || '',
                                     })),
                                 }];
 
@@ -1512,10 +1802,229 @@ function createCustomTools(defineTool, agentName, deps = {}) {
         }));
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // GROUNDING TOOLS (17-20) — Local context search for ALL agents
+    // ═══════════════════════════════════════════════════════════════════
+
+    if (groundingStore) {
+
+        // TOOL 17: search_project_context
+        tools.push(defineTool('search_project_context', {
+            description:
+                'Search the local project codebase for relevant code snippets, page objects, ' +
+                'business functions, selectors, and utilities using BM25 full-text search. ' +
+                'Use this when you need to find existing code, understand how a feature is implemented, ' +
+                'or locate selectors/locators for a specific page or component.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    query: {
+                        type: 'string',
+                        description: 'Search query — e.g., "login authentication token", "search filter price beds", "property detail page locators"',
+                    },
+                    scope: {
+                        type: 'string',
+                        description: 'Optional scope filter: "pageObject", "businessFunction", "utility", "config", "testData", "exploration", or leave empty for all',
+                    },
+                    maxResults: {
+                        type: 'number',
+                        description: 'Maximum results to return (default: 8)',
+                    },
+                },
+                required: ['query'],
+            },
+            handler: async ({ query, scope, maxResults }) => {
+                try {
+                    const results = groundingStore.query(query, {
+                        maxChunks: maxResults || 8,
+                        scope: scope || undefined,
+                    });
+                    return JSON.stringify({
+                        success: true,
+                        resultCount: results.length,
+                        results: results.map(r => ({
+                            filePath: r.filePath,
+                            startLine: r.startLine,
+                            endLine: r.endLine,
+                            type: r.type,
+                            score: r.score,
+                            matchedTerms: r.matchedTerms,
+                            classes: r.metadata?.classes || [],
+                            methods: (r.metadata?.methods || []).map(m => m.name),
+                            locators: (r.metadata?.locators || []).length,
+                            preview: r.content.split('\n').slice(0, 8).join('\n'),
+                        })),
+                    });
+                } catch (error) {
+                    return JSON.stringify({ error: error.message });
+                }
+            },
+        }));
+
+        // TOOL 18: get_feature_map
+        tools.push(defineTool('get_feature_map', {
+            description:
+                'Get detailed information about a specific feature, including its pages, page objects, ' +
+                'business functions, test data, and related code snippets. Use this to understand ' +
+                'what already exists for a feature before generating new tests or scripts.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    featureName: {
+                        type: 'string',
+                        description: 'The feature name — e.g., "Search", "Login", "Property Details", "Favorites"',
+                    },
+                },
+                required: ['featureName'],
+            },
+            handler: async ({ featureName }) => {
+                try {
+                    const context = groundingStore.getFeatureContext(featureName);
+                    if (!context) {
+                        // List available features
+                        const domain = groundingStore.getDomainContext();
+                        return JSON.stringify({
+                            success: false,
+                            message: `Feature "${featureName}" not found in feature map`,
+                            availableFeatures: (domain.features || []).map(f => f.name),
+                        });
+                    }
+                    return JSON.stringify({ success: true, feature: context });
+                } catch (error) {
+                    return JSON.stringify({ error: error.message });
+                }
+            },
+        }));
+
+        // TOOL 19: get_selector_recommendations
+        // Available to: scriptgenerator, codereviewer
+        if (['scriptgenerator', 'codereviewer'].includes(agentName)) {
+            tools.push(defineTool('get_selector_recommendations', {
+                description:
+                    'Get recommended selectors for a specific page or element. Returns selectors ' +
+                    'ranked by reliability (data-qa > getByRole > aria-label > getByText > css-class > xpath). ' +
+                    'Use this to find the most stable selector for an element instead of guessing.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        pageUrl: {
+                            type: 'string',
+                            description: 'URL or page identifier — e.g., "/search", "/property/123", "SearchPage"',
+                        },
+                        elementHint: {
+                            type: 'string',
+                            description: 'Description of the element — e.g., "search button", "price filter", "login form"',
+                        },
+                    },
+                    required: ['pageUrl'],
+                },
+                handler: async ({ pageUrl, elementHint }) => {
+                    try {
+                        const recommendations = groundingStore.getSelectorRecommendations(pageUrl, elementHint);
+                        return JSON.stringify({
+                            success: true,
+                            pageUrl,
+                            selectorCount: recommendations.length,
+                            selectors: recommendations.slice(0, 15),
+                        });
+                    } catch (error) {
+                        return JSON.stringify({ error: error.message });
+                    }
+                },
+            }));
+        }
+
+        // TOOL 20: check_existing_coverage
+        // Available to: scriptgenerator, testgenie
+        if (['scriptgenerator', 'testgenie'].includes(agentName)) {
+            tools.push(defineTool('check_existing_coverage', {
+                description:
+                    'Check if automation scripts already exist for a specific feature, page, or ticket. ' +
+                    'Returns existing spec files and their test names. Use this BEFORE generating new tests ' +
+                    'to avoid creating duplicate automation coverage.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        featureName: {
+                            type: 'string',
+                            description: 'Feature name to check — e.g., "Search", "Login"',
+                        },
+                        ticketId: {
+                            type: 'string',
+                            description: 'Jira ticket ID — e.g., "AOTF-16337"',
+                        },
+                        pagePath: {
+                            type: 'string',
+                            description: 'Page URL path — e.g., "/search", "/property"',
+                        },
+                    },
+                },
+                handler: async ({ featureName, ticketId, pagePath }) => {
+                    try {
+                        const coverage = groundingStore.checkExistingCoverage({
+                            featureName,
+                            ticketId,
+                            pagePath,
+                        });
+                        return JSON.stringify({ success: true, ...coverage });
+                    } catch (error) {
+                        return JSON.stringify({ error: error.message });
+                    }
+                },
+            }));
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 21: get_snapshot_quality
+    // Available to: scriptgenerator
+    // ───────────────────────────────────────────────────────────────────
+    if (agentName === 'scriptgenerator') {
+        tools.push(defineTool('get_snapshot_quality', {
+            description:
+                'Returns OODA quality assessment data for all MCP snapshots taken in the current session. ' +
+                'Shows per-snapshot scores, element counts, role diversity, warnings, and whether ' +
+                'script creation is currently allowed. Use this to check if your exploration data ' +
+                'is sufficient before creating the .spec.js file.',
+            parameters: {
+                type: 'object',
+                properties: {},
+            },
+            handler: async () => {
+                try {
+                    const { getSnapshotQualityData } = require('./enforcement-hooks');
+                    const data = getSnapshotQualityData('scriptgenerator');
+
+                    if (!data) {
+                        return JSON.stringify({
+                            success: false,
+                            message: 'No snapshot data available. Call unified_snapshot first.',
+                        });
+                    }
+
+                    return JSON.stringify({
+                        success: true,
+                        totalSnapshots: data.totalSnapshots,
+                        qualityAssessed: data.qualityAssessed,
+                        summary: data.summary,
+                        canCreateSpec: data.canCreateSpec,
+                        latestSnapshot: data.latestSnapshot,
+                        allSnapshots: data.allSnapshots,
+                        guidance: data.canCreateSpec
+                            ? 'Script creation is ALLOWED — your latest snapshot passed quality checks.'
+                            : 'Script creation is BLOCKED — your latest snapshot scored below the retry threshold. ' +
+                            'Wait for the page to fully load, dismiss popups, and call unified_snapshot again.',
+                    }, null, 2);
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: error.message });
+                }
+            },
+        }));
+    }
+
     return tools;
 }
 
-// ─── Helper: Format Jira ticket data ────────────────────────────────────────
 function formatJiraTicket(data, ticketId) {
     const fields = data.fields || {};
     const rendered = data.renderedFields || {};

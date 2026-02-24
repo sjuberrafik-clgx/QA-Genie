@@ -89,10 +89,11 @@ function stripVSCodeToolPrefix(text) {
 }
 
 // Load .env for Jira credentials (Atlassian MCP auth)
+// Uses override:true so updated tokens are picked up without server restart
 try {
     const envPath = path.join(__dirname, '..', '.env');
     if (fs.existsSync(envPath)) {
-        require('dotenv').config({ path: envPath });
+        require('dotenv').config({ path: envPath, override: true });
     }
 } catch { /* dotenv not critical — Atlassian MCP simply won't be configured */ }
 
@@ -107,7 +108,14 @@ const CHAT_EVENTS = {
     IDLE: 'chat_idle',
     ERROR: 'chat_error',
     FOLLOWUP: 'chat_followup',
+    USER_INPUT_REQUEST: 'chat_user_input_request',
+    USER_INPUT_COMPLETE: 'chat_user_input_complete',
 };
+
+// Default timeout for user-input requests (5 minutes).
+// If the user doesn't respond within this window, the agent receives
+// an auto-generated fallback answer so it doesn't hang forever.
+const USER_INPUT_TIMEOUT_MS = 5 * 60 * 1000;
 
 // ─── Chat Session Manager ───────────────────────────────────────────────────
 
@@ -178,6 +186,29 @@ class ChatSessionManager extends EventEmitter {
                         'You are running inside a web app chat session (not VS Code).',
                         'Use the custom tools available to you to complete tasks.',
                         '',
+                        // Dashboard-context: explicit Jira tool guidance (prevents web-scraping fallback)
+                        'CRITICAL — Jira Ticket Access:',
+                        '- To READ existing Jira tickets, use the `fetch_jira_ticket` custom tool or Atlassian MCP tools (atl_getJiraIssue, atl_searchJiraIssuesUsingJql).',
+                        '- To CREATE new Jira tickets, use the `create_jira_ticket` custom tool or Atlassian MCP tools (atl_createJiraIssue).',
+                        '- To UPDATE/EDIT existing Jira tickets (change summary, description, labels, priority, or add comments), use the `update_jira_ticket` custom tool.',
+                        '- NEVER use web/fetch, fetch_webpage, or HTTP scraping to access Jira URLs — Jira is a client-rendered SPA and HTML scraping returns no useful content.',
+                        '- When creating Testing tasks for Bug-type tickets, FIRST use `fetch_jira_ticket` to read the parent ticket details (summary, issue type, description, acceptance criteria), THEN create the Testing task with proper context.',
+                        '',
+                        'CRITICAL — Jira URL Handling:',
+                        '- When the user provides a Jira ticket URL (e.g., https://corelogic.atlassian.net/browse/AOTF-16514), extract the base URL (everything before "/browse/") and pass it as the `jiraBaseUrl` parameter when calling `create_jira_ticket`.',
+                        '- This ensures the returned ticket URL matches the user\'s Jira instance domain.',
+                        '- Example: if user gives "https://corelogic.atlassian.net/browse/AOTF-16514", set jiraBaseUrl="https://corelogic.atlassian.net".',
+                        '',
+                        'CRITICAL — Testing Task Description Formatting:',
+                        '- When creating Testing tasks for Bug-type parent tickets, format test cases as MARKDOWN TABLES in the description.',
+                        '- Use this exact table format:',
+                        '  | Test Step ID | Specific Activity or Action | Expected Results | Actual Results |',
+                        '  |---|---|---|---|',
+                        '  | 1.1 | Step description | Expected result | Actual result |',
+                        '- Include section headings with ## for structure (e.g., ## Test Cases, ## Pre-Conditions).',
+                        '- Use **bold** for section labels like **Description :-**, **Steps to Reproduce :-**.',
+                        '- The description field supports rich formatting — markdown bold, headings, tables, and lists will be automatically converted to Jira\'s native format (ADF) for proper rendering.',
+                        '',
                         agentPrompt,
                     ];
                     // Append copilot-instructions for project context
@@ -191,8 +222,8 @@ class ChatSessionManager extends EventEmitter {
                     } catch { /* ignore */ }
 
                     // SDK context: strip VS Code MCP tool prefix so LLM uses raw names
-                    return stripVSCodeToolPrefix(parts.join('\n'));
                     console.log(`[ChatManager] Loaded agent prompt: ${agentMode}.agent.md`);
+                    return stripVSCodeToolPrefix(parts.join('\n'));
                 }
             } catch (err) {
                 console.warn(`[ChatManager] Failed to load ${agentMode}.agent.md: ${err.message}`);
@@ -350,10 +381,67 @@ class ChatSessionManager extends EventEmitter {
             // Auto-approve all tool calls in chat (read-only tools are safe)
             onPermissionRequest: async () => ({ kind: 'approved' }),
 
-            // Handle user-input requests by relaying to the chat
-            onUserInputRequest: async (request) => ({
-                answer: 'Continue with the best approach based on available context.',
-            }),
+            // ── User-input relay ─────────────────────────────────────────
+            // When the agent calls ask_user / ask_questions the SDK invokes
+            // this callback.  Instead of auto-answering we:
+            //   1. Emit an SSE event so the dashboard shows an inline prompt
+            //   2. Return a Promise that blocks the agent until the user responds
+            //   3. Set a timeout to auto-resolve if the user doesn't respond
+            onUserInputRequest: async (request) => {
+                // Extract question & options from the SDK request object
+                const question = request?.question || request?.message || (typeof request === 'string' ? request : JSON.stringify(request));
+                const options = Array.isArray(request?.options) ? request.options : [];
+
+                // We need the sessionId which is captured after createSession resolves.
+                // This callback can only fire after session creation, so _sessions is populated.
+                const sessionEntry = this._findEntryBySession(session);
+                if (!sessionEntry) {
+                    // Fallback if we can't locate the session (should never happen)
+                    console.warn('[ChatManager] onUserInputRequest: could not locate session — auto-answering');
+                    return { answer: 'Continue with the best approach based on available context.' };
+                }
+                const { sid, entry } = sessionEntry;
+
+                const requestId = `uir_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                console.log(`[ChatManager] 💬 User input requested (${requestId}): ${question.slice(0, 120)}`);
+
+                return new Promise((resolve) => {
+                    // Auto-resolve timer — prevents the agent from hanging forever
+                    const timer = setTimeout(() => {
+                        if (entry.pendingInputRequests.has(requestId)) {
+                            console.log(`[ChatManager] ⏱️ User input timed out (${requestId}) — auto-resolving`);
+                            entry.pendingInputRequests.delete(requestId);
+                            this._broadcastToSSE(sid, CHAT_EVENTS.USER_INPUT_COMPLETE, {
+                                requestId,
+                                answer: 'Continue with the best approach based on available context.',
+                                auto: true,
+                            });
+                            resolve({ answer: 'Continue with the best approach based on available context.', wasFreeform: true });
+                        }
+                    }, USER_INPUT_TIMEOUT_MS);
+
+                    // Store the pending request
+                    entry.pendingInputRequests.set(requestId, { resolve, question, options, timer });
+
+                    // Record in message history so it replays on reconnect
+                    entry.messages.push({
+                        role: 'user_input_request',
+                        content: question,
+                        requestId,
+                        options,
+                        timestamp: new Date().toISOString(),
+                    });
+
+                    // Broadcast SSE event to the dashboard
+                    this._broadcastToSSE(sid, CHAT_EVENTS.USER_INPUT_REQUEST, {
+                        requestId,
+                        question,
+                        options,
+                    });
+
+                    this._persistHistory();
+                });
+            },
         };
 
         // Add MCP servers based on agent mode
@@ -361,6 +449,15 @@ class ChatSessionManager extends EventEmitter {
         // - testgenie / buggenie: Atlassian MCP only (Jira)
         // - scriptgenerator: Unified Automation MCP only (browser)
         try {
+            // Re-read .env to pick up credential changes (e.g. rotated API tokens)
+            // without requiring a server restart
+            try {
+                const envPath = path.join(__dirname, '..', '.env');
+                if (fs.existsSync(envPath)) {
+                    require('dotenv').config({ path: envPath, override: true });
+                }
+            } catch { /* non-critical */ }
+
             const mcpServers = {};
             const needsBrowser = !agentMode || agentMode === 'scriptgenerator';
             const needsJira = !agentMode || agentMode === 'testgenie' || agentMode === 'buggenie';
@@ -399,6 +496,9 @@ class ChatSessionManager extends EventEmitter {
                         headers: { authorization: `Basic ${basicAuth}` },
                         tools: ['*'],
                     };
+                    console.log(`[ChatManager] 🔗 Atlassian MCP enabled for ${agentMode || 'default'} (JIRA_EMAIL + JIRA_API_TOKEN)`);
+                } else {
+                    console.warn(`[ChatManager] ⚠️ Atlassian MCP NOT configured for ${agentMode || 'default'} — JIRA_EMAIL or JIRA_API_TOKEN missing. Agent will rely on fetch_jira_ticket / create_jira_ticket custom tools (REST API fallback).`);
                 }
             }
 
@@ -406,7 +506,9 @@ class ChatSessionManager extends EventEmitter {
                 sessionConfig.mcpServers = mcpServers;
                 console.log(`[ChatManager] MCP servers: ${Object.keys(mcpServers).join(', ')}`);
             }
-        } catch { /* ignore */ }
+        } catch (err) {
+            console.warn(`[ChatManager] ⚠️ MCP server configuration failed: ${err.message}. Session will proceed without MCP — custom tools (fetch_jira_ticket, create_jira_ticket) remain available.`);
+        }
 
         // Retry once on abort/signal errors (MCP server cold-start can cause SDK timeout)
         let session;
@@ -435,6 +537,7 @@ class ChatSessionManager extends EventEmitter {
             messages: [],
             unsubscribers: [],
             archived: false,
+            pendingInputRequests: new Map(),  // requestId → { resolve, question, options, timer }
         });
 
         // Wire session events → SSE broadcast
@@ -589,6 +692,86 @@ class ChatSessionManager extends EventEmitter {
     }
 
     /**
+     * Reverse-lookup: find a session entry by its SDK session reference.
+     * Used inside onUserInputRequest where the sessionId isn't in closure scope.
+     * @private
+     */
+    _findEntryBySession(session) {
+        for (const [sid, entry] of this._sessions) {
+            if (entry.session === session) return { sid, entry };
+        }
+        return null;
+    }
+
+    /**
+     * Resolve a pending user-input request (called when the user submits their answer
+     * from the dashboard UI).
+     *
+     * @param {string} sessionId
+     * @param {string} requestId  - Unique ID of the pending request
+     * @param {string} answer     - The user's answer text
+     * @returns {{ resolved: true }}
+     */
+    resolveUserInput(sessionId, requestId, answer) {
+        const entry = this._sessions.get(sessionId);
+        if (!entry) throw new Error(`Session ${sessionId} not found`);
+
+        const pending = entry.pendingInputRequests.get(requestId);
+        if (!pending) throw new Error(`No pending user-input request "${requestId}" (already resolved or expired)`);
+
+        // Clear the auto-resolve timeout
+        if (pending.timer) clearTimeout(pending.timer);
+
+        // Remove from pending map
+        entry.pendingInputRequests.delete(requestId);
+
+        // Record the user's answer in message history
+        entry.messages.push({
+            role: 'user_input_response',
+            content: answer,
+            requestId,
+            timestamp: new Date().toISOString(),
+        });
+
+        // Notify dashboard clients
+        this._broadcastToSSE(sessionId, CHAT_EVENTS.USER_INPUT_COMPLETE, {
+            requestId,
+            answer,
+            auto: false,
+        });
+
+        this._persistHistory();
+
+        // Unblock the SDK agent — resolve the Promise returned in onUserInputRequest
+        pending.resolve({ answer, wasFreeform: true });
+
+        console.log(`[ChatManager] ✅ User input resolved (${requestId}): ${answer.slice(0, 100)}`);
+        return { resolved: true };
+    }
+
+    /**
+     * Auto-resolve all pending user-input requests for a session.
+     * Used during abort / destroy to prevent the agent from hanging.
+     * @private
+     */
+    _autoResolveAllPendingInputs(sessionId) {
+        const entry = this._sessions.get(sessionId);
+        if (!entry || !entry.pendingInputRequests) return;
+
+        for (const [requestId, pending] of entry.pendingInputRequests) {
+            if (pending.timer) clearTimeout(pending.timer);
+            this._broadcastToSSE(sessionId, CHAT_EVENTS.USER_INPUT_COMPLETE, {
+                requestId,
+                answer: 'Continue with the best approach based on available context.',
+                auto: true,
+            });
+            pending.resolve({ answer: 'Continue with the best approach based on available context.', wasFreeform: true });
+            console.log(`[ChatManager] ⏩ Auto-resolved pending input (${requestId}) due to abort/destroy`);
+        }
+        entry.pendingInputRequests.clear();
+    }
+
+    /**
      * Send a user message to a chat session.
      *
      * @param {string} sessionId
@@ -661,6 +844,10 @@ class ChatSessionManager extends EventEmitter {
         const entry = this._sessions.get(sessionId);
         if (!entry) throw new Error(`Session ${sessionId} not found`);
         if (entry.archived || !entry.session) return; // Nothing to abort for archived sessions
+
+        // Auto-resolve any pending user-input requests so the agent doesn't hang
+        this._autoResolveAllPendingInputs(sessionId);
+
         await entry.session.abort();
     }
 
@@ -675,7 +862,42 @@ class ChatSessionManager extends EventEmitter {
 
         // Send recent messages as replay
         for (const msg of entry.messages.slice(-20)) {
-            const type = msg.role === 'user' ? 'user_message' : CHAT_EVENTS.MESSAGE;
+            // Map special roles to their dedicated event types
+            let type;
+            if (msg.role === 'user') {
+                type = 'user_message';
+            } else if (msg.role === 'user_input_request') {
+                // Replay the prompt — mark as resolved if no longer pending
+                const stillPending = entry.pendingInputRequests?.has(msg.requestId);
+                const event = {
+                    type: CHAT_EVENTS.USER_INPUT_REQUEST,
+                    sessionId,
+                    timestamp: msg.timestamp,
+                    data: {
+                        requestId: msg.requestId,
+                        question: msg.content,
+                        options: msg.options || [],
+                        resolved: !stillPending,
+                    },
+                };
+                try { res.write(`event: ${CHAT_EVENTS.USER_INPUT_REQUEST}\ndata: ${JSON.stringify(event)}\n\n`); } catch { /* ignore */ }
+                continue;
+            } else if (msg.role === 'user_input_response') {
+                const event = {
+                    type: CHAT_EVENTS.USER_INPUT_COMPLETE,
+                    sessionId,
+                    timestamp: msg.timestamp,
+                    data: {
+                        requestId: msg.requestId,
+                        answer: msg.content,
+                        auto: false,
+                    },
+                };
+                try { res.write(`event: ${CHAT_EVENTS.USER_INPUT_COMPLETE}\ndata: ${JSON.stringify(event)}\n\n`); } catch { /* ignore */ }
+                continue;
+            } else {
+                type = CHAT_EVENTS.MESSAGE;
+            }
             const event = { type, sessionId, timestamp: msg.timestamp, data: { content: msg.content, role: msg.role } };
             try {
                 res.write(`event: ${type}\ndata: ${JSON.stringify(event)}\n\n`);
@@ -700,6 +922,9 @@ class ChatSessionManager extends EventEmitter {
     async destroySession(sessionId) {
         const entry = this._sessions.get(sessionId);
         if (!entry) return;
+
+        // Auto-resolve any pending user-input requests before tearing down
+        this._autoResolveAllPendingInputs(sessionId);
 
         // Unsubscribe events
         for (const unsub of entry.unsubscribers) {

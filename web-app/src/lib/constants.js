@@ -51,6 +51,8 @@ export const SSE_EVENT_TYPES = {
     CHAT_IDLE: 'chat_idle',
     CHAT_ERROR: 'chat_error',
     CHAT_FOLLOWUP: 'chat_followup',
+    CHAT_USER_INPUT_REQUEST: 'chat_user_input_request',
+    CHAT_USER_INPUT_COMPLETE: 'chat_user_input_complete',
 };
 
 /** Flat list of all SSE event type strings — used for EventSource.addEventListener */

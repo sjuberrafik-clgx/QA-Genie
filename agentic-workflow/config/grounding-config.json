@@ -1,0 +1,427 @@
+{
+    "$schema": "./grounding-config.schema.json",
+    "version": "1.0.0",
+    "_comment": "Project-specific grounding configuration. Each project using this workflow should customize this file with their application domain, features, and terminology.",
+    "project": {
+        "id": "onehome-uat",
+        "applicationName": "OneHome",
+        "applicationDescription": "Real estate property search and management platform powered by CoreLogic. Provides property search, favorites, notes, agent branding, marketplace services, and consumer funnel management.",
+        "primaryUrl": "https://aotf-uat.corelogic.com",
+        "authMethod": "token-url",
+        "authNotes": "Authentication is via URL token parameter. Tokens are MLS-specific and sourced from tests/test-data/testData.js"
+    },
+    "featureMap": [
+        {
+            "name": "Property Search",
+            "description": "Search and filter properties by city, price, beds, baths, property type. Map-based and grid view.",
+            "pages": [
+                "/en-US/properties/map"
+            ],
+            "pageObjects": [
+                "searchPanel.js",
+                "propertiresGrid.js",
+                "map.js"
+            ],
+            "businessFunctions": [
+                "search.js"
+            ],
+            "keywords": [
+                "search",
+                "filter",
+                "city",
+                "price",
+                "beds",
+                "baths",
+                "map",
+                "grid",
+                "property list"
+            ]
+        },
+        {
+            "name": "Property Details",
+            "description": "Detailed property information page — photos, facts, features, schools, EMC calculator, Reimagine Space CTA, Ads Services Widget.",
+            "pages": [
+                "/en-US/properties/detail"
+            ],
+            "pageObjects": [
+                "propertyDetails.js",
+                "detailsCard.js"
+            ],
+            "businessFunctions": [
+                "propertyDetails.js"
+            ],
+            "keywords": [
+                "property detail",
+                "details",
+                "facts",
+                "features",
+                "schools",
+                "EMC",
+                "reimagine space",
+                "roomvo",
+                "ads widget"
+            ]
+        },
+        {
+            "name": "Authentication",
+            "description": "Login, logout, account activation, and user authentication flows.",
+            "pages": [
+                "/login",
+                "/logout",
+                "/activate"
+            ],
+            "pageObjects": [
+                "loginPage.js",
+                "logoutPage.js",
+                "activateAccount.js",
+                "authenticationPopUp.js"
+            ],
+            "businessFunctions": [
+                "login.js"
+            ],
+            "keywords": [
+                "login",
+                "logout",
+                "auth",
+                "authentication",
+                "activate",
+                "account",
+                "MLS",
+                "ONMLS",
+                "token"
+            ]
+        },
+        {
+            "name": "Favorites",
+            "description": "Save, remove, and manage favorite properties. List and compare favorites.",
+            "pages": [
+                "/en-US/properties/favorites"
+            ],
+            "pageObjects": [
+                "favoritesPage.js",
+                "compareAllPopUp.js"
+            ],
+            "businessFunctions": [
+                "favorites.js"
+            ],
+            "keywords": [
+                "favorite",
+                "save",
+                "compare",
+                "saved properties",
+                "heart",
+                "bookmark"
+            ]
+        },
+        {
+            "name": "Notes",
+            "description": "Add, edit, delete personal notes on properties.",
+            "pages": [],
+            "pageObjects": [
+                "addNotesWindow.js"
+            ],
+            "businessFunctions": [
+                "note.js"
+            ],
+            "keywords": [
+                "note",
+                "notes",
+                "add note",
+                "edit note",
+                "delete note"
+            ]
+        },
+        {
+            "name": "User Profile",
+            "description": "View and edit user profile settings, notification preferences, switch groups.",
+            "pages": [
+                "/en-US/profile"
+            ],
+            "pageObjects": [
+                "profilePage.js",
+                "userProfilePopUp.js",
+                "switchGroupWindow.js"
+            ],
+            "businessFunctions": [
+                "profile.js"
+            ],
+            "keywords": [
+                "profile",
+                "settings",
+                "notification",
+                "group",
+                "switch group"
+            ]
+        },
+        {
+            "name": "Agent Branding",
+            "description": "Agent branding popups and customization for branded property views.",
+            "pages": [],
+            "pageObjects": [
+                "agentBranding.js",
+                "offLimitsAgentPopUp.js"
+            ],
+            "businessFunctions": [],
+            "keywords": [
+                "agent",
+                "branding",
+                "agent portal",
+                "off limits",
+                "branded"
+            ]
+        },
+        {
+            "name": "Marketplace",
+            "description": "Home services marketplace — mortgage, insurance, home professionals, broker insurance.",
+            "pages": [
+                "/en-US/marketplace"
+            ],
+            "pageObjects": [
+                "marketplace/marketplacePage.js",
+                "marketplace/mortgagePage.js",
+                "marketplace/insurancePage.js",
+                "marketplace/homeProfessionalsPage.js"
+            ],
+            "businessFunctions": [],
+            "keywords": [
+                "marketplace",
+                "mortgage",
+                "insurance",
+                "home pro",
+                "professionals",
+                "broker"
+            ]
+        },
+        {
+            "name": "Planner",
+            "description": "Homebuying planner and timeline management.",
+            "pages": [
+                "/en-US/planner"
+            ],
+            "pageObjects": [
+                "planner.js"
+            ],
+            "businessFunctions": [],
+            "keywords": [
+                "planner",
+                "timeline",
+                "homebuying",
+                "plan"
+            ]
+        },
+        {
+            "name": "OneHomeOwner (OHO)",
+            "description": "OneHome Owner section for property ownership features.",
+            "pages": [
+                "/en-US/owner"
+            ],
+            "pageObjects": [
+                "onehomeOwner.js"
+            ],
+            "businessFunctions": [],
+            "keywords": [
+                "OHO",
+                "onehome owner",
+                "owner",
+                "ownership",
+                "homeowner"
+            ]
+        },
+        {
+            "name": "Notifications",
+            "description": "Notification center and alerts management.",
+            "pages": [],
+            "pageObjects": [
+                "notificationsMenuDropDown.js"
+            ],
+            "businessFunctions": [],
+            "keywords": [
+                "notification",
+                "alert",
+                "bell",
+                "notification menu"
+            ]
+        },
+        {
+            "name": "Welcome & Popups",
+            "description": "Welcome modal, tour overlay, and various popup handlers.",
+            "pages": [],
+            "pageObjects": [
+                "welcomePopUp.js",
+                "compareAllPopUp.js",
+                "offLimitsAgentPopUp.js"
+            ],
+            "businessFunctions": [
+                "general.js"
+            ],
+            "keywords": [
+                "welcome",
+                "popup",
+                "modal",
+                "tour",
+                "overlay",
+                "dismiss"
+            ]
+        }
+    ],
+    "domainTerminology": {
+        "MLS": "Multiple Listing Service — regional real estate data provider",
+        "LM": "Lead Management",
+        "PA": "Partial Access",
+        "SAP": "Standalone Agent Page",
+        "ECFM": "Enhanced Consumer Funnel Management",
+        "TOS": "Terms of Service",
+        "CFM": "Consumer Funnel Management",
+        "EMC": "Estimated Monthly Cost — mortgage estimation calculator on property detail pages",
+        "SND": "Syndication — data distribution to third parties",
+        "SRCH": "Syndication Search",
+        "OHO": "OneHomeOwner — property ownership section",
+        "DD": "Data Distribution",
+        "CTA": "Call To Action — interactive UI element prompting user action",
+        "RoomVo": "Virtual staging/reimagination tool for property images",
+        "Canopy MLS": "Charlotte-area MLS used as primary test MLS",
+        "ONMLS": "Ontario MLS / ITSO MLS — Canadian MLS",
+        "TRREB": "Toronto Regional Real Estate Board",
+        "OneHome": "The main real estate platform under test",
+        "POmanager": "Page Object Manager — central factory class for all page objects",
+        "PopupHandler": "Centralized utility for dismissing application popups"
+    },
+    "customGroundingRules": [
+        "Authentication always uses token-based URL authentication, never username/password forms. Tokens come from testData.js userTokens export.",
+        "Always dismiss popups after navigation using PopupHandler.dismissAll() or poManager.dismissAllPopups() before interacting with page elements.",
+        "The launchBrowser() function from tests/config/config.js returns { browser, context, page } — always destructure all three.",
+        "POmanager is a DEFAULT export (const POmanager = require(...)), NOT a named export (const { POmanager } = require(...)).",
+        "Use test.describe.serial() when tests share browser state via a single beforeAll.",
+        "Never use page.waitForTimeout() — use waitFor(), waitForLoadState(), toBeVisible(), or waitForSelector() instead.",
+        "Never use .type() which is deprecated — use .fill() or .pressSequentially() instead.",
+        "Import paths from spec files: config → ../../config/config, POmanager → ../../pageobjects/POmanager, testData → ../../test-data/testData, popupHandler → ../../utils/popupHandler.",
+        "Actual Results column in test cases must NEVER be blank — use 'User is able to [action]' format.",
+        "Test scripts must go in tests/specs/{feature-folder}/{ticketId}.spec.js \u2014 NEVER under web-app/."
+    ],
+    "indexSources": [
+        {
+            "path": "tests/pageobjects",
+            "type": "pageObject",
+            "description": "Page Object classes with locators and methods"
+        },
+        {
+            "path": "tests/business-functions",
+            "type": "businessFunction",
+            "description": "Reusable business flow functions"
+        },
+        {
+            "path": "tests/utils",
+            "type": "utility",
+            "description": "Utility functions including PopupHandler"
+        },
+        {
+            "path": "tests/config",
+            "type": "config",
+            "description": "Framework configuration (launchBrowser, etc.)"
+        },
+        {
+            "path": "tests/test-data",
+            "type": "testData",
+            "description": "Test data including tokens and credentials"
+        },
+        {
+            "path": "agentic-workflow/exploration-data",
+            "type": "exploration",
+            "description": "MCP exploration snapshots from live browser"
+        }
+    ],
+    "indexSettings": {
+        "chunkSize": 80,
+        "chunkOverlap": 20,
+        "maxIndexEntries": 5000,
+        "classAwareChunking": true,
+        "extractMethodSignatures": true,
+        "extractLocators": true,
+        "fileExtensions": [
+            ".js",
+            ".json"
+        ],
+        "excludePatterns": [
+            "node_modules",
+            "package-lock",
+            ".spec.js"
+        ]
+    },
+    "retrievalSettings": {
+        "maxChunksPerQuery": 10,
+        "minRelevanceScore": 0.12,
+        "boostFactors": {
+            "exactMatch": 3,
+            "fileNameMatch": 2,
+            "methodNameMatch": 2.5,
+            "locatorMatch": 2,
+            "featureKeywordMatch": 1.5
+        },
+        "agentBoosts": {
+            "scriptgenerator": [
+                "locator",
+                "selector",
+                "page.",
+                "getByRole",
+                "getByText",
+                "data-qa",
+                "click",
+                "fill",
+                "waitFor"
+            ],
+            "testgenie": [
+                "feature",
+                "scenario",
+                "user",
+                "should",
+                "verify",
+                "validate"
+            ],
+            "buggenie": [
+                "error",
+                "fail",
+                "timeout",
+                "selector",
+                "crash",
+                "bug"
+            ],
+            "codereviewer": [
+                "pattern",
+                "import",
+                "require",
+                "describe",
+                "test(",
+                "expect",
+                "await"
+            ]
+        }
+    },
+    "selectorRegistry": {
+        "enabled": true,
+        "priorityOrder": [
+            "data-qa",
+            "data-test-id",
+            "data-testid",
+            "getByRole",
+            "aria-label",
+            "getByText",
+            "css-class",
+            "xpath"
+        ],
+        "reliabilityScores": {
+            "data-qa": 0.95,
+            "data-test-id": 0.95,
+            "data-testid": 0.95,
+            "getByRole": 0.85,
+            "aria-label": 0.8,
+            "getByText": 0.7,
+            "css-class": 0.5,
+            "xpath": 0.3
+        }
+    },
+    "explorationFreshness": {
+        "maxAgeDays": 14,
+        "warnAgeDays": 7,
+        "autoInvalidate": false
+    }
+}
