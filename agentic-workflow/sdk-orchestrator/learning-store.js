@@ -51,11 +51,13 @@ class LearningStore {
      * @param {string} [entry.fix]        - What was applied to fix it
      * @param {string} entry.outcome      - 'fixed' | 'persisted' | 'pending'
      * @param {string} [entry.method]     - 'auto-fix' | 'sdk-heal' | 'manual'
+     * @param {string} [entry.projectId]  - Project identifier for multi-project support
      * @param {string} [entry.timestamp]
      */
     recordFailure(entry) {
         this.data.failures.push({
             ticketId: entry.ticketId || 'unknown',
+            projectId: entry.projectId || null,
             page: entry.page || null,
             errorType: entry.errorType || 'UNKNOWN',
             selector: entry.selector || '',
@@ -99,6 +101,7 @@ class LearningStore {
      * @param {string[]} mapping.tried     - Selectors attempted (in order)
      * @param {string} mapping.stable      - The selector that worked
      * @param {number} [mapping.confidence] - 0.0 to 1.0 (how many times it worked)
+     * @param {string} [mapping.projectId] - Project identifier for multi-project support
      */
     recordStableSelector(mapping) {
         // Upsert — update if same page+element exists
@@ -120,6 +123,7 @@ class LearningStore {
                 tried: mapping.tried || [],
                 stable: mapping.stable,
                 confidence: mapping.confidence ?? 0.8,
+                projectId: mapping.projectId || null,
                 lastUpdated: new Date().toISOString(),
             });
         }
@@ -142,6 +146,7 @@ class LearningStore {
      * @param {Array} [pattern.popups]       - Popup types detected
      * @param {Array} [pattern.commonIssues] - Recurring issues
      * @param {number} [pattern.avgLoadTime] - Average page load time in ms
+     * @param {string} [pattern.projectId] - Project identifier for multi-project support
      */
     recordPagePattern(pattern) {
         const existing = this.data.pagePatterns.find(p => p.url === pattern.url);
@@ -163,6 +168,7 @@ class LearningStore {
                 popups: pattern.popups || [],
                 commonIssues: pattern.commonIssues || [],
                 avgLoadTime: pattern.avgLoadTime || null,
+                projectId: pattern.projectId || null,
                 firstSeen: new Date().toISOString(),
                 lastSeen: new Date().toISOString(),
             });
@@ -172,6 +178,22 @@ class LearningStore {
     }
 
     // ─── Queries ────────────────────────────────────────────────────
+
+    /**
+     * Get failures for a specific project.
+     */
+    getFailuresForProject(projectId) {
+        if (!projectId) return this.data.failures;
+        return this.data.failures.filter(f => f.projectId === projectId);
+    }
+
+    /**
+     * Get stable selectors for a specific project.
+     */
+    getStableSelectorsForProject(projectId) {
+        if (!projectId) return this.data.selectorMappings;
+        return this.data.selectorMappings.filter(m => m.projectId === projectId);
+    }
 
     /**
      * Get failures for a specific ticket.

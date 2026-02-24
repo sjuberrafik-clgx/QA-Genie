@@ -45,8 +45,9 @@ Print this line before anything else:
 ```
 Jira Ticket Number:- AOTF-XXXXX
 Jira Ticket Title:- <title from Jira>
-Jira Ticket URL:- <url>
+Jira Ticket URL:- [AOTF-XXXXX](https://<jira-base>/browse/AOTF-XXXXX)
 ```
+**🔗 Always format the Jira URL as a clickable markdown hyperlink using `[display text](url)` format.**
 
 ### Pre-Conditions
 ```
@@ -68,10 +69,20 @@ Every test case MUST use this markdown table with these EXACT column names:
 3. **Combine steps** — if steps in specific activity & action exceed 1.5 steps, combine the next two steps into one
 4. **Skip small/repetitive steps** — directly come to the point
 5. **Expected Results:** "User should be able to [action]"
-6. **Actual Results:** "User is able to [action]"
+6. **Actual Results:** "User is able to [action]" — **🚨 NEVER leave this column blank. EVERY test step MUST have its Actual Results populated.**
 7. **Do NOT truncate** Jira acceptance criteria — list ALL fields individually, never summarize as "specified fields"
 8. **Each test case** gets its own table with a `## Test Case N: Title` heading above it
 9. **Cover all scenarios** with optimized, limited test cases
+
+### ❌ WRONG (Actual Results left blank):
+| Test Step ID | Specific Activity or Action | Expected Results | Actual Results |
+|--------------|----------------------------|------------------|----------------|
+| 1.1 | Open property details page | User should be able to open property details page | |
+
+### ✅ CORRECT (Actual Results always filled):
+| Test Step ID | Specific Activity or Action | Expected Results | Actual Results |
+|--------------|----------------------------|------------------|----------------|
+| 1.1 | Open property details page | User should be able to open property details page | User is able to open property details page |
 
 ### Excel Export (ALSO MANDATORY)
 After displaying in chat, also generate Excel: `agentic-workflow/scripts/excel-template-generator.js`
@@ -100,9 +111,12 @@ TestGenie MUST use the standardized Excel template system for 100% consistent fo
 - Excel file path provided to user for manual distribution
 - **Optimized for automation** - test steps must be clear, actionable, and ready for Playwright MCP exploration
 
-**⚠️ JIRA COMMENT RESTRICTION:**
-- **NEVER directly add comments to existing Jira tickets**
-- Only READ ticket information, do NOT write back to tickets
+**⚠️ JIRA INTERACTION CAPABILITIES:**
+- **READ** existing Jira tickets using `fetch_jira_ticket` or Atlassian MCP tools
+- **CREATE** new Jira Testing tasks using `create_jira_ticket` — supports linking to parent tickets and auto-assigning to the requesting user
+- **UPDATE** existing Jira tickets using `update_jira_ticket` — can update summary, description, labels, priority, and add comments
+- **GET CURRENT USER** using `get_jira_current_user` — retrieve authenticated user's accountId for ticket assignment
+- Only READ ticket information for test case generation — do NOT write test cases back as comments
 - Do NOT use `addCommentToJiraIssue` tool
 - Present test cases in chat and Excel file
 - User can manually add test documentation to Jira if desired
@@ -241,6 +255,46 @@ if (workflow) {
 
 ---
 
+## 🌐 GROUNDING — Automatic Feature & Domain Context
+
+**The grounding system automatically provides you with local project knowledge. You do NOT need to ask the user about features, terminology, or existing test coverage — query the grounding tools instead.**
+
+### Available Grounding Tools (SDK & VS Code)
+
+| Tool | When to Use |
+|---|---|
+| `search_project_context` | Search the codebase for relevant page objects, business functions, utilities. Use when you need to understand how a feature is implemented. |
+| `get_feature_map` | Get details about a specific feature (pages, page objects, keywords). Use when generating test cases for a feature you're unfamiliar with. |
+| `check_existing_coverage` | Check if automation scripts already exist for a feature/ticket. Use BEFORE generating test cases to avoid duplication. |
+
+### Grounding Workflow for Test Case Generation
+
+1. **Before generating test cases**, call `get_feature_map` with the feature name from the Jira ticket to understand:
+   - Which pages are involved
+   - What page objects and business functions already exist
+   - What keywords are associated with the feature
+2. If the feature name is unclear, call `search_project_context` with keywords from the ticket
+3. Call `check_existing_coverage` to see if test cases already exist for this ticket/feature
+4. Use domain terminology from grounding context (auto-injected in your system prompt) when writing test steps — e.g., if the ticket says "EMC", you already know it means "Estimated Monthly Cost"
+
+### What You Get Automatically (No Tool Call Needed)
+
+The following are injected into your system prompt via `<grounding_context>` XML:
+- **Domain terminology** — abbreviations like MLS, EMC, OHO, ECFM with full definitions
+- **Custom rules** — project-specific rules like "Always use PopupHandler", "Use userTokens not hardcoded URLs"
+- **Feature matches** — when your task description matches a known feature, its page objects and business functions are included
+
+### Adding New Features/Terminology
+
+Users can extend grounding by editing `agentic-workflow/config/grounding-config.json`:
+- Add new features to `featureMap[]`
+- Add new terms to `domainTerminology{}`
+- Add new rules to `customGroundingRules[]`
+
+Then rebuild: `node agentic-workflow/scripts/grounding-setup.js rebuild`
+
+---
+
 ## 📋 EXCEL GENERATION - MANDATORY TEMPLATE USAGE
 
 **🔒 CRITICAL: TestGenie MUST use the standardized template system for ALL Excel generation.**
@@ -295,7 +349,7 @@ const testCases = await generateTestCasesFromAcceptanceCriteria(ticketData);
 //         id: '1.1',
 //         action: 'Navigate to property details page',  // Generated
 //         expected: 'Page loads with property information',  // Generated
-//         actual: 'Page loads with property information'     // Default to expected
+//         actual: 'Page loads with property information'     // Mirror of expected — NEVER leave blank
 //       }
 //     ]
 //   }
@@ -834,6 +888,7 @@ Jira Ticket URL:-
 * Include sample listings from ticket comments (not description) in test cases
 * If bug tickets are linked to the Jira ticket, include them in Actual Results column
 * Integrate insights from comments section into Actual Results, summarizing for conciseness
+* **🚨 NEVER leave the Actual Results column blank — EVERY step MUST have Actual Results populated with "User is able to [action]" format**
 * Add ability to learn, adapt, and improve over time
 * Learn from past experiences and apply knowledge to future test cases
 * Generate optimized, efficient, and effective test cases
@@ -854,6 +909,56 @@ If a user is viewing a property outside the MLS, all fields below will be hidden
 - ConcessionsClosingCosts
 
 **Create a single optimized test step** that verifies all fields are hidden, rather than individual steps per field.
+
+## 🎫 Testing Task Creation (Jira)
+
+**When the user asks to create a Testing task for a given Jira ticket, follow this workflow:**
+
+### Step 1: Get Current User
+Call `get_jira_current_user` to retrieve the authenticated user's `accountId`. This will be used to assign the Testing task to the requesting user.
+
+### Step 2: Fetch Parent Ticket Details
+Call `fetch_jira_ticket` with the parent ticket ID to get the ticket's summary, issue type, and description.
+
+### Step 3: Create Testing Task
+Call `create_jira_ticket` with:
+- **`issueType`:** `"Task"`
+- **`summary`:** `"Testing - <Original Ticket Title>"`
+- **`description`:** Include test case tables if already generated, or a brief testing scope based on the parent ticket
+- **`linkedIssueKey`:** The parent ticket key (e.g., `"AOTF-17250"`) — this creates a Jira issue link between the Testing task and the parent ticket
+- **`linkType`:** `"Relates"` (default)
+- **`assigneeAccountId`:** The `accountId` from Step 1 — assigns the task to the requesting user
+- **`jiraBaseUrl`:** Extract from any user-provided Jira URL (everything before `/browse/`)
+- **`labels`:** `"qa,testing"`
+
+### Step 4: Report Results
+After creation, display:
+- ✅ Testing task created: **[AOTF-XXXXX - Testing - <Title>](<Jira URL>)** (as a clickable hyperlink)
+- 🔗 Linked to: **[AOTF-YYYYY - <Parent Title>](<Parent Jira URL>)** (as a clickable hyperlink)
+- 👤 Assigned to: <User Display Name>
+
+### Example Response Format
+```
+✅ Testing task created and linked successfully!
+
+| Field | Details |
+|-------|---------|
+| Testing Task | [AOTF-17300 - Testing - Drive Time Map Update](https://corelogic.atlassian.net/browse/AOTF-17300) |
+| Linked To | [AOTF-17250 - Drive Time map update issue](https://corelogic.atlassian.net/browse/AOTF-17250) |
+| Assigned To | Juber Rafik, Shaikh |
+| Priority | Medium |
+| Labels | qa, testing |
+```
+
+### URL Display Rules
+**🔗 CRITICAL: Always display Jira ticket URLs as clickable markdown hyperlinks:**
+- ✅ `[AOTF-17250](https://corelogic.atlassian.net/browse/AOTF-17250)` — renders as clickable link
+- ❌ `https://corelogic.atlassian.net/browse/AOTF-17250` — plain text, harder to click
+- ❌ `AOTF-17250` — no URL, user cannot navigate
+
+**For ALL Jira references in chat output (ticket URLs, testing task URLs, parent ticket URLs), always use markdown link format `[display text](url)` so users can see it's a link and click/copy it.**
+
+---
 
 ## Optional Automation Generation
 

@@ -21,6 +21,7 @@
 const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
+const { ExplorationQualityAnalyzer, DECISION: OODA_DECISION } = require('./ooda-loop');
 
 // ─── State Tracking ─────────────────────────────────────────────────────────
 
@@ -78,8 +79,13 @@ function getState(sessionId) {
  * @returns {Object} SessionHooks compatible with Copilot SDK
  */
 function createEnforcementHooks(agentName, options = {}) {
-    const { config = {}, learningStore = null, verbose = false } = options;
+    const { config = {}, learningStore = null, groundingStore = null, verbose = false } = options;
     const mcpConfig = config.mcpExploration || {};
+
+    // Initialize OODA exploration quality analyzer (for scriptgenerator)
+    const qualityAnalyzer = (agentName === 'scriptgenerator')
+        ? new ExplorationQualityAnalyzer({ config, groundingStore, verbose })
+        : null;
 
     // Generate a STABLE fallback session ID for this hook instance.
     // Previously, `invocation.sessionId || randomUUID()` generated a NEW random
@@ -237,11 +243,27 @@ function createEnforcementHooks(agentName, options = {}) {
                     }
 
                     if (isSpecFile && !state.mcpSnapshotCalled) {
-                        log('🚫 DENIED: Attempted to create .spec.js without snapshot');
+                        // Check if this denial was caused by OODA quality reset
+                        const lastSnapshot = state.snapshotData.length > 0
+                            ? state.snapshotData[state.snapshotData.length - 1]
+                            : null;
+                        const wasQualityReset = lastSnapshot && lastSnapshot.quality &&
+                            lastSnapshot.quality.decision === OODA_DECISION.RETRY_RECOMMENDED;
+
+                        log(`🚫 DENIED: Attempted to create .spec.js without ${wasQualityReset ? 'quality' : ''} snapshot`);
                         return {
                             permissionDecision: 'deny',
-                            additionalContext:
-                                '⛔ BLOCKED: You navigated but did not take a snapshot.\n' +
+                            additionalContext: wasQualityReset
+                                ? '⛔ BLOCKED: Your last snapshot was LOW QUALITY (OODA score: ' +
+                                `${lastSnapshot.quality.score}, decision: RETRY_RECOMMENDED).\n\n` +
+                                'Issues detected:\n' +
+                                lastSnapshot.quality.warnings.map(w => `  • ${w}`).join('\n') + '\n\n' +
+                                'You MUST obtain a quality snapshot before creating the spec file:\n' +
+                                '1. Wait for the page to fully load (waitForLoadState, waitForSelector)\n' +
+                                '2. Dismiss any popups blocking the content\n' +
+                                '3. Call unified_snapshot again\n' +
+                                '4. The snapshot must score ≥30 to proceed.'
+                                : '⛔ BLOCKED: You navigated but did not take a snapshot.\n' +
                                 'Call unified_snapshot first to capture live selectors.',
                         };
                     }
@@ -406,15 +428,60 @@ function createEnforcementHooks(agentName, options = {}) {
         const state = getState(invocation.sessionId || stableFallbackId);
         const toolName = input.toolName;
 
-        // ── After MCP snapshot: cache extracted selectors ────────────
+        // ── After MCP snapshot: OODA quality assessment ────────────
         if (toolName.includes('unified_snapshot')) {
             const result = input.result || '';
-            // Extract selector hints from snapshot output for later validation
+            const resultLength = typeof result === 'string' ? result.length : 0;
+
+            // OODA: Assess snapshot quality (Observe→Orient→Decide→Act)
+            let qualityAssessment = null;
+            if (qualityAnalyzer) {
+                // Try to extract current page URL for feature map comparison
+                const pageUrl = (typeof result === 'string' && result.match(/url["']?\s*[:=]\s*["']([^"']+)/i))?.[1] || '';
+                qualityAssessment = qualityAnalyzer.assess(result, { pageUrl });
+                log(`OODA Snapshot Quality: ${qualityAssessment.decision} (score: ${qualityAssessment.score}, ` +
+                    `elements: ${qualityAssessment.elementCount}, roles: ${qualityAssessment.roleDiversity})`);
+            }
+
+            // Cache enriched snapshot data (replaces minimal {timestamp, resultLength})
             state.snapshotData.push({
                 timestamp: new Date().toISOString(),
-                resultLength: typeof result === 'string' ? result.length : 0,
+                resultLength,
+                ...(qualityAssessment ? {
+                    quality: {
+                        decision: qualityAssessment.decision,
+                        score: qualityAssessment.score,
+                        elementCount: qualityAssessment.elementCount,
+                        roleDiversity: qualityAssessment.roleDiversity,
+                        warnings: qualityAssessment.warnings,
+                    }
+                } : {}),
             });
             log(`Snapshot data cached (${state.snapshotData.length} total)`);
+
+            // If quality is low, enforce structural consequences
+            if (qualityAssessment && qualityAssessment.decision !== OODA_DECISION.ACCEPT) {
+                const severity = qualityAssessment.decision === OODA_DECISION.RETRY_RECOMMENDED ? '🚨' : '⚠️';
+
+                // ── OODA ENFORCEMENT: Reset snapshot flag on RETRY_RECOMMENDED ──
+                // This converts the existing pre-tool gate into a quality-aware gate.
+                // The agent CANNOT create a .spec.js until it obtains a good snapshot.
+                if (qualityAssessment.decision === OODA_DECISION.RETRY_RECOMMENDED) {
+                    state.mcpSnapshotCalled = false;
+                    log('🚨 OODA: mcpSnapshotCalled reset to FALSE — spec creation blocked until quality snapshot obtained');
+                }
+
+                return {
+                    additionalContext:
+                        `${severity} OODA SNAPSHOT QUALITY ${qualityAssessment.decision}:\n` +
+                        qualityAssessment.warnings.map(w => `  • ${w}`).join('\n') + '\n\n' +
+                        (qualityAssessment.recommendation || 'Consider re-snapshotting after page fully loads.') +
+                        (qualityAssessment.decision === OODA_DECISION.RETRY_RECOMMENDED
+                            ? '\n\n⛔ Script creation is BLOCKED until you obtain a quality snapshot. ' +
+                            'Navigate to the target page, wait for full load, dismiss popups, then call unified_snapshot again.'
+                            : ''),
+                };
+            }
         }
 
         // ── Dynamic ID Detection: warn when selectors contain random IDs ─
@@ -596,4 +663,59 @@ function createEnforcementHooks(agentName, options = {}) {
 
 // ─── Exports ────────────────────────────────────────────────────────────────
 
-module.exports = { createEnforcementHooks, SessionEnforcementState };
+// ─── Public Accessor: Snapshot Quality Data ────────────────────────────────
+
+/**
+ * Returns snapshot quality data for the most recent session matching the given
+ * agent name prefix. Used by the `get_snapshot_quality` SDK tool.
+ *
+ * @param {string} agentNamePrefix  - Agent name to match (e.g. 'scriptgenerator')
+ * @returns {Object|null} Snapshot quality summary or null if no data
+ */
+function getSnapshotQualityData(agentNamePrefix) {
+    // Find session matching the agent prefix (most recent wins)
+    let latestState = null;
+    let latestTime = 0;
+    for (const [id, state] of sessionStates) {
+        if (id.startsWith(agentNamePrefix) && state.createdAt > latestTime) {
+            latestState = state;
+            latestTime = state.createdAt;
+        }
+    }
+
+    if (!latestState || latestState.snapshotData.length === 0) {
+        return null;
+    }
+
+    const snapshots = latestState.snapshotData;
+    const qualitySnapshots = snapshots.filter(s => s.quality);
+    const latestSnapshot = snapshots[snapshots.length - 1];
+    const acceptCount = qualitySnapshots.filter(s => s.quality.decision === 'ACCEPT').length;
+    const warnCount = qualitySnapshots.filter(s => s.quality.decision === 'WARN').length;
+    const retryCount = qualitySnapshots.filter(s => s.quality.decision === 'RETRY_RECOMMENDED').length;
+
+    return {
+        totalSnapshots: snapshots.length,
+        qualityAssessed: qualitySnapshots.length,
+        summary: { accepted: acceptCount, warned: warnCount, retryRecommended: retryCount },
+        latestSnapshot: latestSnapshot.quality ? {
+            decision: latestSnapshot.quality.decision,
+            score: latestSnapshot.quality.score,
+            elementCount: latestSnapshot.quality.elementCount,
+            roleDiversity: latestSnapshot.quality.roleDiversity,
+            warnings: latestSnapshot.quality.warnings,
+            timestamp: latestSnapshot.timestamp,
+        } : { decision: 'NOT_ASSESSED', timestamp: latestSnapshot.timestamp },
+        allSnapshots: qualitySnapshots.map(s => ({
+            decision: s.quality.decision,
+            score: s.quality.score,
+            elementCount: s.quality.elementCount,
+            roleDiversity: s.quality.roleDiversity,
+            warnings: s.quality.warnings,
+            timestamp: s.timestamp,
+        })),
+        canCreateSpec: latestState.mcpSnapshotCalled,
+    };
+}
+
+module.exports = { createEnforcementHooks, SessionEnforcementState, getSnapshotQualityData };

@@ -27,6 +27,7 @@ const { getContextStoreManager } = require('./shared-context-store');
 const { AgentCoordinator, ROUTE } = require('./agent-coordinator');
 const { SupervisorSession } = require('./supervisor-session');
 const { getEventBridge } = require('./event-bridge');
+const { EnvironmentHealthCheck, DECISION: OODA_DECISION } = require('./ooda-loop');
 
 // ─── Pipeline Stage Definitions ─────────────────────────────────────────────
 
@@ -172,6 +173,63 @@ class PipelineRunner {
         let pipelineError = null;
         const skipStages = new Set();
         let restartFrom = null;
+
+        // ── OODA: Pre-Pipeline Environment Health Check ──────────────
+        // Prevents wasted 12+ minute runs by validating UAT, MCP, Jira,
+        // and auth health BEFORE committing to agent sessions.
+        try {
+            const healthCheck = new EnvironmentHealthCheck({
+                config: this.config,
+                projectRoot: this.projectRoot,
+                verbose: this.verbose,
+            });
+            const healthResult = await healthCheck.execute();
+
+            // Record health state in shared context
+            contextStore.addNote('ooda', `Environment health: ${healthResult.decision} (score: ${healthResult.score}/100, ${healthResult.duration}ms)`);
+            for (const diag of healthResult.diagnostics) {
+                contextStore.addNote('ooda', diag);
+            }
+
+            // Emit event for dashboard/SSE consumers
+            this._eventBridge.push(
+                healthResult.decision === OODA_DECISION.ABORT ? 'ooda_health_abort' : 'ooda_health_check',
+                runId,
+                { decision: healthResult.decision, score: healthResult.score, checks: healthResult.checks, duration: healthResult.duration }
+            );
+
+            if (healthResult.decision === OODA_DECISION.ABORT) {
+                pipelineError = `OODA Health Check ABORT: Environment score ${healthResult.score}/100.\n` +
+                    healthResult.diagnostics.join('\n');
+                this._log(`\n🚫 ${pipelineError}`);
+                onProgress('ooda_health', `ABORTED: ${healthResult.diagnostics[0]}`);
+            } else if (healthResult.decision === OODA_DECISION.WARN) {
+                contextStore.recordConstraint('ooda',
+                    `Environment health warning (score: ${healthResult.score}/100)`,
+                    healthResult.diagnostics.filter(d => d.startsWith('⚠️')).join('; ')
+                );
+                onProgress('ooda_health', `Warning: score ${healthResult.score}/100`);
+            } else {
+                onProgress('ooda_health', `Healthy (score: ${healthResult.score}/100)`);
+            }
+        } catch (healthErr) {
+            this._log(`⚠️ OODA Health Check error (non-blocking): ${healthErr.message}`);
+            contextStore.addNote('ooda', `Health check error: ${healthErr.message}`);
+        }
+
+        if (pipelineError) {
+            const duration = Math.round((Date.now() - startTime) / 1000);
+            return {
+                ticketId, mode, runId,
+                success: false,
+                duration: `${duration}s`,
+                lastCompletedStage: null,
+                stageResults: context.stageResults,
+                artifacts: {},
+                orchestration: {},
+                error: pipelineError,
+            };
+        }
 
         for (let i = 0; i < stages.length; i++) {
             const stage = stages[i];
@@ -447,33 +505,39 @@ class PipelineRunner {
 
         const checks = [];
 
-        // Check test data file exists
-        const testDataPath = path.join(this.projectRoot, 'tests', 'test-data', 'testData.js');
-        checks.push({
-            name: 'test-data',
-            passed: fs.existsSync(testDataPath),
-        });
+        // ── File-system checks (original) ───────────────────────────
+        const requiredFiles = [
+            { name: 'test-data', rel: 'tests/test-data/testData.js' },
+            { name: 'page-objects', rel: 'tests/pageobjects/POmanager.js' },
+            { name: 'browser-config', rel: 'tests/config/config.js' },
+            { name: 'popup-handler', rel: 'tests/utils/popupHandler.js' },
+        ];
 
-        // Check page objects exist
-        const poPath = path.join(this.projectRoot, 'tests', 'pageobjects', 'POmanager.js');
-        checks.push({
-            name: 'page-objects',
-            passed: fs.existsSync(poPath),
-        });
+        for (const file of requiredFiles) {
+            checks.push({
+                name: file.name,
+                passed: fs.existsSync(path.join(this.projectRoot, file.rel)),
+            });
+        }
 
-        // Check config exists
-        const configPath = path.join(this.projectRoot, 'tests', 'config', 'config.js');
-        checks.push({
-            name: 'browser-config',
-            passed: fs.existsSync(configPath),
-        });
-
-        // Check popup handler exists
-        const popupPath = path.join(this.projectRoot, 'tests', 'utils', 'popupHandler.js');
-        checks.push({
-            name: 'popup-handler',
-            passed: fs.existsSync(popupPath),
-        });
+        // ── OODA: Include health check summary from context store ───
+        // The OODA health check ran before this stage. Pull its notes
+        // so preflight result includes environment readiness info.
+        if (context.contextStore) {
+            const oodaNotes = context.contextStore.query({ agent: 'ooda' });
+            if (oodaNotes.length > 0) {
+                const healthNote = oodaNotes.find(n =>
+                    n.content && n.content.includes('Environment health:')
+                );
+                if (healthNote) {
+                    checks.push({
+                        name: 'ooda-health',
+                        passed: !healthNote.content.includes('ABORT'),
+                        note: healthNote.content,
+                    });
+                }
+            }
+        }
 
         const allPassed = checks.every(c => c.passed);
         const failed = checks.filter(c => !c.passed).map(c => c.name);
@@ -497,9 +561,11 @@ class PipelineRunner {
         try {
             // Create TestGenie session
             const sessionInfo = await this.sessionFactory.createAgentSession('testgenie', {
+                ticketId: context.ticketId,
                 ticketContext: `Generate test cases for Jira ticket ${context.ticketId}. ` +
                     'Use the fetch_jira_ticket tool to get ticket details, then ' +
                     'use the generate_test_case_excel tool to create the Excel file.',
+                taskDescription: `Generate test cases for ticket ${context.ticketId}`,
                 contextStore: context.contextStore,
             });
             session = sessionInfo.session;
@@ -628,6 +694,7 @@ class PipelineRunner {
                 frameworkInventory,
                 historicalContext,
                 ticketContext: testCaseContext,
+                taskDescription: `Generate Playwright automation script for ticket ${context.ticketId}`,
                 contextStore: context.contextStore,
             });
             session = sessionInfo.session;
@@ -1049,6 +1116,7 @@ class PipelineRunner {
 
         try {
             const sessionInfo = await this.sessionFactory.createAgentSession('buggenie', {
+                ticketId: context.ticketId,
                 ticketContext: [
                     `Ticket: ${context.ticketId}`,
                     `Spec: ${context.specPath || 'unknown'}`,
@@ -1057,6 +1125,7 @@ class PipelineRunner {
                     `Healing attempted: ${context.healingResult?.iterations || 0} iterations`,
                     `Healing result: ${context.healingResult?.message || 'not attempted'}`,
                 ].join('\n'),
+                taskDescription: `Create bug ticket for test failures in ${context.ticketId}: ${context.testResults?.failedTests?.join(', ') || 'unknown failures'}`,
                 contextStore: context.contextStore,
             });
             session = sessionInfo.session;

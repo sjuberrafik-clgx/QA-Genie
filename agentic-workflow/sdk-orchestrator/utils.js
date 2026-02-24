@@ -63,7 +63,7 @@ function loadWorkflowConfig(configDir) {
  */
 function loadEnv(envDir) {
     try {
-        require('dotenv').config({ path: path.join(envDir || path.join(__dirname, '..'), '.env') });
+        require('dotenv').config({ path: path.join(envDir || path.join(__dirname, '..'), '.env'), override: true });
     } catch {
         // dotenv not installed — continue with process.env
     }

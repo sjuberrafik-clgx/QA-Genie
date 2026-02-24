@@ -579,15 +579,6 @@ async function startServer(options = {}) {
     });
 
     /**
-     * GET /api/pipeline/results/:runId
-     */
-    router.get('/api/pipeline/results/:runId', (req, res) => {
-        const run = runStore.getRun(req.params.runId);
-        if (!run) return notFound(res);
-        ok(res, run);
-    });
-
-    /**
      * GET /api/pipeline/batch/:batchId
      */
     router.get('/api/pipeline/batch/:batchId', (req, res) => {
@@ -855,96 +846,6 @@ async function startServer(options = {}) {
     });
 
     // ═════════════════════════════════════════════════════════════════
-    // ANALYTICS
-    // ═════════════════════════════════════════════════════════════════
-
-    /**
-     * GET /api/analytics/overview
-     * Pipeline-level statistics.
-     */
-    router.get('/api/analytics/overview', (req, res) => {
-        ok(res, {
-            pipeline: runStore.getStats(),
-            learning: learningStore.getStats(),
-            timestamp: new Date().toISOString(),
-        });
-    });
-
-    /**
-     * GET /api/analytics/failures
-     * Failure trends from learning store.
-     */
-    router.get('/api/analytics/failures', (req, res) => {
-        const limit = parseInt(req.query.limit, 10) || 50;
-        const failures = learningStore.getRecentFailures(limit);
-
-        // Group by error type
-        const byType = {};
-        for (const f of failures) {
-            byType[f.errorType] = (byType[f.errorType] || 0) + 1;
-        }
-
-        // Group by outcome
-        const byOutcome = {};
-        for (const f of failures) {
-            byOutcome[f.outcome] = (byOutcome[f.outcome] || 0) + 1;
-        }
-
-        ok(res, {
-            total: failures.length,
-            byType,
-            byOutcome,
-            recent: failures.slice(0, 20),
-        });
-    });
-
-    /**
-     * GET /api/analytics/selectors
-     * Selector stability data from learning store.
-     */
-    router.get('/api/analytics/selectors', (req, res) => {
-        const stats = learningStore.getStats();
-        const mappings = learningStore.getSelectorMappings
-            ? learningStore.getSelectorMappings()
-            : [];
-
-        // Identify unstable selectors (changed 3+ times)
-        const unstable = mappings.filter(m =>
-            Array.isArray(m.tried) && m.tried.length >= 3
-        );
-
-        ok(res, {
-            totalMappings: stats.totalSelectorMappings || mappings.length,
-            unstable: unstable.length,
-            mappings: mappings.slice(0, 50),
-        });
-    });
-
-    /**
-     * GET /api/analytics/runs
-     * Run-level analytics (pass rate, duration trends).
-     */
-    router.get('/api/analytics/runs', (req, res) => {
-        const { runs } = runStore.listRuns({ limit: 100 });
-
-        // Daily aggregation
-        const daily = {};
-        for (const run of runs) {
-            const day = run.createdAt?.substring(0, 10);
-            if (!day) continue;
-            if (!daily[day]) daily[day] = { total: 0, passed: 0, failed: 0 };
-            daily[day].total++;
-            if (run.status === RUN_STATUS.COMPLETED) daily[day].passed++;
-            if (run.status === RUN_STATUS.FAILED) daily[day].failed++;
-        }
-
-        ok(res, {
-            overall: runStore.getStats(),
-            daily,
-        });
-    });
-
-    // ═════════════════════════════════════════════════════════════════
     // JIRA WEBHOOK (Phase 4 — pre-wired)
     // ═════════════════════════════════════════════════════════════════
 
@@ -1137,6 +1038,33 @@ async function startServer(options = {}) {
             ok(res, { aborted: true });
         } catch (error) {
             if (error.message.includes('not found')) return notFound(res, error.message);
+            json(res, 500, { error: error.message });
+        }
+    });
+
+    /**
+     * POST /api/chat/sessions/:sessionId/user-input
+     * Submit a user's response to an agent's ask_user / ask_questions request.
+     * Body: { requestId: string, answer: string }
+     */
+    router.post('/api/chat/sessions/:sessionId/user-input', (req, res) => {
+        if (!chatManager) return json(res, 503, { error: 'Chat manager not ready' });
+        const { sessionId } = req.params;
+        const { requestId, answer } = req.body;
+
+        if (!requestId || typeof requestId !== 'string') {
+            return badRequest(res, 'requestId (string) is required');
+        }
+        if (!answer || typeof answer !== 'string') {
+            return badRequest(res, 'answer (string) is required');
+        }
+
+        try {
+            const result = chatManager.resolveUserInput(sessionId, requestId, answer);
+            ok(res, result);
+        } catch (error) {
+            if (error.message.includes('not found')) return notFound(res, error.message);
+            if (error.message.includes('already resolved')) return json(res, 409, { error: error.message });
             json(res, 500, { error: error.message });
         }
     });

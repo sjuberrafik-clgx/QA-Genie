@@ -17,6 +17,15 @@ const path = require('path');
 const { createCustomTools } = require('./custom-tools');
 const { createEnforcementHooks } = require('./enforcement-hooks');
 
+// Grounding system — provides local context to reduce LLM hallucinations
+let _groundingStoreModule;
+function getGroundingModule() {
+    if (!_groundingStoreModule) {
+        try { _groundingStoreModule = require('../grounding/grounding-store'); } catch { _groundingStoreModule = null; }
+    }
+    return _groundingStoreModule;
+}
+
 // ─── Agent Prompt Loader ────────────────────────────────────────────────────
 
 /**
@@ -91,6 +100,15 @@ function buildDynamicContext(agentName, options = {}) {
         );
     }
 
+    // Grounding context — domain terminology, project rules, relevant code chunks
+    if (options.groundingContext) {
+        sections.push(
+            '<grounding_context>',
+            options.groundingContext,
+            '</grounding_context>'
+        );
+    }
+
     return sections.length > 0 ? '\n\n' + sections.join('\n') : '';
 }
 
@@ -116,6 +134,24 @@ class AgentSessionFactory {
         this.learningStore = options.learningStore || null;
         this.verbose = options.verbose || false;
 
+        // Initialize grounding store if enabled
+        this._groundingStore = null;
+        const groundingEnabled = options.config?.sdk?.grounding?.enabled !== false;
+        if (groundingEnabled) {
+            const gMod = getGroundingModule();
+            if (gMod) {
+                try {
+                    this._groundingStore = gMod.getGroundingStore({
+                        projectRoot: path.join(__dirname, '..', '..'),
+                        verbose: this.verbose,
+                    });
+                    this._log('📚 GroundingStore initialized');
+                } catch (err) {
+                    this._log(`⚠️ GroundingStore init failed: ${err.message}`);
+                }
+            }
+        }
+
         // Track active sessions for cleanup
         this._activeSessions = new Map();
     }
@@ -131,6 +167,8 @@ class AgentSessionFactory {
      * @param {string} [context.historicalContext]
      * @param {string} [context.assertionConfig]
      * @param {Object} [context.contextStore] - SharedContextStore for agent collaboration
+     * @param {Object} [context.groundingStore] - GroundingStore for local context
+     * @param {string} [context.taskDescription] - Task description for grounding query
      * @returns {Promise<Object>} { session, sessionId, agentName }
      */
     async createAgentSession(agentName, context = {}) {
@@ -139,26 +177,46 @@ class AgentSessionFactory {
         // 1. Load the agent's system prompt from .agent.md
         const basePrompt = loadAgentPrompt(agentName);
 
-        // 2. Build dynamic context injection
-        const dynamicCtx = buildDynamicContext(agentName, context);
+        // 2. Build grounding context if available
+        let groundingContext = null;
+        const gStore = context.groundingStore || this._groundingStore;
+        if (gStore) {
+            try {
+                groundingContext = gStore.buildGroundingContext(agentName, {
+                    taskDescription: context.taskDescription || context.ticketContext || '',
+                    ticketId: context.ticketId || null,
+                });
+                this._log(`📚 Grounding context: ${groundingContext.length} chars for ${agentName}`);
+            } catch (err) {
+                this._log(`⚠️ Grounding context failed: ${err.message}`);
+            }
+        }
 
-        // 2b. Inject shared context summary if available
+        // 2b. Build dynamic context injection (includes grounding)
+        const dynamicCtx = buildDynamicContext(agentName, {
+            ...context,
+            groundingContext,
+        });
+
+        // 2c. Inject shared context summary if available
         let sharedCtx = '';
         if (context.contextStore) {
             sharedCtx = context.contextStore.buildContextSummary(agentName);
         }
 
-        // 3. Get role-specific custom tools (with context store if available)
+        // 3. Get role-specific custom tools (with context store and grounding store)
         const tools = createCustomTools(this.defineTool, agentName, {
             learningStore: this.learningStore,
             config: this.config,
             contextStore: context.contextStore || null,
+            groundingStore: gStore || null,
         });
 
         // 4. Get role-specific enforcement hooks
         const hooks = createEnforcementHooks(agentName, {
             config: this.config,
             learningStore: this.learningStore,
+            groundingStore: gStore || null,
             verbose: this.verbose,
         });
 
@@ -240,6 +298,9 @@ class AgentSessionFactory {
             if (context.ticketContext) {
                 truncatedSections.push('<ticket_context>', context.ticketContext, '</ticket_context>');
             }
+
+            // Drop grounding context from truncated build (lowest priority)
+            // Grounding is helpful but expendable when prompt budget is tight
 
             dynamicCtx = truncatedSections.length > 0 ? '\n\n' + truncatedSections.join('\n') : '';
 

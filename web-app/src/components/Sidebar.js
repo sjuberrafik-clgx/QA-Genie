@@ -8,9 +8,7 @@ import {
     DashboardIcon,
     ChatBubbleIcon,
     ClockIcon,
-    ClipboardListIcon,
     DocumentIcon,
-    BarChartIcon,
     LogoIcon,
 } from '@/components/Icons';
 
@@ -18,9 +16,7 @@ const NAV_ITEMS = [
     { href: '/dashboard', label: 'Dashboard', Icon: DashboardIcon },
     { href: '/chat', label: 'AI Chat', Icon: ChatBubbleIcon },
     { href: '/history', label: 'Chat History', Icon: ClockIcon },
-    { href: '/results', label: 'Results', Icon: ClipboardListIcon },
     { href: '/reports', label: 'Test Reports', Icon: DocumentIcon },
-    { href: '/analytics', label: 'Analytics', Icon: BarChartIcon },
 ];
 
 function ConnectionIndicator() {
@@ -102,7 +98,6 @@ export default function Sidebar() {
                 <ConnectionIndicator />
                 <div className="mt-2.5 flex items-center justify-between">
                     <span className="text-[10px] text-surface-300 font-medium">v2.0</span>
-                    <span className="text-[10px] text-amber-500 font-semibold">Doremon Team</span>
                 </div>
             </div>
         </aside>

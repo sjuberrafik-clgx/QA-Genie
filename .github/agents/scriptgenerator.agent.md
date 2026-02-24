@@ -191,6 +191,28 @@ ACTION from test case
 
 **Example:** If `tests/business-functions/login.js` exports `LoginFunctions` with `signIn(email, password)`, you MUST use `await loginFunctions.signIn(email, password)` — not write `page.fill('input[type="email"]', ...)` in the spec.
 
+### PHASE 1.6: GROUNDING CONTEXT (automatic — enhances Phase 1.5)
+
+**The grounding system enriches your context automatically. Use these tools to fill any gaps:**
+
+| Tool | When to Use |
+|---|---|
+| `search_project_context` | Search for specific page objects, selectors, or utility code by keyword |
+| `get_feature_map` | Get all page objects, business functions, and pages for a feature |
+| `get_selector_recommendations` | Get ranked selectors for a page/element (data-qa > getByRole > css) |
+| `check_existing_coverage` | Check if specs already exist for this ticket or feature before generating |
+
+**Grounding workflow (call AFTER Phase 1.5 inventory scan):**
+1. Call `get_feature_map` with the feature name to discover ALL related page objects and business functions
+2. Call `get_selector_recommendations` with the target page URL to get the most reliable selectors
+3. Call `check_existing_coverage` with the ticket ID to ensure you're not duplicating existing automation
+4. If Phase 1.5 missed a relevant file, call `search_project_context` with specific keywords
+
+**What you get automatically (no tool call needed):**
+- Domain terminology (MLS abbreviations, feature names, etc.) — injected via `<grounding_context>` in your system prompt
+- Custom rules (always use PopupHandler, never use waitForTimeout, use userTokens, etc.)
+- Feature context matched to your task description
+
 ### PHASE 2: SCRIPT GENERATION (only after Phase 1 AND Phase 1.5 are 100% complete)
 
 **Prerequisites — ALL must be true before creating any .spec.js file:**

@@ -14,6 +14,7 @@ import { getAgentConfig } from '@/lib/agent-options';
 import { DocumentIcon, CodeIcon, GlobeIcon, PlayIcon, SparkleIcon, MenuIcon, ChatBubbleIcon, WrenchIcon, CheckIcon, XIcon } from '@/components/Icons';
 import ErrorBanner from '@/components/ErrorBanner';
 import FollowupChips from '@/components/FollowupChips';
+import UserInputPrompt from '@/components/UserInputPrompt';
 
 const CAPABILITY_CARDS = [
     { icon: <DocumentIcon />, title: 'Generate Test Cases', desc: 'From Jira tickets to structured test steps with Excel export' },
@@ -36,6 +37,7 @@ export default function ChatPage() {
     const [sidebarOpen, setSidebarOpen] = useState(true);
     const [followups, setFollowups] = useState([]);         // [{ label, prompt, category, icon, prefill? }]
     const [prefillText, setPrefillText] = useState('');      // text to pre-fill into the chat input
+    const [userInputRequests, setUserInputRequests] = useState([]); // [{ requestId, question, options, timestamp, resolved, resolvedAnswer, auto }]
 
     const messagesEndRef = useRef(null);
     const streamingContentRef = useRef('');
@@ -131,6 +133,42 @@ export default function ChatPage() {
                 }
                 break;
 
+            case 'chat_user_input_request':
+                setUserInputRequests(prev => {
+                    // Avoid duplicates (e.g. from history replay)
+                    if (prev.some(r => r.requestId === data.requestId)) {
+                        // If replayed with resolved flag, update it
+                        if (data.resolved) {
+                            return prev.map(r => r.requestId === data.requestId
+                                ? { ...r, resolved: true }
+                                : r
+                            );
+                        }
+                        return prev;
+                    }
+                    return [...prev, {
+                        requestId: data.requestId,
+                        question: data.question,
+                        options: data.options || [],
+                        timestamp: ts,
+                        resolved: data.resolved || false,
+                        resolvedAnswer: null,
+                        auto: false,
+                    }];
+                });
+                // Auto-scroll to show the prompt
+                setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+                break;
+
+            case 'chat_user_input_complete':
+                setUserInputRequests(prev =>
+                    prev.map(r => r.requestId === data.requestId
+                        ? { ...r, resolved: true, resolvedAnswer: data.answer, auto: !!data.auto }
+                        : r
+                    )
+                );
+                break;
+
             case 'user_message':
                 if (data.role === 'assistant') {
                     setMessages(prev => {
@@ -181,6 +219,7 @@ export default function ChatPage() {
             setMessages([]);
             setToolGroups([]);
             setFollowups([]);
+            setUserInputRequests([]);
             currentToolGroupRef.current = null;
             streamingContentRef.current = '';
             setStreamingContent('');
@@ -231,6 +270,7 @@ export default function ChatPage() {
         streamingContentRef.current = '';
         setToolGroups([]);
         setFollowups([]);
+        setUserInputRequests([]);
         currentToolGroupRef.current = null;
         setIsProcessing(false);
 
@@ -321,6 +361,7 @@ export default function ChatPage() {
         // Clear stale UI state from previous session
         setToolGroups([]);
         setFollowups([]);
+        setUserInputRequests([]);
         currentToolGroupRef.current = null;
         setStreamingContent('');
         streamingContentRef.current = '';
@@ -360,27 +401,37 @@ export default function ChatPage() {
 
     const activeAgentConfig = getAgentConfig(agentMode);
 
-    // Build merged timeline: interleave messages + tool groups by timestamp (memoized)
-    const timeline = useMemo(() => {
-        const result = [];
-        const allMessages = [...messages];
-        const allToolGroups = [...toolGroups];
-        let mi = 0, ti = 0;
-        while (mi < allMessages.length || ti < allToolGroups.length) {
-            const msgTs = mi < allMessages.length ? allMessages[mi].timestamp || '' : '\uffff';
-            const tgTs = ti < allToolGroups.length ? allToolGroups[ti].timestamp || '' : '\uffff';
-            if (msgTs <= tgTs && mi < allMessages.length) {
-                result.push({ type: 'message', data: allMessages[mi], key: `msg_${mi}` });
-                mi++;
-            } else if (ti < allToolGroups.length) {
-                result.push({ type: 'tools', data: allToolGroups[ti], key: `tg_${allToolGroups[ti].id}` });
-                ti++;
-            } else {
-                break;
-            }
+    /**
+     * Submit the user's answer to a pending agent ask_user request.
+     */
+    const handleUserInputSubmit = async (requestId, answer) => {
+        if (!activeSessionId) return;
+        try {
+            await apiClient.submitUserInput(activeSessionId, requestId, answer);
+            // Optimistically update local state (SSE event will also arrive but dedup handles it)
+            setUserInputRequests(prev =>
+                prev.map(r => r.requestId === requestId
+                    ? { ...r, resolved: true, resolvedAnswer: answer, auto: false }
+                    : r
+                )
+            );
+        } catch (err) {
+            setError(`Failed to submit response: ${err.message}`);
         }
-        return result;
-    }, [messages, toolGroups]);
+    };
+
+    // Build merged timeline: interleave messages + tool groups + user-input prompts by timestamp (memoized)
+    const timeline = useMemo(() => {
+        // Combine all timeline-worthy items with their timestamps and types
+        const items = [
+            ...messages.map((m, i) => ({ type: 'message', data: m, key: `msg_${i}`, ts: m.timestamp || '' })),
+            ...toolGroups.map(g => ({ type: 'tools', data: g, key: `tg_${g.id}`, ts: g.timestamp || '' })),
+            ...userInputRequests.map(r => ({ type: 'user_input', data: r, key: `uir_${r.requestId}`, ts: r.timestamp || '' })),
+        ];
+        // Sort chronologically
+        items.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+        return items;
+    }, [messages, toolGroups, userInputRequests]);
 
     // Count active (running) tools across all groups
     const runningToolCount = toolGroups.reduce((acc, g) => acc + g.tools.filter(t => t.status === 'running').length, 0);
@@ -422,11 +473,11 @@ export default function ChatPage() {
                             </p>
                         </div>
                     </div>
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3 flex-shrink-0">
                         <AgentSelect value={agentMode} onChange={handleAgentChange} disabled={isProcessing} />
                         <ModelSelect value={model} onChange={setModel} className="min-w-[170px]" />
-                        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100/80 border border-surface-200/50">
-                            <span className={`w-2 h-2 rounded-full transition-colors ${sseStatus === 'connected' ? 'bg-accent-400 shadow-sm shadow-accent-400/40' :
+                        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100/80 border border-surface-200/50 flex-shrink-0 whitespace-nowrap">
+                            <span className={`w-2 h-2 rounded-full transition-colors flex-shrink-0 ${sseStatus === 'connected' ? 'bg-accent-400 shadow-sm shadow-accent-400/40' :
                                 sseStatus === 'reconnecting' ? 'bg-amber-400 animate-pulse' :
                                     'bg-surface-300'
                                 }`} />
@@ -491,10 +542,26 @@ export default function ChatPage() {
                             </div>
                         )}
 
-                        {/* Interleaved timeline: messages + tool groups in chronological order */}
+                        {/* Interleaved timeline: messages + tool groups + user-input prompts in chronological order */}
                         {timeline.map((item) => {
                             if (item.type === 'message') {
                                 return <ChatMessage key={item.key} message={item.data} />;
+                            }
+                            if (item.type === 'user_input') {
+                                const req = item.data;
+                                return (
+                                    <UserInputPrompt
+                                        key={item.key}
+                                        requestId={req.requestId}
+                                        question={req.question}
+                                        options={req.options}
+                                        resolved={req.resolved}
+                                        resolvedAnswer={req.resolvedAnswer}
+                                        auto={req.auto}
+                                        onSubmit={handleUserInputSubmit}
+                                        disabled={!isProcessing}
+                                    />
+                                );
                             }
                             // Tool group
                             const group = item.data;

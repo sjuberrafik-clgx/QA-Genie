@@ -673,6 +673,24 @@
             "bugGenieInvocations"
         ]
     },
+    "ooda": {
+        "_comment": "OODA (Observe–Orient–Decide–Act) loop configuration. Controls pre-pipeline health checks and MCP exploration quality assessment. All OODA logic is deterministic JS — zero LLM calls, zero token cost.",
+        "environmentHealth": {
+            "enabled": true,
+            "_comment": "Pre-pipeline environment readiness check. Prevents wasted 12+ min runs by validating UAT, MCP, Jira, and auth health BEFORE committing to agent sessions.",
+            "abortThreshold": 40,
+            "warnThreshold": 70,
+            "timeoutMs": 10000
+        },
+        "explorationQuality": {
+            "enabled": true,
+            "_comment": "Post-snapshot quality assessment. Catches empty/sparse/loading-spinner snapshots before they cascade into bad selectors and broken scripts.",
+            "minElements": 5,
+            "minRoleDiversity": 3,
+            "retryThreshold": 30,
+            "warnThreshold": 60
+        }
+    },
     "sdk": {
         "_comment": "Copilot SDK Orchestrator configuration — enables programmatic pipeline control",
         "enabled": true,
@@ -718,6 +736,14 @@
                 "agentic-workflow/mcp-server/server.js"
             ],
             "env": {}
+        },
+        "grounding": {
+            "_comment": "Local context grounding system — reduces LLM hallucinations via BM25 code search",
+            "enabled": true,
+            "configPath": "agentic-workflow/config/grounding-config.json",
+            "indexPath": "agentic-workflow/grounding-data",
+            "autoRebuildOnStart": false,
+            "maxContextChars": 12000
         },
         "modes": {
             "full": [
