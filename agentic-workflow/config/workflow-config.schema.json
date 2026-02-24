@@ -870,6 +870,80 @@
                     }
                 }
             }
+        },
+        "ooda": {
+            "type": "object",
+            "description": "OODA (Observe–Orient–Decide–Act) loop configuration. Controls pre-pipeline health checks and MCP exploration quality assessment. All deterministic JS — zero LLM calls.",
+            "properties": {
+                "environmentHealth": {
+                    "type": "object",
+                    "description": "Pre-pipeline environment readiness check. Prevents wasted runs by validating UAT, MCP, Jira, auth health.",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Enable/disable the environment health check"
+                        },
+                        "abortThreshold": {
+                            "type": "number",
+                            "default": 40,
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "Score below which the pipeline aborts (0–100)"
+                        },
+                        "warnThreshold": {
+                            "type": "number",
+                            "default": 70,
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "Score below which the pipeline warns but continues (0–100)"
+                        },
+                        "timeoutMs": {
+                            "type": "number",
+                            "default": 10000,
+                            "minimum": 1000,
+                            "description": "HTTP request timeout in milliseconds for health checks"
+                        }
+                    }
+                },
+                "explorationQuality": {
+                    "type": "object",
+                    "description": "Post-snapshot quality assessment. Catches empty/sparse/loading snapshots before they cascade into bad scripts.",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Enable/disable snapshot quality analysis"
+                        },
+                        "minElements": {
+                            "type": "number",
+                            "default": 5,
+                            "minimum": 1,
+                            "description": "Minimum expected element count in a snapshot"
+                        },
+                        "minRoleDiversity": {
+                            "type": "number",
+                            "default": 3,
+                            "minimum": 1,
+                            "description": "Minimum unique ARIA role count expected"
+                        },
+                        "retryThreshold": {
+                            "type": "number",
+                            "default": 30,
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "Score below which retry is recommended"
+                        },
+                        "warnThreshold": {
+                            "type": "number",
+                            "default": 60,
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "Score below which a warning is issued"
+                        }
+                    }
+                }
+            }
         }
     }
 }

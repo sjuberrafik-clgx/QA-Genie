@@ -107,10 +107,6 @@ class ApiClient {
         return this._fetch(EP.pipelineStatus(runId), { timeout: TIMEOUTS.RUN_STATUS });
     }
 
-    async getRunResults(runId) {
-        return this._fetch(EP.pipelineResults(runId));
-    }
-
     // ─── Chat ───────────────────────────────────────────────────
     async createChatSession(model, agentMode = null) {
         return this._fetch(EP.chatSessions, {
@@ -140,6 +136,20 @@ class ApiClient {
         return this._fetch(EP.chatAbort(sessionId), { method: 'POST', retries: 0 });
     }
 
+    /**
+     * Submit a user's answer to a pending ask_user / ask_questions request.
+     * @param {string} sessionId
+     * @param {string} requestId - ID of the pending user-input request
+     * @param {string} answer    - The user's answer text
+     */
+    async submitUserInput(sessionId, requestId, answer) {
+        return this._fetch(EP.chatUserInput(sessionId), {
+            method: 'POST',
+            body: JSON.stringify({ requestId, answer }),
+            retries: 0,
+        });
+    }
+
     async deleteChatSession(sessionId) {
         return this._fetch(EP.chatSession(sessionId), { method: 'DELETE' });
     }
@@ -154,12 +164,6 @@ class ApiClient {
         const qs = query.toString();
         return this._fetch(`${EP.consolidatedReport}${qs ? '?' + qs : ''}`);
     }
-
-    // ─── Analytics ──────────────────────────────────────────────
-    async getAnalyticsOverview() { return this._fetch(EP.analyticsOverview); }
-    async getFailureTrends(limit = 50) { return this._fetch(`${EP.analyticsFailures}?limit=${limit}`); }
-    async getSelectorData() { return this._fetch(EP.analyticsSelectors); }
-    async getRunTrends() { return this._fetch(EP.analyticsRuns); }
 
     // ─── SSE Stream URLs ────────────────────────────────────────
     getPipelineStreamUrl(runId) {

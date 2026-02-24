@@ -278,10 +278,11 @@ async function generateTestCaseExcel(jiraInfo, preConditions, testCases, outputP
  */
 function validateTestCases(testCases) {
     const errors = [];
+    const warnings = [];
 
     if (!Array.isArray(testCases)) {
         errors.push('Test cases must be an array');
-        return { valid: false, errors };
+        return { valid: false, errors, warnings };
     }
 
     testCases.forEach((testCase, index) => {
@@ -304,14 +305,17 @@ function validateTestCases(testCases) {
                 if (!step.expected) {
                     errors.push(`Test case ${index + 1}, Step ${stepIndex + 1}: Missing 'expected'`);
                 }
-                // 'actual' can be empty - it's filled during testing
+                if (!step.actual) {
+                    warnings.push(`Test case ${index + 1}, Step ${stepIndex + 1}: Missing 'actual' — Actual Results should be populated (e.g., "User is able to [action]")`);
+                }
             });
         }
     });
 
     return {
         valid: errors.length === 0,
-        errors
+        errors,
+        warnings
     };
 }
 

@@ -18,7 +18,6 @@ export const API_CONFIG = {
         pipelineForceCancel: (runId) => `/api/pipeline/force-cancel/${runId}`,
         pipelineRuns: '/api/pipeline/runs',
         pipelineStatus: (runId) => `/api/pipeline/status/${runId}`,
-        pipelineResults: (runId) => `/api/pipeline/results/${runId}`,
         pipelineStream: (runId) => `/api/pipeline/stream/${runId}`,
         pipelineStreamGlobal: '/api/pipeline/stream',
 
@@ -29,16 +28,11 @@ export const API_CONFIG = {
         chatStream: (id) => `/api/chat/sessions/${id}/stream`,
         chatHistory: (id) => `/api/chat/sessions/${id}/history`,
         chatAbort: (id) => `/api/chat/sessions/${id}/abort`,
+        chatUserInput: (id) => `/api/chat/sessions/${id}/user-input`,
 
         // Reports (per-execution Playwright test results)
         reports: '/api/reports',
         report: (fileName) => `/api/reports/${fileName}`,
         consolidatedReport: '/api/reports/consolidated',
-
-        // Analytics
-        analyticsOverview: '/api/analytics/overview',
-        analyticsFailures: '/api/analytics/failures',
-        analyticsSelectors: '/api/analytics/selectors',
-        analyticsRuns: '/api/analytics/runs',
     },
 };

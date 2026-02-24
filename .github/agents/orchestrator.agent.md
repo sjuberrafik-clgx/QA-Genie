@@ -1045,7 +1045,7 @@ The LLM will automatically select the appropriate agent based on request context
 3. **Use Background Agents:** For long-running or parallel tasks
 4. **Preserve Context:** Let orchestrator handle context passing between agents
 5. **Monitor Sessions:** Keep eye on background agent progress in Chat view
-6. **Jira Updates:** Never auto-post to Jira - agents show output in chat for user review
+6. **Jira Updates:** Agents can update tickets directly using `update_jira_ticket` \u2014 changes are logged in chat for user review
 
 ---
 

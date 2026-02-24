@@ -457,6 +457,20 @@ const tests = [
         assert(tools.length >= 3, `Expected ≥3 tools for testgenie, got ${tools.length}`);
     }),
 
+    // ── 13b. BugGenie Custom Tools include fetch_jira_ticket ────────
+    test('Custom tools: buggenie has fetch_jira_ticket and create_jira_ticket', async () => {
+        const sdk = await import('@github/copilot-sdk');
+        const { createCustomTools } = require('./custom-tools');
+
+        const tools = createCustomTools(sdk.defineTool, 'buggenie', {});
+        const names = tools.map(t => t.name);
+
+        assert(names.includes('fetch_jira_ticket'), 'buggenie should have fetch_jira_ticket (for reading existing tickets)');
+        assert(names.includes('create_jira_ticket'), 'buggenie should have create_jira_ticket');
+        assert(names.includes('get_test_results'), 'buggenie should have get_test_results');
+        assert(tools.length >= 4, `Expected ≥4 tools for buggenie, got ${tools.length}`);
+    }),
+
     test('Custom tools: fetch_jira_ticket handler is callable', async () => {
         const sdk = await import('@github/copilot-sdk');
         const { createCustomTools } = require('./custom-tools');
