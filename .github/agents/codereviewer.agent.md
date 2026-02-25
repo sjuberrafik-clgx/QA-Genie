@@ -291,6 +291,23 @@ This agent can be invoked:
 
 ---
 
+## 🌐 GROUNDING — Local Context Tools
+
+You have access to grounding tools that provide **real codebase context** to improve review accuracy:
+
+| Tool | Purpose | When to Use |
+|---|---|---|
+| `search_project_context` | BM25 search across page objects, business functions, utilities | Verify imports, find reusable functions, check naming conventions |
+| `get_feature_map` | Feature-specific context (pages, page objects, keywords) | Understand which page objects belong to a feature under review |
+| `get_selector_recommendations` | Ranked selectors by reliability for a page/element | Verify selector choices in scripts follow best practices |
+
+### Review Workflow with Grounding
+1. **Before reviewing imports** → call `search_project_context` with function/class names to verify they exist and are imported correctly.
+2. **Before flagging missing page objects** → call `get_feature_map` for the feature to see what's available.
+3. **Before suggesting selector changes** → call `get_selector_recommendations` for the page to get reliability-ranked alternatives.
+
+---
+
 ## 📚 REFERENCE DOCUMENTS
 
 When reviewing, consult:

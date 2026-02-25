@@ -18,7 +18,7 @@ export default function RootLayout({ children }) {
             <body className="min-h-screen bg-surface-50">
                 <div className="flex min-h-screen">
                     <Sidebar />
-                    <main className="flex-1 ml-[260px] min-h-screen">
+                    <main className="flex-1 ml-[260px] min-h-screen overflow-x-hidden">
                         <ErrorBoundary>
                             {children}
                         </ErrorBoundary>

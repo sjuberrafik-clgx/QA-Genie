@@ -245,6 +245,11 @@ class AgentCoordinator extends EventEmitter {
                 return { action: ROUTE.CONTINUE, reason: 'Bug ticket handled' };
             }
 
+            // ── After TaskGenie ────────────────────────────────────
+            case 'taskgenie': {
+                return { action: ROUTE.CONTINUE, reason: 'Testing task handled' };
+            }
+
             default:
                 return { action: ROUTE.CONTINUE, reason: 'Default: continue to next stage' };
         }

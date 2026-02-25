@@ -625,9 +625,9 @@ function createCustomTools(defineTool, agentName, deps = {}) {
 
     // ───────────────────────────────────────────────────────────────────
     // TOOL 11: fetch_jira_ticket
-    // Available to: testgenie, buggenie
+    // Available to: testgenie, buggenie, taskgenie
     // ───────────────────────────────────────────────────────────────────
-    if (['testgenie', 'buggenie'].includes(agentName)) {
+    if (['testgenie', 'buggenie', 'taskgenie'].includes(agentName)) {
         tools.push(defineTool('fetch_jira_ticket', {
             description:
                 'Fetches Jira ticket details (summary, description, acceptance criteria, labels, ' +
@@ -705,12 +705,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
 
     // ───────────────────────────────────────────────────────────────────
     // TOOL 11a2: get_jira_current_user
-    // Available to: buggenie, testgenie
+    // Available to: buggenie, testgenie, taskgenie
     // Returns the authenticated Jira user's accountId and displayName.
     // Use this before create_jira_ticket to auto-assign tickets to the
     // requesting user.
     // ───────────────────────────────────────────────────────────────────
-    if (['buggenie', 'testgenie'].includes(agentName)) {
+    if (['buggenie', 'testgenie', 'taskgenie'].includes(agentName)) {
         tools.push(defineTool('get_jira_current_user', {
             description:
                 'Returns the currently authenticated Jira user\'s account ID and display name. ' +
@@ -776,13 +776,13 @@ function createCustomTools(defineTool, agentName, deps = {}) {
 
     // ───────────────────────────────────────────────────────────────────
     // TOOL 11b: create_jira_ticket
-    // Available to: buggenie, testgenie
+    // Available to: buggenie, testgenie, taskgenie
     // ───────────────────────────────────────────────────────────────────
-    if (['buggenie', 'testgenie'].includes(agentName)) {
+    if (['buggenie', 'testgenie', 'taskgenie'].includes(agentName)) {
         tools.push(defineTool('create_jira_ticket', {
             description:
                 'Creates a new Jira ticket via the Atlassian REST API. ' +
-                'Used by BugGenie to file defect tickets and by TestGenie to create Testing tasks. ' +
+                'Used by BugGenie to file defect tickets, TestGenie to create Testing tasks, and TaskGenie to create linked Testing tasks. ' +
                 'Supports linking to a parent ticket and assigning to a specific user. ' +
                 'Returns the created ticket key and URL.',
             parameters: {
@@ -978,10 +978,129 @@ function createCustomTools(defineTool, agentName, deps = {}) {
     }
 
     // ───────────────────────────────────────────────────────────────────
-    // TOOL 11c: update_jira_ticket
-    // Available to: buggenie, testgenie
+    // TOOL 11b: attach_session_images_to_jira
+    // Available to: buggenie
+    // Attaches images from the current chat session to a Jira ticket
     // ───────────────────────────────────────────────────────────────────
-    if (['buggenie', 'testgenie'].includes(agentName)) {
+    if (agentName === 'buggenie') {
+        tools.push(defineTool('attach_session_images_to_jira', {
+            description:
+                'Attaches images from the current chat session to an existing Jira ticket. ' +
+                'When the user provided screenshots/images earlier in the conversation and then approved bug ticket creation, ' +
+                'call this tool AFTER creating the ticket to attach those images. ' +
+                'The tool reads stored session attachments and uploads them to Jira via the REST API. ' +
+                'ALWAYS call this after create_jira_ticket if the user provided images in the chat.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    ticketKey: {
+                        type: 'string',
+                        description: 'Jira ticket key to attach images to (e.g., "AOTF-17300")',
+                    },
+                    sessionId: {
+                        type: 'string',
+                        description: 'Chat session ID to retrieve stored attachments from. Use the current session ID.',
+                    },
+                },
+                required: ['ticketKey'],
+            },
+            handler: async ({ ticketKey, sessionId }) => {
+                try {
+                    loadEnvVars();
+                    const cloudId = (process.env.JIRA_CLOUD_ID || '').replace(/"/g, '');
+                    const baseUrl = process.env.JIRA_BASE_URL;
+                    const email = process.env.JIRA_EMAIL || process.env.ATLASSIAN_EMAIL || '';
+                    const apiToken = process.env.JIRA_API_TOKEN || process.env.ATLASSIAN_API_TOKEN || '';
+
+                    if (!email || !apiToken) {
+                        return JSON.stringify({ success: false, error: 'JIRA_EMAIL and JIRA_API_TOKEN required' });
+                    }
+
+                    // Access session attachments via the deps closure
+                    const chatManager = deps.chatManager;
+                    let attachments = [];
+                    if (chatManager && sessionId) {
+                        const entry = chatManager._sessions?.get(sessionId);
+                        if (entry?.sessionAttachments?.length > 0) {
+                            attachments = entry.sessionAttachments;
+                        }
+                    }
+
+                    if (attachments.length === 0) {
+                        return JSON.stringify({
+                            success: false,
+                            error: 'No images found in the current session. The user may not have attached any screenshots.',
+                        });
+                    }
+
+                    // Build Jira attachment upload URL
+                    let attachUrl;
+                    if (cloudId) {
+                        attachUrl = `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issue/${ticketKey}/attachments`;
+                    } else {
+                        attachUrl = `${baseUrl.replace(/\/$/, '')}/rest/api/3/issue/${ticketKey}/attachments`;
+                    }
+
+                    const results = [];
+                    for (let i = 0; i < attachments.length; i++) {
+                        const att = attachments[i];
+                        const ext = att.media_type === 'image/png' ? '.png' :
+                            att.media_type === 'image/jpeg' ? '.jpg' :
+                                att.media_type === 'image/gif' ? '.gif' :
+                                    att.media_type === 'image/webp' ? '.webp' : '.png';
+                        const fileName = `bug-screenshot-${i + 1}${ext}`;
+
+                        try {
+                            const buffer = Buffer.from(att.data, 'base64');
+                            const boundary = `----JiraAttachment${Date.now()}${i}`;
+                            const header = Buffer.from(
+                                `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${att.media_type || 'image/png'}\r\n\r\n`
+                            );
+                            const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+                            const body = Buffer.concat([header, buffer, footer]);
+
+                            const resp = await fetch(attachUrl, {
+                                method: 'POST',
+                                headers: {
+                                    'Authorization': 'Basic ' + Buffer.from(`${email}:${apiToken}`).toString('base64'),
+                                    'X-Atlassian-Token': 'no-check',
+                                    'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                                },
+                                body,
+                            });
+
+                            if (resp.ok) {
+                                results.push({ fileName, success: true });
+                            } else {
+                                const errText = await resp.text();
+                                results.push({ fileName, success: false, error: `HTTP ${resp.status}: ${errText.slice(0, 200)}` });
+                            }
+                        } catch (uploadErr) {
+                            results.push({ fileName, success: false, error: uploadErr.message });
+                        }
+                    }
+
+                    const successCount = results.filter(r => r.success).length;
+                    return JSON.stringify({
+                        success: successCount > 0,
+                        ticketKey,
+                        totalAttachments: attachments.length,
+                        uploaded: successCount,
+                        failed: attachments.length - successCount,
+                        results,
+                    });
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `Attachment error: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 11c: update_jira_ticket
+    // Available to: buggenie, testgenie, taskgenie
+    // ───────────────────────────────────────────────────────────────────
+    if (['buggenie', 'testgenie', 'taskgenie'].includes(agentName)) {
         tools.push(defineTool('update_jira_ticket', {
             description:
                 'Updates an existing Jira ticket via the Atlassian REST API. ' +
@@ -1835,10 +1954,16 @@ function createCustomTools(defineTool, agentName, deps = {}) {
             },
             handler: async ({ query, scope, maxResults }) => {
                 try {
-                    const results = groundingStore.query(query, {
-                        maxChunks: maxResults || 8,
-                        scope: scope || undefined,
-                    });
+                    // Use queryForAgent to apply agent-specific boosts from grounding-config
+                    const results = groundingStore.queryForAgent
+                        ? groundingStore.queryForAgent(agentName, query, {
+                            maxChunks: maxResults || 8,
+                            scope: scope || undefined,
+                        })
+                        : groundingStore.query(query, {
+                            maxChunks: maxResults || 8,
+                            scope: scope || undefined,
+                        });
                     return JSON.stringify({
                         success: true,
                         resultCount: results.length,
