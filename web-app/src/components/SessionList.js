@@ -5,7 +5,7 @@ import { ConversationIcon, ChevronDoubleLeftIcon, PlusIcon, EmptyChatIcon, ChatB
 
 export default function SessionList({ sessions, activeSessionId, onSelect, onCreate, onDelete, isOpen, onToggle }) {
     return (
-        <div className={`flex-shrink-0 h-full bg-white border-r transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] overflow-hidden ${isOpen ? 'w-[280px] border-surface-200/80' : 'w-0 border-transparent'}`}>
+        <div className={`flex-shrink-0 h-full bg-white border-r transition-[width,border-color] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] overflow-hidden ${isOpen ? 'w-[280px] border-surface-200/80' : 'w-0 border-transparent'}`}>
             <div className="min-w-[280px] flex flex-col h-full">
                 {/* Top accent bar */}
                 <div className="h-[2px] bg-gradient-to-r from-brand-500 via-brand-400 to-accent-400 flex-shrink-0" />

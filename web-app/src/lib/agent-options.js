@@ -61,6 +61,20 @@ export const AGENT_MODES = [
         badgeText: 'text-red-700',
         icon: 'bug',
     },
+    {
+        value: 'taskgenie',
+        label: 'TaskGenie',
+        shortLabel: 'TK',
+        description: 'Create linked Testing tasks in Jira with auto-assignment',
+        placeholder: 'Paste Jira ticket URL or describe the testing task...',
+        color: 'amber',
+        bgClass: 'bg-amber-50',
+        textClass: 'text-amber-600',
+        activeClass: 'bg-amber-600 text-white',
+        badgeBg: 'bg-amber-100',
+        badgeText: 'text-amber-700',
+        icon: 'task',
+    },
 ];
 
 /**

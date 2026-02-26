@@ -451,6 +451,22 @@ class GroundingStore {
             }
         }
 
+        // 3b. Compact feature map summary (always included)
+        // Gives agents a lookup table of the project's feature topology
+        // so they can reference correct page objects/URLs without needing a tool call.
+        const featureList = this.config.featureMap || [];
+        if (featureList.length > 0) {
+            sections.push('');
+            sections.push('FEATURE MAP:');
+            for (const f of featureList) {
+                const fParts = [`  ${f.name}`];
+                if (f.pages?.length > 0) fParts.push(`pages:${f.pages.join(',')}`);
+                if (f.pageObjects?.length > 0) fParts.push(`PO:${f.pageObjects.join(',')}`);
+                if (f.businessFunctions?.length > 0) fParts.push(`BF:${f.businessFunctions.join(',')}`);
+                sections.push(fParts.join(' | '));
+            }
+        }
+
         // 4. Task-relevant code chunks (query-dependent)
         if (options.taskDescription && !options.summary) {
             const results = this.queryForAgent(agentName, options.taskDescription, {

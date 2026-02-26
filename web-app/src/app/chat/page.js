@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useSSE } from '@/hooks/useSSE';
 import apiClient from '@/lib/api-client';
-import { DEFAULT_MODEL } from '@/lib/model-options';
+import { DEFAULT_MODEL, isVisionModel } from '@/lib/model-options';
 import { truncateTitle } from '@/lib/constants';
 import ChatMessage from '@/components/ChatMessage';
 import ChatInput from '@/components/ChatInput';
@@ -312,10 +312,16 @@ export default function ChatPage() {
         }
     };
 
-    const sendMessage = async (content) => {
-        if (!activeSessionId || !content.trim()) return;
+    const sendMessage = async (content, imageAttachments = []) => {
+        if (!activeSessionId || (!content.trim() && imageAttachments.length === 0)) return;
 
-        setMessages(prev => [...prev, { role: 'user', content, timestamp: new Date().toISOString() }]);
+        // Build user message with optional attachments for local display
+        const userMessage = { role: 'user', content, timestamp: new Date().toISOString() };
+        if (imageAttachments.length > 0) {
+            userMessage.attachments = imageAttachments; // { id, name, type, size, dataUrl, base64 }
+        }
+
+        setMessages(prev => [...prev, userMessage]);
         setIsProcessing(true);
         setError(null);
         setFollowups([]);  // Clear followups when user sends a new message
@@ -330,11 +336,20 @@ export default function ChatPage() {
         setSessions(prev => prev.map(s => {
             if (s.sessionId !== activeSessionId) return s;
             if (s.title) return s; // already has title
-            return { ...s, title: truncateTitle(content) };
+            return { ...s, title: truncateTitle(content || 'Image attachment') };
         }));
 
         try {
-            await apiClient.sendChatMessage(activeSessionId, content, undefined, model);
+            // Transform attachments to the format expected by the Copilot SDK
+            const apiAttachments = imageAttachments.length > 0
+                ? imageAttachments.map(att => ({
+                    type: 'image',
+                    media_type: att.type,    // e.g. 'image/png'
+                    data: att.base64,         // raw base64 string
+                }))
+                : undefined;
+
+            await apiClient.sendChatMessage(activeSessionId, content || '(image attached)', apiAttachments, model);
         } catch (err) {
             setError(`Failed to send: ${err.message}`);
             setIsProcessing(false);
@@ -437,7 +452,7 @@ export default function ChatPage() {
     const runningToolCount = toolGroups.reduce((acc, g) => acc + g.tools.filter(t => t.status === 'running').length, 0);
 
     return (
-        <div className="flex h-screen bg-surface-50">
+        <div className="flex h-screen bg-surface-50 overflow-hidden">
             {/* Session Sidebar */}
             <SessionList
                 sessions={sessions}
@@ -479,9 +494,9 @@ export default function ChatPage() {
                         <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100/80 border border-surface-200/50 flex-shrink-0 whitespace-nowrap">
                             <span className={`w-2 h-2 rounded-full transition-colors flex-shrink-0 ${sseStatus === 'connected' ? 'bg-accent-400 shadow-sm shadow-accent-400/40' :
                                 sseStatus === 'reconnecting' ? 'bg-amber-400 animate-pulse' :
-                                    'bg-surface-300'
+                                    !activeSessionId ? 'bg-surface-300' : 'bg-red-400'
                                 }`} />
-                            <span className="text-[11px] font-medium text-surface-500 capitalize">{sseStatus}</span>
+                            <span className="text-[11px] font-medium text-surface-500 capitalize">{!activeSessionId ? 'Ready' : sseStatus}</span>
                         </div>
                     </div>
                 </div>
@@ -659,6 +674,7 @@ export default function ChatPage() {
                         disabled={!activeSessionId}
                         placeholder={activeAgentConfig.placeholder}
                         prefillText={prefillText}
+                        supportsImages={isVisionModel(model)}
                     />
                 )}
             </div>

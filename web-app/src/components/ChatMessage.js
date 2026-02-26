@@ -3,16 +3,17 @@
 import { memo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { SparkleIcon, UserIcon, ClipboardIcon, CheckIcon } from '@/components/Icons';
+import { SparkleIcon, UserIcon, ClipboardIcon, CheckIcon, XIcon } from '@/components/Icons';
 
 export default memo(ChatMessage);
 
 function ChatMessage({ message, isStreaming = false }) {
-    const { role, content, timestamp } = message;
+    const { role, content, timestamp, attachments } = message;
     const isUser = role === 'user';
     const [copied, setCopied] = useState(false);
+    const [expandedImage, setExpandedImage] = useState(null);
 
-    if (!isUser && !isStreaming && (!content || !content.trim())) {
+    if (!isUser && !isStreaming && (!content || !content.trim()) && (!attachments || attachments.length === 0)) {
         return null;
     }
 
@@ -59,6 +60,25 @@ function ChatMessage({ message, isStreaming = false }) {
                     ? 'bg-brand-600 text-white rounded-tr-sm'
                     : 'bg-white border border-surface-200 shadow-sm rounded-tl-sm'
                     }`}>
+                    {/* User image attachments */}
+                    {isUser && attachments && attachments.length > 0 && (
+                        <div className="flex flex-wrap gap-2 mb-2">
+                            {attachments.map((att, idx) => (
+                                <button
+                                    key={att.id || idx}
+                                    type="button"
+                                    onClick={() => setExpandedImage(att.dataUrl)}
+                                    className="block rounded-lg overflow-hidden border border-white/20 hover:ring-2 hover:ring-white/50 transition-all cursor-pointer"
+                                >
+                                    <img
+                                        src={att.dataUrl}
+                                        alt={att.name || `Image ${idx + 1}`}
+                                        className="max-w-[180px] max-h-[140px] object-cover"
+                                    />
+                                </button>
+                            ))}
+                        </div>
+                    )}
                     {isUser ? (
                         <p className="text-sm whitespace-pre-wrap leading-relaxed break-words [overflow-wrap:anywhere]">{content}</p>
                     ) : (
@@ -88,6 +108,28 @@ function ChatMessage({ message, isStreaming = false }) {
                     )}
                 </div>
             </div>
+
+            {/* Image lightbox overlay */}
+            {expandedImage && (
+                <div
+                    className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-8 cursor-pointer"
+                    onClick={() => setExpandedImage(null)}
+                >
+                    <button
+                        className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/20 hover:bg-white/40 flex items-center justify-center transition-colors"
+                        onClick={() => setExpandedImage(null)}
+                        title="Close"
+                    >
+                        <XIcon className="w-5 h-5 text-white" />
+                    </button>
+                    <img
+                        src={expandedImage}
+                        alt="Expanded attachment"
+                        className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
+                        onClick={(e) => e.stopPropagation()}
+                    />
+                </div>
+            )}
         </div>
     );
 }

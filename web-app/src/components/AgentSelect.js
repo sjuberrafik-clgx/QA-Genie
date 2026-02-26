@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { AGENT_MODES, getAgentConfig } from '@/lib/agent-options';
-import { SparkleIcon, DocumentIcon, CodeIcon, BugIcon } from '@/components/Icons';
+import { SparkleIcon, DocumentIcon, CodeIcon, BugIcon, TaskIcon } from '@/components/Icons';
 
 /* ── Icon mapping per agent (references Icons.js components) ─────────────── */
 const ICON_MAP = {
@@ -10,6 +10,7 @@ const ICON_MAP = {
     document: DocumentIcon,
     code: CodeIcon,
     bug: BugIcon,
+    task: TaskIcon,
 };
 
 function AgentIcon({ icon, className = 'w-4 h-4' }) {

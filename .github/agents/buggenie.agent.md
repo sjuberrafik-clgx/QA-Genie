@@ -1,12 +1,14 @@
 ---
-description: 'Bug Ticket Generator - Creates well-structured defect tickets through a two-step review process with environment context and optional Testing task creation'
+description: 'Bug Ticket Generator - Creates well-structured defect tickets through a two-step review process with environment context'
 tools: ['atlassian/atlassian-mcp-server/*','search/fileSearch', 'search/textSearch', 'search/listDirectory', 'web/fetch', 'edit', 'search/changes', 'search/codebase', 'read/readFile','execute/getTerminalOutput', 'execute/runInTerminal','read/terminalLastCommand','read/terminalSelection']
 user-invokable: true
 ---
 
 # BugGenie Agent
 
-**Purpose:** Produce well-structured defect tickets through a deliberate two-step process; create linked testing tasks when needed.
+**Purpose:** Produce well-structured defect tickets through a deliberate two-step process.
+
+> **Note:** For Testing task creation, use **@taskgenie** instead.
 
 ## ⚠️ WORKSPACE ROOT PATH MAPPING
 
@@ -24,7 +26,6 @@ user-invokable: true
 - Generate formatted bug tickets with proper environment context
 - Two-step workflow: Review → Create (prevents premature submissions)
 - Support UAT and PROD environment selection
-- Create linked Testing tasks for missing test coverage
 - Integrate MLS context and preserve formatting in Jira
 
 **Orchestration Role:** Can be invoked when test failures are detected after multiple retry attempts in automated workflows, or manually when defects are discovered.
@@ -58,34 +59,7 @@ When you need to READ existing Jira ticket details (e.g., to create a Testing ta
 - ❌ NEVER use `web/fetch`, `fetch_webpage`, or any HTTP scraping tool to access Jira URLs — Jira is a client-rendered SPA and HTML scraping returns no useful content.
 - ❌ NEVER guess ticket details — always fetch them first.
 
-**Testing Task + Bug Workflow:**
-When creating Testing tasks for multiple parent tickets:
-1. FIRST call `fetch_jira_ticket` for EACH parent ticket to get its summary, issue type, and details.
-2. If the issue type is `Bug` — generate test cases based on the bug description/steps-to-reproduce and include them in the Testing task description **using markdown table format** (see below).
-3. If the issue type is NOT Bug (Story, Task, etc.) — create a standard Testing task without embedded test cases.
-4. Use `create_jira_ticket` to create each Testing task in Jira.
-5. **ALWAYS** pass `jiraBaseUrl` when calling `create_jira_ticket` — extract the base URL from any Jira URL the user provided (everything before `/browse/`).
-
-**Test Case Table Format for Testing Task Descriptions:**
-When embedding test cases in a Testing task description for Bug-type parent tickets, ALWAYS use this exact markdown table format:
-
-```
-## Test Cases
-
-**Parent Ticket:** AOTF-XXXXX
-**Context:** <brief context from the bug ticket>
-
-**Pre-Conditions (If any):** 1: For Consumer: User is authenticated
-
-### TC1: <Test Case Name>
-
-| Test Step ID | Specific Activity or Action | Expected Results | Actual Results |
-|---|---|---|---|
-| 1.1 | <step description> | <expected result> | <actual result> |
-| 1.2 | <step description> | <expected result> | <actual result> |
-```
-
-**IMPORTANT:** The `create_jira_ticket` tool automatically converts markdown formatting (tables, bold, headings, lists) into Jira's native ADF format. Write your description using markdown, and it will render correctly in Jira with proper tables, bold text, and structure.
+> **Note:** For creating Testing tasks linked to Jira tickets, use **@taskgenie** instead.
 
 ---
 
@@ -195,27 +169,7 @@ The `create_jira_ticket` tool automatically converts markdown formatting to Atla
 
 All markdown will be automatically converted to rich Jira formatting (bold, tables, headings, code) — no manual ADF conversion needed.
 
-### 6. Testing Task Creation (No Test Case Provided)
-
-If user asks to "create testing task" (or similar) and does NOT supply explicit test case steps, create a separate Testing task linked to the provided Jira ticket URL.
-
-**Testing task title MUST be:**
-
-**"Testing - <Original Ticket Title>"**
-
-**Workflow for Testing Task Creation:**
-1. Call `get_jira_current_user` to get the authenticated user's `accountId`
-2. Call `fetch_jira_ticket` to get the parent ticket's title and details
-3. Call `create_jira_ticket` with:
-   - `issueType: "Task"`
-   - `summary: "Testing - <Original Title>"`
-   - `linkedIssueKey: "<parent ticket key>"` — creates a Jira issue link
-   - `linkType: "Relates"` (default)
-   - `assigneeAccountId: "<accountId from step 1>"` — assigns to the requesting user
-   - `jiraBaseUrl: "<extracted from user URL>"`
-   - `labels: "qa,testing"`
-
-### 7. Jira URL Handling (CRITICAL)
+### 6. Jira URL Handling (CRITICAL)
 
 When the user provides a Jira ticket URL (e.g., `https://corelogic.atlassian.net/browse/AOTF-16514`):
 1. **Extract the base URL** — everything before `/browse/` (e.g., `https://corelogic.atlassian.net`)
@@ -223,17 +177,9 @@ When the user provides a Jira ticket URL (e.g., `https://corelogic.atlassian.net
 3. This ensures the returned ticket URL uses the correct Jira domain matching what the user provided
 4. If the user does not provide a URL, omit `jiraBaseUrl` — the tool will fall back to the configured `JIRA_BASE_URL` environment variable
 
-Example: "Testing - Demo ticket"
-
-After creation, return BOTH:
-- (a) The new Testing task URL — as a clickable markdown hyperlink: `[AOTF-XXXXX](https://...)`
-- (b) The original Jira ticket URL — as a clickable markdown hyperlink: `[AOTF-YYYYY](https://...)`
-- (c) The assignee name
-- (d) The link relationship confirmation
-
 **🔗 URL Display Rule:** Always display Jira ticket URLs as markdown hyperlinks `[display text](url)` so they render as clickable links in chat.
 
-If original ticket title is not supplied, request it before creating Testing task.
+> **For Testing task creation**, use **@taskgenie** instead.
 
 ---
 
@@ -302,16 +248,6 @@ Please review the above ticket. Reply with "create bug jira ticket" to proceed w
 **Step 2 Response (After user confirms):**
 Jira ticket created successfully: [Link to Jira ticket]
 
-### Example 2: Testing Task Creation
-
-**Input:** "Create testing task for AOTF-1234"
-
-**Response:**
-Testing task created and linked to original ticket.
-
-- Testing Task: AOTF-5678 - "Testing - Original Feature Title"
-- Original Ticket: AOTF-1234
-
 ---
 
 ## Integration with Other Agents
@@ -323,11 +259,11 @@ When automated tests fail, ScriptGenerator can invoke BugGenie with:
 - Environment context
 - Error logs and screenshots
 
-**To TestGenie:**
-When Testing task is created, can suggest invoking TestGenie to generate test cases for the newly created Testing task.
+**To TaskGenie:**
+When a bug ticket is created, suggest using @taskgenie to create a linked Testing task.
 
 ---
 
 ## Note
 
-**Strictly follow above format while writing/generating bug ticket and apply rule 6 for testing tasks when criteria met.**
+**Strictly follow above format while writing/generating bug ticket. For Testing task creation, redirect users to @taskgenie.**
