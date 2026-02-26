@@ -743,7 +743,14 @@
             "configPath": "agentic-workflow/config/grounding-config.json",
             "indexPath": "agentic-workflow/grounding-data",
             "autoRebuildOnStart": false,
-            "maxContextChars": 12000
+            "maxContextChars": 12000,
+            "knowledgeBase": {
+                "_comment": "Dynamic Knowledge Base connector — fetches real-time context from Confluence/Notion/SharePoint",
+                "enabled": true,
+                "maxContextChars": 4000,
+                "autoInitOnStart": true,
+                "fallbackToLocalOnly": true
+            }
         },
         "modes": {
             "full": [

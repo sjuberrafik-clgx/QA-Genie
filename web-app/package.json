@@ -11,6 +11,7 @@
     "dev:backend": "node ../agentic-workflow/sdk-orchestrator/cli.js --server --port 3100 --verbose"
   },
   "dependencies": {
+    "mermaid": "^11.12.3",
     "next": "^15.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

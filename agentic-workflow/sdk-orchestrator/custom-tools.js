@@ -2147,6 +2147,196 @@ function createCustomTools(defineTool, agentName, deps = {}) {
         }));
     }
 
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 22: search_knowledge_base
+    // Available to: ALL agents
+    // Search external KB (Confluence, Notion, SharePoint) for documentation
+    // ───────────────────────────────────────────────────────────────────
+    {
+        const gStore = groundingStore;
+        if (gStore) {
+            tools.push(defineTool('search_knowledge_base', {
+                description:
+                    'Search the external Knowledge Base (Confluence, Notion, SharePoint, etc.) for documentation, ' +
+                    'requirements, specifications, business rules, or domain knowledge. Returns ranked results ' +
+                    'from configured KB providers. Use when you need context about application features, ' +
+                    'acceptance criteria, architecture decisions, or business processes that aren\'t in the codebase.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        query: {
+                            type: 'string',
+                            description: 'Search query — e.g., "property search filters", "login authentication flow", "MLS onboarding"',
+                        },
+                        maxResults: {
+                            type: 'number',
+                            description: 'Maximum results to return (default: 5)',
+                        },
+                        spaceKey: {
+                            type: 'string',
+                            description: 'Optional: restrict search to a specific space/project key',
+                        },
+                        skipIntentCheck: {
+                            type: 'boolean',
+                            description: 'Skip intent detection and force a live KB search (default: false). Use when a query returns 0 results but you know KB content exists.',
+                        },
+                    },
+                    required: ['query'],
+                },
+                handler: async ({ query, maxResults, spaceKey, skipIntentCheck }) => {
+                    const toolCache = getToolCache();
+
+                    // Check TTL cache
+                    const cacheKey = `kb_search_${query}_${maxResults || 5}_${spaceKey || ''}_${skipIntentCheck || false}`;
+                    const cached = toolCache.get(cacheKey);
+                    if (cached) return cached;
+
+                    try {
+                        let result = await gStore.queryKnowledgeBase(query, {
+                            agentName,
+                            maxResults: maxResults || 5,
+                            spaceKey: spaceKey || undefined,
+                            skipIntentCheck: skipIntentCheck || false,
+                        });
+
+                        // Auto-retry: if intent detection blocked or returned 0 results,
+                        // silently retry once with skipIntentCheck to ensure Confluence is always queried
+                        if (!skipIntentCheck && (result.blocked || (result.results.length === 0 && !result.error))) {
+                            const retryReason = result.blocked
+                                ? `intent blocked (confidence=${result.intent?.confidence?.toFixed(2) || '?'})`
+                                : 'zero results with intent pass';
+                            console.log(`[KB Tool] Auto-retrying with skipIntentCheck=true: ${retryReason}`);
+                            result = await gStore.queryKnowledgeBase(query, {
+                                agentName,
+                                maxResults: maxResults || 5,
+                                spaceKey: spaceKey || undefined,
+                                skipIntentCheck: true,
+                            });
+                            result._autoRetried = true;
+                        }
+
+                        if (result.error && result.results.length === 0) {
+                            return JSON.stringify({
+                                success: false,
+                                error: result.error,
+                                message: 'Knowledge Base is not configured or unavailable. Check .env for CONFLUENCE_BASE_URL and KB_ENABLED.',
+                            });
+                        }
+
+                        const response = JSON.stringify({
+                            success: true,
+                            query,
+                            resultCount: result.results.length,
+                            fromCache: result.fromCache || false,
+                            intent: result.intent ? {
+                                confidence: result.intent.confidence,
+                                matchedTerms: result.intent.matchedTerms,
+                                matchedFeatures: result.intent.matchedFeatures,
+                            } : null,
+                            results: (result.results || []).map(r => ({
+                                title: r.title,
+                                excerpt: r.excerpt || r.content?.substring(0, 300) || '',
+                                url: r.url,
+                                space: r.space,
+                                lastModified: r.lastModified,
+                                id: r.id,
+                                labels: r.metadata?.labels || [],
+                            })),
+                        }, null, 2);
+
+                        toolCache.set(cacheKey, response, 300000); // 5-min cache
+                        return response;
+                    } catch (error) {
+                        return JSON.stringify({ success: false, error: error.message });
+                    }
+                },
+            }));
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 23: get_knowledge_base_page
+    // Available to: ALL agents
+    // Fetch full content of a specific KB page by ID
+    // ───────────────────────────────────────────────────────────────────
+    {
+        const gStore = groundingStore;
+        if (gStore && gStore._kbConnector) {
+            tools.push(defineTool('get_knowledge_base_page', {
+                description:
+                    'Fetch the full content of a specific Knowledge Base page by its ID. ' +
+                    'Use this after search_knowledge_base to get detailed content of a relevant page. ' +
+                    'Also supports fetching a page tree (page with all child pages).',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        pageId: {
+                            type: 'string',
+                            description: 'Page ID to fetch — obtained from search_knowledge_base results',
+                        },
+                        includeChildren: {
+                            type: 'boolean',
+                            description: 'Also fetch child pages (default: false)',
+                        },
+                        maxDepth: {
+                            type: 'number',
+                            description: 'Max depth for child page traversal (default: 2)',
+                        },
+                    },
+                    required: ['pageId'],
+                },
+                handler: async ({ pageId, includeChildren, maxDepth }) => {
+                    const toolCache = getToolCache();
+
+                    const cacheKey = `kb_page_${pageId}_${includeChildren || false}`;
+                    const cached = toolCache.get(cacheKey);
+                    if (cached) return cached;
+
+                    try {
+                        const connector = gStore._kbConnector;
+                        let pages;
+
+                        if (includeChildren) {
+                            pages = await connector.getPageTree(pageId, {
+                                depth: maxDepth || 2,
+                            });
+                        } else {
+                            const page = await connector.getPage(pageId);
+                            pages = page ? [page] : [];
+                        }
+
+                        if (pages.length === 0) {
+                            return JSON.stringify({
+                                success: false,
+                                error: `Page ${pageId} not found`,
+                            });
+                        }
+
+                        const response = JSON.stringify({
+                            success: true,
+                            pageCount: pages.length,
+                            pages: pages.map(p => ({
+                                id: p.id,
+                                title: p.title,
+                                content: p.content?.substring(0, 8000) || '',
+                                url: p.url,
+                                space: p.space,
+                                lastModified: p.lastModified,
+                                labels: p.metadata?.labels || [],
+                                author: p.metadata?.author || '',
+                            })),
+                        }, null, 2);
+
+                        toolCache.set(cacheKey, response, 600000); // 10-min cache
+                        return response;
+                    } catch (error) {
+                        return JSON.stringify({ success: false, error: error.message });
+                    }
+                },
+            }));
+        }
+    }
+
     return tools;
 }
 

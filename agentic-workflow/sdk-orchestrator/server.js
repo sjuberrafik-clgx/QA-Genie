@@ -162,8 +162,9 @@ class Router {
         try {
             const query = this._parseQuery(req.url);
             // Use higher body limit for chat message endpoint (supports base64 image attachments)
+            // Supports up to 10 images × 5 MB × 1.37 base64 overhead ≈ 68 MB max
             const isImageRoute = req.url.includes('/messages');
-            const maxBodyBytes = isImageRoute ? 10 * 1024 * 1024 : 1024 * 1024;
+            const maxBodyBytes = isImageRoute ? 75 * 1024 * 1024 : 1024 * 1024;
             const body = ['POST', 'PUT', 'PATCH'].includes(req.method)
                 ? await this._readBody(req, maxBodyBytes)
                 : {};
@@ -950,8 +951,9 @@ async function startServer(options = {}) {
      *
      * Attachments are optional base64-encoded images:
      *   [{ type: 'image', media_type: 'image/png', data: '<base64>' }]
-     * Body limit raised to 10 MB to accommodate image data.
+     * Body limit raised to 75 MB to accommodate up to 10 image attachments.
      */
+    const MAX_IMAGES_PER_MESSAGE = 10;
     router.post('/api/chat/sessions/:sessionId/messages', async (req, res) => {
         if (!chatManager) return json(res, 503, { error: 'Chat manager not ready' });
         const { sessionId } = req.params;
@@ -963,8 +965,8 @@ async function startServer(options = {}) {
         // Validate attachments if present
         if (attachments && Array.isArray(attachments)) {
             const VALID_MEDIA = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
-            if (attachments.length > 4) {
-                return badRequest(res, 'Maximum 4 image attachments per message');
+            if (attachments.length > MAX_IMAGES_PER_MESSAGE) {
+                return badRequest(res, `Maximum ${MAX_IMAGES_PER_MESSAGE} image attachments per message`);
             }
             for (const att of attachments) {
                 if (!att.type || att.type !== 'image') {

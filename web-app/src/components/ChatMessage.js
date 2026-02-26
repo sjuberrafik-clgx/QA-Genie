@@ -1,9 +1,12 @@
 'use client';
 
-import { memo, useState } from 'react';
+import { memo, useState, lazy, Suspense } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { SparkleIcon, UserIcon, ClipboardIcon, CheckIcon, XIcon } from '@/components/Icons';
+
+// Lazy-load MermaidBlock (only imported when a mermaid code fence is encountered)
+const MermaidBlock = lazy(() => import('@/components/MermaidBlock'));
 
 export default memo(ChatMessage);
 
@@ -58,7 +61,7 @@ function ChatMessage({ message, isStreaming = false }) {
 
                 <div className={`rounded-2xl px-4 py-3 overflow-hidden ${isUser
                     ? 'bg-brand-600 text-white rounded-tr-sm'
-                    : 'bg-white border border-surface-200 shadow-sm rounded-tl-sm'
+                    : 'bg-white/95 backdrop-blur-sm border border-surface-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.04),0_1px_2px_rgba(0,0,0,0.02)] rounded-tl-sm'
                     }`}>
                     {/* User image attachments */}
                     {isUser && attachments && attachments.length > 0 && (
@@ -83,7 +86,28 @@ function ChatMessage({ message, isStreaming = false }) {
                         <p className="text-sm whitespace-pre-wrap leading-relaxed break-words [overflow-wrap:anywhere]">{content}</p>
                     ) : (
                         <div className="chat-markdown text-sm text-surface-800">
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content || ''}</ReactMarkdown>
+                            <ReactMarkdown
+                                remarkPlugins={[remarkGfm]}
+                                components={{
+                                    code({ node, inline, className, children, ...props }) {
+                                        // Detect ```mermaid fenced blocks and render as diagrams
+                                        const isMermaid = /language-mermaid/.test(className || '');
+                                        if (!inline && isMermaid) {
+                                            return (
+                                                <Suspense fallback={
+                                                    <div className="mermaid-container mermaid-loading">
+                                                        <span className="text-xs text-surface-400">Loading diagram…</span>
+                                                    </div>
+                                                }>
+                                                    <MermaidBlock>{String(children).replace(/\n$/, '')}</MermaidBlock>
+                                                </Suspense>
+                                            );
+                                        }
+                                        // Default code rendering (inline or other languages)
+                                        return <code className={className} {...props}>{children}</code>;
+                                    },
+                                }}
+                            >{content || ''}</ReactMarkdown>
                         </div>
                     )}
                 </div>
