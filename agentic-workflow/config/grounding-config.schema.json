@@ -319,6 +319,289 @@
                     "description": "Automatically discard stale exploration data"
                 }
             }
+        },
+        "knowledgeBase": {
+            "type": "object",
+            "description": "Dynamic Knowledge Base connector configuration. Fetches real-time context from external knowledge sources (Confluence, Notion, SharePoint, custom REST) and integrates with local grounding.",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Master toggle for Knowledge Base integration"
+                },
+                "providers": {
+                    "type": "array",
+                    "description": "List of KB providers to connect to. Multiple providers are queried in priority order.",
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "type",
+                            "name"
+                        ],
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": [
+                                    "confluence",
+                                    "notion",
+                                    "sharepoint",
+                                    "custom"
+                                ],
+                                "description": "Provider type"
+                            },
+                            "name": {
+                                "type": "string",
+                                "description": "Human-readable provider name"
+                            },
+                            "enabled": {
+                                "type": "boolean",
+                                "default": true,
+                                "description": "Whether this provider is active"
+                            },
+                            "priority": {
+                                "type": "number",
+                                "default": 1,
+                                "description": "Query priority (lower = higher priority)"
+                            },
+                            "baseUrl": {
+                                "type": "string",
+                                "description": "Base URL for the API. Falls back to env var."
+                            },
+                            "spaceKeys": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                },
+                                "description": "Confluence/Notion space keys to search within"
+                            },
+                            "labels": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                },
+                                "description": "Filter results by labels/tags"
+                            },
+                            "ancestorPageIds": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                },
+                                "description": "Restrict search to descendants of these page IDs"
+                            },
+                            "auth": {
+                                "type": "object",
+                                "description": "Auth config for custom providers",
+                                "properties": {
+                                    "type": {
+                                        "type": "string",
+                                        "enum": [
+                                            "basic",
+                                            "bearer",
+                                            "api-key"
+                                        ],
+                                        "description": "Authentication type"
+                                    },
+                                    "tokenEnvVar": {
+                                        "type": "string",
+                                        "description": "Environment variable name containing the token"
+                                    },
+                                    "usernameEnvVar": {
+                                        "type": "string",
+                                        "description": "Environment variable name for username (basic auth)"
+                                    },
+                                    "passwordEnvVar": {
+                                        "type": "string",
+                                        "description": "Environment variable name for password (basic auth)"
+                                    },
+                                    "headerName": {
+                                        "type": "string",
+                                        "description": "Custom header name for API key auth"
+                                    }
+                                }
+                            },
+                            "endpoints": {
+                                "type": "object",
+                                "description": "Endpoint configuration for custom providers",
+                                "additionalProperties": {
+                                    "type": "object",
+                                    "properties": {
+                                        "path": {
+                                            "type": "string"
+                                        },
+                                        "method": {
+                                            "type": "string",
+                                            "enum": [
+                                                "GET",
+                                                "POST"
+                                            ]
+                                        },
+                                        "queryParam": {
+                                            "type": "string"
+                                        },
+                                        "resultsPath": {
+                                            "type": "string"
+                                        }
+                                    }
+                                }
+                            },
+                            "responseMapping": {
+                                "type": "object",
+                                "description": "Maps API response fields to KBResult fields for custom providers",
+                                "additionalProperties": {
+                                    "type": "object",
+                                    "additionalProperties": {
+                                        "type": "string"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "cache": {
+                    "type": "object",
+                    "description": "Local cache configuration for KB content",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Enable local caching of KB pages"
+                        },
+                        "ttlMinutes": {
+                            "type": "number",
+                            "default": 30,
+                            "minimum": 1,
+                            "description": "Time-to-live for cached pages in minutes"
+                        },
+                        "maxEntries": {
+                            "type": "number",
+                            "default": 200,
+                            "minimum": 10,
+                            "description": "Maximum cached pages before LRU eviction"
+                        },
+                        "searchCacheTtlMinutes": {
+                            "type": "number",
+                            "default": 5,
+                            "minimum": 1,
+                            "description": "TTL for search result caching (shorter than page cache)"
+                        },
+                        "persistPath": {
+                            "type": "string",
+                            "default": "knowledge-base-data/kb-cache.json",
+                            "description": "Path for cache persistence file (relative to agentic-workflow/)"
+                        }
+                    }
+                },
+                "intentDetection": {
+                    "type": "object",
+                    "description": "Automatic intent detection — decides when to fetch KB content",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Enable automatic intent detection"
+                        },
+                        "confidenceThreshold": {
+                            "type": "number",
+                            "default": 0.3,
+                            "minimum": 0,
+                            "maximum": 1,
+                            "description": "Minimum confidence score to trigger KB fetch (0-1)"
+                        },
+                        "domainTerms": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Project-specific domain terms that indicate KB relevance"
+                        },
+                        "triggerTerms": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Generic terms that indicate knowledge-seeking intent"
+                        }
+                    }
+                },
+                "retrieval": {
+                    "type": "object",
+                    "description": "Controls how much KB content is included in agent context",
+                    "properties": {
+                        "maxResults": {
+                            "type": "number",
+                            "default": 10,
+                            "minimum": 1,
+                            "description": "Maximum results per query"
+                        },
+                        "maxContentChars": {
+                            "type": "number",
+                            "default": 4000,
+                            "minimum": 500,
+                            "description": "Character budget for KB content within grounding context"
+                        },
+                        "includeChildPages": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Fetch child pages when retrieving a page tree"
+                        },
+                        "childPageDepth": {
+                            "type": "number",
+                            "default": 2,
+                            "minimum": 1,
+                            "maximum": 5,
+                            "description": "How deep to traverse page hierarchies"
+                        },
+                        "boostFactors": {
+                            "type": "object",
+                            "description": "Score multipliers for result ranking",
+                            "properties": {
+                                "titleMatch": {
+                                    "type": "number",
+                                    "default": 2.0
+                                },
+                                "labelMatch": {
+                                    "type": "number",
+                                    "default": 1.5
+                                },
+                                "recentlyUpdated": {
+                                    "type": "number",
+                                    "default": 1.2
+                                }
+                            }
+                        }
+                    }
+                },
+                "sync": {
+                    "type": "object",
+                    "description": "Pre-indexing and synchronization settings",
+                    "properties": {
+                        "autoSyncOnStart": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Pre-fetch key pages when pipeline starts"
+                        },
+                        "syncIntervalMinutes": {
+                            "type": "number",
+                            "default": 0,
+                            "description": "Periodic sync interval (0 = disabled)"
+                        },
+                        "syncPageIds": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Specific page IDs to pre-sync"
+                        },
+                        "syncSpaceKeys": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Space keys to sync (overrides provider defaults)"
+                        }
+                    }
+                }
+            }
         }
     }
 }

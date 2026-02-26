@@ -72,6 +72,7 @@ class GroundingStore {
         // Core components (initialized lazily or via buildIndex)
         this.index = null;              // BM25Index
         this.selectorRegistry = null;   // SelectorRegistry
+        this._kbConnector = null;       // KnowledgeBaseConnector (dynamic KB integration)
         this._fileMtimes = new Map();   // filePath → mtime (for staleness)
         this._lastBuildTime = null;
         this._initialized = false;
@@ -206,6 +207,115 @@ class GroundingStore {
         if (this._initialized) return;
         if (!this._loadIndex()) {
             this.buildIndex();
+        }
+    }
+
+    // ─── Knowledge Base Integration ─────────────────────────────────
+
+    /**
+     * Initialize the Knowledge Base connector.
+     * Loads providers from grounding-config.json → knowledgeBase section.
+     * Safe to call multiple times — returns existing connector if already initialized.
+     *
+     * @param {Object} [options]
+     * @param {boolean} [options.autoSync] - Pre-fetch configured pages on init
+     * @returns {Promise<Object|null>} KnowledgeBaseConnector instance or null if disabled/failed
+     */
+    async initKnowledgeBase(options = {}) {
+        if (this._kbConnector) return this._kbConnector;
+
+        const kbConfig = this.config.knowledgeBase || {};
+        if (!kbConfig.enabled) {
+            this._log('Knowledge Base disabled in config');
+            return null;
+        }
+
+        try {
+            // Inject full grounding config (domainTerminology + featureMap) so the
+            // intent detector has all project-specific terms and features.
+            // Without this, the intent detector starts with empty domain/feature
+            // maps and silently blocks most queries.
+            kbConfig.groundingConfig = {
+                domainTerminology: this.config.domainTerminology || {},
+                featureMap: this.config.featureMap || [],
+            };
+
+            const { getKnowledgeBaseConnector } = require('../knowledge-base/kb-connector');
+            this._kbConnector = getKnowledgeBaseConnector(kbConfig);
+            await this._kbConnector.initialize();
+
+            // Auto-sync pages if configured
+            if (options.autoSync || kbConfig.sync?.autoSyncOnStart) {
+                const syncIds = kbConfig.sync?.syncPageIds || [];
+                const syncSpaces = kbConfig.sync?.syncSpaceKeys || [];
+                if (syncIds.length > 0 || syncSpaces.length > 0) {
+                    this._log(`Auto-syncing KB: ${syncIds.length} pages, ${syncSpaces.length} spaces`);
+                    await this._kbConnector.syncPages({ pageIds: syncIds, spaceKeys: syncSpaces }).catch(err => {
+                        this._log(`⚠ KB auto-sync warning: ${err.message}`);
+                    });
+                }
+            }
+
+            this._log('✅ Knowledge Base connector initialized');
+            return this._kbConnector;
+        } catch (error) {
+            this._log(`⚠ Knowledge Base init failed: ${error.message}`);
+            this._kbConnector = null;
+            return null;
+        }
+    }
+
+    /**
+     * Query the Knowledge Base for relevant external content.
+     * Combines intent detection + cache lookup + live API fallback.
+     *
+     * @param {string} query - Natural language query
+     * @param {Object} [options]
+     * @param {string} [options.agentName] - Agent making the query (for boost terms)
+     * @param {number} [options.maxResults] - Override max results
+     * @param {boolean} [options.skipIntentCheck] - Skip intent detection (force live search)
+     * @returns {Promise<Object>} { results, fromCache, intent, error }
+     */
+    async queryKnowledgeBase(query, options = {}) {
+        if (!this._kbConnector) {
+            // Try lazy init
+            await this.initKnowledgeBase();
+        }
+        if (!this._kbConnector) {
+            return { results: [], fromCache: false, intent: null, error: 'KB not initialized' };
+        }
+
+        try {
+            if (options.agentName) {
+                return await this._kbConnector.queryForAgent(options.agentName, query, options);
+            }
+            return await this._kbConnector.query(query, options);
+        } catch (error) {
+            this._log(`⚠ KB query failed: ${error.message}`);
+            return { results: [], fromCache: false, intent: null, error: error.message };
+        }
+    }
+
+    /**
+     * Build a formatted Knowledge Base context string for agent injection.
+     *
+     * @param {string} query - What context to fetch
+     * @param {Object} [options]
+     * @param {number} [options.maxChars] - Override max characters
+     * @param {string} [options.agentName] - Agent requesting context
+     * @returns {Promise<string>} Formatted KB context string
+     */
+    async buildKBContext(query, options = {}) {
+        if (!this._kbConnector) {
+            await this.initKnowledgeBase();
+        }
+        if (!this._kbConnector) return '';
+
+        try {
+            return await this._kbConnector.buildKBContext(query, options);
+        } catch (error) {
+            this._log(`⚠ KB context build failed: ${error.message}`);
+            return '';
         }
     }
 
@@ -513,6 +623,15 @@ class GroundingStore {
                     if (f.pages?.length > 0) sections.push(`    URLs: ${f.pages.join(', ')}`);
                 }
             }
+        }
+
+        // 7. Knowledge Base context (async — only included if pre-fetched)
+        // Note: buildGroundingContext is sync, so KB content must be pre-fetched
+        // via buildKBContext() and passed in options.kbContext
+        if (options.kbContext) {
+            sections.push('');
+            sections.push('KNOWLEDGE BASE:');
+            sections.push(options.kbContext);
         }
 
         return sections.join('\n');

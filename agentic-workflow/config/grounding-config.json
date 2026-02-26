@@ -277,6 +277,8 @@
         "SRCH": "Syndication Search",
         "OHO": "OneHomeOwner — property ownership section",
         "DD": "Data Distribution",
+        "NFH": "New Feature Highlight — in-product pop-ups for feature awareness and adoption",
+        "NLS": "Natural Language Search — conversational property search",
         "CTA": "Call To Action — interactive UI element prompting user action",
         "RoomVo": "Virtual staging/reimagination tool for property images",
         "Canopy MLS": "Charlotte-area MLS used as primary test MLS",
@@ -432,5 +434,106 @@
         "maxAgeDays": 14,
         "warnAgeDays": 7,
         "autoInvalidate": false
+    },
+    "knowledgeBase": {
+        "enabled": true,
+        "_comment": "Dynamic Knowledge Base configuration. Fetches real-time context from Confluence, Notion, SharePoint, or custom REST APIs to supplement local grounding data.",
+        "providers": [
+            {
+                "type": "confluence",
+                "name": "CoreLogic Confluence",
+                "enabled": true,
+                "priority": 1,
+                "baseUrl": "",
+                "spaceKeys": [],
+                "labels": [],
+                "ancestorPageIds": [],
+                "_comment": "baseUrl, spaceKeys, credentials are loaded from .env (CONFLUENCE_BASE_URL, CONFLUENCE_SPACE_KEYS, JIRA_EMAIL, JIRA_API_TOKEN). Set ancestorPageIds to restrict search to specific page trees."
+            }
+        ],
+        "cache": {
+            "enabled": true,
+            "ttlMinutes": 30,
+            "maxEntries": 200,
+            "searchCacheTtlMinutes": 5,
+            "persistPath": "knowledge-base-data/kb-cache.json",
+            "_comment": "Local BM25-indexed cache. TTL controls how long pages stay fresh. Stale pages are re-fetched on next access."
+        },
+        "intentDetection": {
+            "enabled": true,
+            "confidenceThreshold": 0.2,
+            "domainTerms": [
+                "OneHome",
+                "CoreLogic",
+                "MLS",
+                "ONMLS",
+                "property search",
+                "listing",
+                "agent branding",
+                "consumer funnel",
+                "CFM",
+                "ECFM",
+                "marketplace",
+                "EMC",
+                "estimated monthly cost",
+                "TOS",
+                "Reimagine Space",
+                "RoomVo",
+                "Ads Services Widget",
+                "syndication",
+                "SND",
+                "lead management",
+                "partial access",
+                "SAP",
+                "standalone agent page",
+                "OHO",
+                "OneHomeOwner",
+                "data distribution",
+                "DD",
+                "off-limits"
+            ],
+            "triggerTerms": [
+                "confluence",
+                "wiki",
+                "documentation",
+                "knowledge base",
+                "KB",
+                "how does",
+                "what is",
+                "explain",
+                "requirements",
+                "specification",
+                "spec",
+                "acceptance criteria",
+                "AC",
+                "business rule",
+                "workflow",
+                "process",
+                "architecture",
+                "design",
+                "PRD",
+                "product requirements"
+            ],
+            "_comment": "Intent detection determines when to fetch KB content automatically. domainTerms are project-specific; triggerTerms are generic knowledge-seeking indicators."
+        },
+        "retrieval": {
+            "maxResults": 10,
+            "maxContentChars": 4000,
+            "includeChildPages": true,
+            "childPageDepth": 2,
+            "boostFactors": {
+                "titleMatch": 2.0,
+                "labelMatch": 1.5,
+                "recentlyUpdated": 1.2
+            },
+            "_comment": "Controls how much KB content is included in agent context. maxContentChars is the budget for KB within the overall grounding context."
+        },
+        "sync": {
+            "autoSyncOnStart": false,
+            "syncIntervalMinutes": 0,
+            "syncPageIds": [],
+            "syncSpaceKeys": [],
+            "_comment": "Pre-indexing configuration. Set autoSyncOnStart=true to prefetch key pages at pipeline startup. syncPageIds/syncSpaceKeys override provider defaults for sync scope."
+        }
     }
 }
