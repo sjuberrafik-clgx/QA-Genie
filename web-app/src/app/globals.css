@@ -135,58 +135,106 @@ body {
 }
 
 /* ─── Markdown in Chat ───────────────────────────────────────────── */
-.chat-markdown h1,
-.chat-markdown h2,
-.chat-markdown h3 {
-    @apply font-semibold mt-3 mb-1;
-}
-
-.chat-markdown h1 {
-    @apply text-lg;
-}
-
-.chat-markdown h2 {
-    @apply text-base;
-}
-
 .chat-markdown {
     overflow-wrap: anywhere;
     word-break: break-word;
+    line-height: 1.7;
 }
 
+/* ── Headings ── */
+.chat-markdown h1,
+.chat-markdown h2,
+.chat-markdown h3 {
+    @apply font-semibold mt-4 mb-2 text-surface-900;
+}
+
+.chat-markdown h1 {
+    @apply text-lg pb-1;
+    border-bottom: 2px solid theme('colors.brand.200');
+}
+
+.chat-markdown h2 {
+    @apply text-base border-l-[3px] border-brand-500 pl-3;
+}
+
+.chat-markdown h3 {
+    @apply text-[15px] text-brand-700;
+}
+
+/* ── Paragraphs ── */
 .chat-markdown p {
-    @apply mb-2 leading-relaxed;
+    @apply mb-2.5 leading-relaxed;
 }
 
+/* ── Inline code ── */
 .chat-markdown code {
-    @apply bg-brand-50 text-brand-700 px-1.5 py-0.5 rounded text-[13px] font-mono;
+    @apply bg-brand-50 text-brand-700 px-1.5 py-0.5 rounded text-[13px] font-mono border border-brand-100;
 }
 
+/* ── Code blocks ── */
 .chat-markdown pre {
-    @apply bg-surface-900 text-green-400 p-4 rounded-xl my-3 overflow-x-auto text-sm border border-surface-800;
+    @apply bg-[#1e1e2e] text-green-400 p-4 rounded-xl my-3 overflow-x-auto text-sm;
+    border: 1px solid #2a2a3e;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 .chat-markdown pre code {
-    @apply bg-transparent text-green-400 p-0;
+    @apply bg-transparent text-green-400 p-0 border-0;
 }
 
+/* ── Lists ── */
 .chat-markdown ul,
 .chat-markdown ol {
-    @apply ml-5 mb-2;
+    @apply ml-1 mb-2 pl-0;
 }
 
 .chat-markdown ul {
-    @apply list-disc;
+    list-style: none;
+}
+
+.chat-markdown ul>li {
+    @apply mb-1.5 pl-5 relative;
+}
+
+.chat-markdown ul>li::before {
+    content: '';
+    @apply absolute left-0 top-[0.55em] w-2 h-2 rounded-full;
+    background: var(--gradient-brand);
+    opacity: 0.7;
 }
 
 .chat-markdown ol {
-    @apply list-decimal;
+    list-style: none;
+    counter-reset: ol-counter;
+}
+
+.chat-markdown ol>li {
+    @apply mb-1.5 pl-7 relative;
+    counter-increment: ol-counter;
+}
+
+.chat-markdown ol>li::before {
+    content: counter(ol-counter);
+    @apply absolute left-0 top-[0.15em] w-5 h-5 rounded-full text-[11px] font-bold flex items-center justify-center text-white;
+    background: var(--gradient-brand);
 }
 
 .chat-markdown li {
-    @apply mb-1;
+    @apply leading-relaxed;
 }
 
+/* Nested lists */
+.chat-markdown li ul,
+.chat-markdown li ol {
+    @apply mt-1;
+}
+
+.chat-markdown li ul>li::before {
+    @apply w-1.5 h-1.5;
+    opacity: 0.5;
+}
+
+/* ── Tables ── */
 .chat-markdown table {
     @apply w-full border-collapse my-3 text-sm overflow-hidden;
     border: 1px solid theme('colors.surface.200');
@@ -194,17 +242,32 @@ body {
 }
 
 .chat-markdown thead {
-    @apply bg-brand-50;
+    background: var(--gradient-brand);
 }
 
 .chat-markdown th {
-    @apply border border-brand-100 px-3 py-2.5 text-left font-semibold text-brand-800 text-xs uppercase tracking-wider;
+    @apply px-3 py-2.5 text-left font-semibold text-white text-xs uppercase tracking-wider;
+    border: none;
+}
+
+.chat-markdown th:not(:last-child) {
+    border-right: 1px solid rgba(255, 255, 255, 0.15);
 }
 
 .chat-markdown td {
     @apply border border-surface-200 px-3 py-2 text-surface-700;
 }
 
+.chat-markdown tbody tr:nth-child(even) {
+    @apply bg-surface-50/50;
+}
+
+.chat-markdown tbody tr:hover {
+    @apply bg-brand-50/30;
+    transition: background 0.15s;
+}
+
+/* ── Links ── */
 .chat-markdown a {
     @apply text-brand-600 underline decoration-brand-300 underline-offset-2 cursor-pointer;
     transition: color 0.15s, text-decoration-color 0.15s;
@@ -218,16 +281,168 @@ body {
     @apply text-brand-700;
 }
 
-.chat-markdown tbody tr:nth-child(even) {
-    @apply bg-surface-50/50;
-}
-
-.chat-markdown tbody tr:hover {
-    @apply bg-brand-50/30;
-}
-
+/* ── Blockquotes ── */
 .chat-markdown blockquote {
-    @apply border-l-4 border-brand-400 pl-4 my-3 text-surface-600 bg-brand-50/50 py-2 rounded-r-lg italic;
+    @apply border-l-4 border-brand-400 pl-4 my-3 text-surface-600 py-2 rounded-r-lg;
+    background: linear-gradient(135deg, rgba(28, 128, 144, 0.04) 0%, rgba(58, 186, 198, 0.06) 100%);
+}
+
+.chat-markdown blockquote p {
+    @apply mb-1;
+}
+
+/* ── Horizontal rules ── */
+.chat-markdown hr {
+    @apply my-4 border-0 h-[2px];
+    background: linear-gradient(to right, transparent, theme('colors.brand.200'), transparent);
+}
+
+/* ── Collapsible sections (<details>) ───────────────────────────── */
+.chat-markdown details {
+    @apply my-3 border border-surface-200 rounded-xl overflow-hidden;
+}
+
+.chat-markdown details summary {
+    @apply px-4 py-2.5 bg-surface-50 cursor-pointer font-medium text-sm text-surface-700 hover:bg-brand-50/50 transition-colors select-none list-none;
+}
+
+.chat-markdown details summary::-webkit-details-marker {
+    display: none;
+}
+
+.chat-markdown details summary::before {
+    content: '▸ ';
+    @apply text-brand-500 mr-1;
+}
+
+.chat-markdown details[open] summary::before {
+    content: '▾ ';
+}
+
+.chat-markdown details[open] summary {
+    @apply border-b border-surface-200;
+}
+
+.chat-markdown details> :not(summary) {
+    @apply px-4 py-2;
+}
+
+/* ── Source citation badges ─────────────────────────────────────── */
+.chat-markdown blockquote a {
+    @apply no-underline bg-brand-50 text-brand-700 px-2 py-0.5 rounded-md text-xs font-medium border border-brand-200 hover:bg-brand-100 transition-colors;
+}
+
+/* ── Strong / Bold ── */
+.chat-markdown strong {
+    @apply font-semibold text-surface-900;
+}
+
+/* ─── Mermaid Diagram Containers ─────────────────────────────────── */
+.mermaid-container {
+    @apply my-4 rounded-xl border overflow-hidden;
+}
+
+.mermaid-container.mermaid-rendered {
+    @apply border-brand-200/60 bg-white;
+    border-top: 3px solid theme('colors.brand.500');
+    padding: 16px 20px;
+    box-shadow: 0 1px 4px rgba(28, 128, 144, 0.06), 0 4px 12px rgba(0, 0, 0, 0.03);
+}
+
+.mermaid-container.mermaid-loading {
+    @apply border-surface-200 bg-surface-50/50;
+    padding: 16px;
+}
+
+.mermaid-container.mermaid-fallback {
+    @apply border-amber-200 bg-amber-50/30;
+    padding: 16px;
+}
+
+.mermaid-svg-wrapper {
+    @apply flex justify-center overflow-x-auto cursor-pointer;
+    position: relative;
+}
+
+.mermaid-svg-wrapper:hover::after {
+    content: 'Click to expand';
+    @apply absolute top-2 right-2 text-[10px] font-medium text-white px-2 py-1 rounded-md;
+    background: rgba(28, 128, 144, 0.75);
+    backdrop-filter: blur(4px);
+    pointer-events: none;
+    opacity: 0;
+    animation: fadeInHint 0.2s ease forwards;
+}
+
+@keyframes fadeInHint {
+    to {
+        opacity: 1;
+    }
+}
+
+.mermaid-svg-wrapper svg {
+    height: auto;
+    min-width: min-content;
+}
+
+/* ─── Mermaid Fullscreen Modal ───────────────────────────────────── */
+.mermaid-modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: rgba(15, 23, 42, 0.85);
+    backdrop-filter: blur(8px);
+    display: flex;
+    flex-direction: column;
+}
+
+.mermaid-modal-toolbar {
+    @apply flex items-center justify-between px-5 py-3 border-b;
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(12px);
+    border-color: theme('colors.surface.200');
+    flex-shrink: 0;
+}
+
+.mermaid-modal-btn {
+    @apply w-8 h-8 flex items-center justify-center rounded-lg text-surface-500 transition-all;
+}
+
+.mermaid-modal-btn:hover {
+    @apply bg-brand-50 text-brand-600;
+}
+
+.mermaid-modal-btn-close:hover {
+    @apply bg-red-50 text-red-500;
+}
+
+.mermaid-modal-canvas {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    touch-action: none;
+    user-select: none;
+}
+
+.mermaid-modal-diagram {
+    transform-origin: center center;
+    transition: none;
+    will-change: transform;
+}
+
+.mermaid-modal-diagram svg {
+    max-width: none !important;
+    height: auto;
+    filter: drop-shadow(0 4px 16px rgba(0, 0, 0, 0.12));
+}
+
+.mermaid-modal-hint {
+    @apply text-[11px] text-surface-400 text-center py-2;
+    background: rgba(255, 255, 255, 0.9);
+    border-top: 1px solid theme('colors.surface.200');
+    flex-shrink: 0;
 }
 
 /* ─── Stage Pipeline Line ────────────────────────────────────────── */

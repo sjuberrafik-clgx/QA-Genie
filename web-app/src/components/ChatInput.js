@@ -3,9 +3,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { PaperclipIcon } from '@/components/Icons';
 import ImagePreview from '@/components/ImagePreview';
+import { LIMITS } from '@/lib/constants';
 
-const MAX_IMAGES = 4;
-const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5 MB
+const MAX_IMAGES = LIMITS.MAX_IMAGES_PER_MESSAGE;
+const MAX_IMAGE_SIZE = LIMITS.MAX_IMAGE_SIZE_BYTES;
 const ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 
 export default function ChatInput({ onSend, onAbort, isProcessing, disabled, placeholder: customPlaceholder, prefillText, supportsImages = true }) {

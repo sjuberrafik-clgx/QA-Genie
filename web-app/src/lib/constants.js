@@ -25,6 +25,8 @@ export const RETRY = {
 export const LIMITS = {
     TITLE_MAX_LENGTH: 60,
     TITLE_TRUNCATED_LENGTH: 57,
+    MAX_IMAGES_PER_MESSAGE: 10,
+    MAX_IMAGE_SIZE_BYTES: 5 * 1024 * 1024, // 5 MB per image
 };
 
 // ─── SSE Event Types ────────────────────────────────────────────────────────

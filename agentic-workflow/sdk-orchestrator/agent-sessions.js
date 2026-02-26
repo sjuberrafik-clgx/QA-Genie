@@ -109,6 +109,16 @@ function buildDynamicContext(agentName, options = {}) {
         );
     }
 
+    // Knowledge base context — external documentation (Confluence, Notion, etc.)
+    // This section is for standalone KB context injection (outside of grounding)
+    if (options.kbContext && !options.groundingContext?.includes('KNOWLEDGE BASE:')) {
+        sections.push(
+            '<knowledge_base_context>',
+            options.kbContext,
+            '</knowledge_base_context>'
+        );
+    }
+
     return sections.length > 0 ? '\n\n' + sections.join('\n') : '';
 }
 
@@ -136,6 +146,7 @@ class AgentSessionFactory {
 
         // Initialize grounding store if enabled
         this._groundingStore = null;
+        this._kbInitPromise = null;
         const groundingEnabled = options.config?.sdk?.grounding?.enabled !== false;
         if (groundingEnabled) {
             const gMod = getGroundingModule();
@@ -146,6 +157,14 @@ class AgentSessionFactory {
                         verbose: this.verbose,
                     });
                     this._log('📚 GroundingStore initialized');
+
+                    // Initialize Knowledge Base connector (async, non-blocking)
+                    const kbEnabled = options.config?.sdk?.grounding?.knowledgeBase?.enabled !== false;
+                    if (kbEnabled && this._groundingStore) {
+                        this._kbInitPromise = this._groundingStore.initKnowledgeBase().catch(err => {
+                            this._log(`⚠️ KB connector init failed: ${err.message}`);
+                        });
+                    }
                 } catch (err) {
                     this._log(`⚠️ GroundingStore init failed: ${err.message}`);
                 }
@@ -182,9 +201,35 @@ class AgentSessionFactory {
         const gStore = context.groundingStore || this._groundingStore;
         if (gStore) {
             try {
+                // 2a. Fetch KB context asynchronously (if available)
+                let kbContext = null;
+                const kbEnabled = this.config?.sdk?.grounding?.knowledgeBase?.enabled !== false;
+                if (kbEnabled) {
+                    // Wait for KB init to complete if it's still initializing
+                    if (this._kbInitPromise) {
+                        await this._kbInitPromise;
+                        this._kbInitPromise = null;
+                    }
+                    const taskDesc = context.taskDescription || context.ticketContext || '';
+                    if (taskDesc) {
+                        try {
+                            kbContext = await gStore.buildKBContext(taskDesc, {
+                                agentName,
+                                maxChars: this.config?.sdk?.grounding?.knowledgeBase?.maxContextChars || 4000,
+                            });
+                            if (kbContext) {
+                                this._log(`📖 KB context: ${kbContext.length} chars for ${agentName}`);
+                            }
+                        } catch (kbErr) {
+                            this._log(`⚠️ KB context fetch failed: ${kbErr.message}`);
+                        }
+                    }
+                }
+
                 groundingContext = gStore.buildGroundingContext(agentName, {
                     taskDescription: context.taskDescription || context.ticketContext || '',
                     ticketId: context.ticketId || null,
+                    kbContext,
                 });
                 this._log(`📚 Grounding context: ${groundingContext.length} chars for ${agentName}`);
             } catch (err) {

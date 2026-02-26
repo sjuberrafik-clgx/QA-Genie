@@ -55,8 +55,8 @@ This workspace uses a 6-agent orchestrated workflow for end-to-end QA automation
 **Key config files:**
 * `agentic-workflow/config/workflow-config.json` — Pipeline configuration (browser, MCP strategy, quality gates, **project paths**)
 * `agentic-workflow/config/assertion-config.json` — Assertion patterns and rules for generated scripts
-* `agentic-workflow/config/grounding-config.json` — Local context grounding (feature map, domain terminology, index settings)
-* `agentic-workflow/.env` — Environment-specific values (Jira credentials, URLs, MCP settings)
+* `agentic-workflow/config/grounding-config.json` — Local context grounding (feature map, domain terminology, index settings, **knowledge base**)
+* `agentic-workflow/.env` — Environment-specific values (Jira credentials, URLs, MCP settings, **KB credentials**)
 
 ## Grounding System (Local Context for LLM Accuracy)
 
@@ -66,7 +66,7 @@ The grounding system provides local project context to LLM agents, reducing hall
 * `agentic-workflow/config/grounding-config.json` — Per-project config (feature map, domain terms, rules, index settings). **This is the primary file users customize for their application.**
 * `agentic-workflow/grounding/text-indexer.js` — TF-IDF/BM25 full-text search engine with class-aware chunking
 * `agentic-workflow/grounding/selector-registry.js` — Centralized selector knowledge base (page objects + MCP snapshots)
-* `agentic-workflow/grounding/grounding-store.js` — Main orchestrator tying index + selectors + config together
+* `agentic-workflow/grounding/grounding-store.js` — Main orchestrator tying index + selectors + config + **knowledge base** together
 * `agentic-workflow/grounding-data/` — Persisted index files (auto-generated, gitignored)
 
 **SDK tools for agents (available when grounding is enabled):**
@@ -74,6 +74,8 @@ The grounding system provides local project context to LLM agents, reducing hall
 * `get_feature_map` — Feature-specific context (pages, page objects, business functions, keywords)
 * `get_selector_recommendations` — Ranked selectors by reliability for a page/element
 * `check_existing_coverage` — Find existing spec files to avoid duplicate automation
+* `search_knowledge_base` — Search external KB (Confluence, Notion, SharePoint) for documentation
+* `get_knowledge_base_page` — Fetch full content of a specific KB page by ID
 
 **CLI management:**
 ```bash
@@ -83,6 +85,43 @@ node agentic-workflow/scripts/grounding-setup.js stats     # Show index statisti
 node agentic-workflow/scripts/grounding-setup.js validate  # Validate config
 node agentic-workflow/scripts/grounding-setup.js query "search filter locators"  # Test query
 ```
+
+## Knowledge Base Connector (External Documentation)
+
+The KB Connector integrates external documentation sources into the grounding pipeline, giving agents real-time access to Confluence, Notion, SharePoint, or custom REST APIs.
+
+**Key components:**
+* `agentic-workflow/knowledge-base/kb-connector.js` — Main orchestrator (hybrid fetch: cache → live → cache result)
+* `agentic-workflow/knowledge-base/confluence-provider.js` — Confluence REST API v1 implementation
+* `agentic-workflow/knowledge-base/kb-cache.js` — Local BM25-indexed cache with TTL/LRU eviction
+* `agentic-workflow/knowledge-base/intent-detector.js` — Deterministic query intent analysis (zero LLM calls)
+* `agentic-workflow/knowledge-base/kb-provider.js` — Abstract base class for all providers
+* `agentic-workflow/config/grounding-config.json` → `knowledgeBase` section — Provider, cache, and intent config
+
+**How it works:**
+1. **Intent Detection** — Analyzes queries for domain terms and trigger words (configurable threshold)
+2. **Cache Check** — BM25 search over locally cached pages (sub-millisecond)
+3. **Live Fallback** — If cache misses or is stale, queries the live API
+4. **Context Injection** — KB content injected as Section 7 in `buildGroundingContext()` (4K char budget)
+
+**Environment variables (in `agentic-workflow/.env`):**
+* `KB_ENABLED=true` — Master toggle
+* `CONFLUENCE_BASE_URL=https://your-org.atlassian.net/wiki` — Confluence instance URL
+* `CONFLUENCE_SPACE_KEYS=PROJ,DOCS` — Optional: restrict to specific spaces
+* Reuses `JIRA_EMAIL` + `JIRA_API_TOKEN` for Confluence authentication
+
+**CLI management:**
+```bash
+node agentic-workflow/scripts/kb-setup.js init       # Initialize + test connections
+node agentic-workflow/scripts/kb-setup.js sync       # Pre-sync pages into cache
+node agentic-workflow/scripts/kb-setup.js query "search filters"  # Test a query
+node agentic-workflow/scripts/kb-setup.js stats      # Show cache/provider statistics
+node agentic-workflow/scripts/kb-setup.js validate   # Validate config + credentials
+node agentic-workflow/scripts/kb-setup.js spaces     # List spaces from all providers
+node agentic-workflow/scripts/kb-setup.js clear      # Clear local cache
+```
+
+**For full details, see:** `agentic-workflow/docs/KNOWLEDGE_BASE_SYSTEM.md`
 
 **Jira project:** Configured in `agentic-workflow/.env` as `JIRA_PROJECT_KEY` | **Cloud ID:** Configured in `agentic-workflow/.env` as `JIRA_CLOUD_ID`
 

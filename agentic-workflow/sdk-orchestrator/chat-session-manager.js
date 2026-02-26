@@ -310,6 +310,14 @@ class ChatSessionManager extends EventEmitter {
                         '- Use **bold** for section labels like **Description :-**, **Steps to Reproduce :-**.',
                         '- The description field supports rich formatting — markdown bold, headings, tables, and lists will be automatically converted to Jira\'s native format (ADF) for proper rendering.',
                         '',
+                        'RESPONSE FORMATTING — Rich Markdown:',
+                        '- Use ## and ### headings to structure long responses into clear sections.',
+                        '- For flowcharts, process diagrams, decision trees, or architecture overviews, use mermaid fenced code blocks (```mermaid). The chat UI renders these as interactive SVG diagrams.',
+                        '- Use markdown tables for structured comparisons, feature matrices, or data.',
+                        '- When citing Knowledge Base sources, use blockquote format: > **Source:** [Page Title](url)',
+                        '- For long supplementary content, use collapsible sections: <details><summary>Title</summary>Content</details>',
+                        '- When explaining multi-step processes, prefer a mermaid flowchart over numbered text lists.',
+                        '',
                         agentPrompt,
                     ];
                     // Append copilot-instructions for project context
@@ -405,6 +413,16 @@ class ChatSessionManager extends EventEmitter {
             '- Page Objects pattern with POmanager',
             '- PopupHandler utility for modal dismissal',
             '- Test data via userTokens from testData.js',
+            '',
+            'RESPONSE FORMATTING — Rich Markdown:',
+            '- Use ## and ### headings to structure long responses into clear sections.',
+            '- For flowcharts, process diagrams, decision trees, or architecture overviews, use mermaid fenced code blocks (```mermaid). The chat UI renders these as interactive SVG diagrams.',
+            '- Use markdown tables (|col1|col2|) for structured comparisons, feature matrices, or data.',
+            '- When citing Knowledge Base sources, use blockquote format: > **Source:** [Page Title](url)',
+            '- Use **bold** for key terms and `inline code` for technical identifiers.',
+            '- For long supplementary content, use collapsible sections: <details><summary>Section Title</summary>Content here</details>',
+            '- Keep the main answer concise; put detailed breakdowns in collapsible sections.',
+            '- When explaining multi-step processes, prefer a mermaid flowchart over numbered text lists.',
         ];
 
         // Add copilot-instructions if available (extract critical sections, not blind truncation)
@@ -926,9 +944,10 @@ class ChatSessionManager extends EventEmitter {
                     });
                 }
             }
-            // Cap at 10 attachments per session to prevent memory bloat
-            if (entry.sessionAttachments.length > 10) {
-                entry.sessionAttachments = entry.sessionAttachments.slice(-10);
+            // Cap at 20 attachments per session to prevent memory bloat
+            // (supports up to 10 images per message with headroom for follow-up messages)
+            if (entry.sessionAttachments.length > 20) {
+                entry.sessionAttachments = entry.sessionAttachments.slice(-20);
             }
         }
         entry.messages.push(historyMessage);
