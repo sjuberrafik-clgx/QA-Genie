@@ -21,7 +21,17 @@
 const { EventEmitter } = require('events');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { getFollowupProvider } = require('./followup-provider');
+
+// ─── Grounding System (lazy-loaded) ─────────────────────────────────────────
+let _groundingModule;
+function _getGroundingModule() {
+    if (_groundingModule === undefined) {
+        try { _groundingModule = require('../grounding/grounding-store'); } catch { _groundingModule = null; }
+    }
+    return _groundingModule;
+}
 
 // ─── Instruction Extraction Helper ──────────────────────────────────────────
 
@@ -138,6 +148,24 @@ class ChatSessionManager extends EventEmitter {
         this.config = options.config;
         this.learningStore = options.learningStore || null;
 
+        // Initialize grounding store for local context enrichment
+        this._groundingStore = null;
+        const groundingEnabled = this.config?.sdk?.grounding?.enabled !== false;
+        if (groundingEnabled) {
+            const gMod = _getGroundingModule();
+            if (gMod) {
+                try {
+                    this._groundingStore = gMod.getGroundingStore({
+                        projectRoot: path.join(__dirname, '..', '..'),
+                        verbose: false,
+                    });
+                    console.log('[ChatManager] 📚 GroundingStore initialized for dashboard sessions');
+                } catch (err) {
+                    console.warn(`[ChatManager] ⚠️ GroundingStore init failed: ${err.message}`);
+                }
+            }
+        }
+
         // Track active sessions: sessionId → { session, sseClients[], createdAt }
         this._sessions = new Map();
 
@@ -155,7 +183,80 @@ class ChatSessionManager extends EventEmitter {
     }
 
     // ─── Valid agent modes ──────────────────────────────────────────────────
-    static VALID_AGENTS = ['testgenie', 'scriptgenerator', 'buggenie'];
+    static VALID_AGENTS = ['testgenie', 'scriptgenerator', 'buggenie', 'taskgenie'];
+
+    // ─── Temp file management for image attachments ─────────────────────────
+    // The Copilot SDK only accepts { type: 'file', path: '/path/to/file' }
+    // attachments — NOT inline base64 data. We decode images to temp files,
+    // pass the paths to the SDK, then clean up after a delay.
+
+    /** MIME type → file extension mapping for image attachments. */
+    static _IMAGE_EXTENSIONS = {
+        'image/png': '.png',
+        'image/jpeg': '.jpg',
+        'image/gif': '.gif',
+        'image/webp': '.webp',
+    };
+
+    /**
+     * Convert base64 image attachments to temp files for the Copilot SDK.
+     * Returns SDK-compatible attachment objects with file paths.
+     *
+     * @param {Object[]} attachments - Frontend attachments: [{ type: 'image', media_type, data }]
+     * @returns {{ sdkAttachments: Object[], tempFiles: string[] }}
+     */
+    _convertAttachmentsToTempFiles(attachments) {
+        const sdkAttachments = [];
+        const tempFiles = [];
+        const tempDir = os.tmpdir();
+
+        for (let i = 0; i < attachments.length; i++) {
+            const att = attachments[i];
+            if (att.type !== 'image' || !att.data) continue;
+
+            const ext = ChatSessionManager._IMAGE_EXTENSIONS[att.media_type] || '.png';
+            const fileName = `copilot-img-${Date.now()}-${i}${ext}`;
+            const filePath = path.join(tempDir, fileName);
+
+            try {
+                const buffer = Buffer.from(att.data, 'base64');
+                fs.writeFileSync(filePath, buffer);
+                tempFiles.push(filePath);
+
+                sdkAttachments.push({
+                    type: 'file',
+                    path: filePath,
+                    displayName: `attachment-${i + 1}${ext}`,
+                });
+
+                console.log(`[ChatManager] \u{1F5BC}\uFE0F  Wrote temp image: ${fileName} (${(buffer.length / 1024).toFixed(1)} KB)`);
+            } catch (err) {
+                console.error(`[ChatManager] \u274C Failed to write temp image ${i}:`, err.message);
+            }
+        }
+
+        return { sdkAttachments, tempFiles };
+    }
+
+    /**
+     * Clean up temp image files after a delay (gives SDK time to read them).
+     *
+     * @param {string[]} tempFiles - Paths to delete
+     * @param {number} [delayMs=60000] - Delay before cleanup (default: 60s)
+     */
+    _scheduleCleanup(tempFiles, delayMs = 60000) {
+        if (!tempFiles.length) return;
+        setTimeout(() => {
+            for (const fp of tempFiles) {
+                try {
+                    if (fs.existsSync(fp)) {
+                        fs.unlinkSync(fp);
+                        console.log(`[ChatManager] \u{1F5D1}\uFE0F  Cleaned up temp image: ${path.basename(fp)}`);
+                    }
+                } catch { /* non-critical */ }
+            }
+        }, delayMs);
+    }
 
     /**
      * Build system prompt for chat sessions.
@@ -220,6 +321,22 @@ class ChatSessionManager extends EventEmitter {
                             parts.push('', '<project_standards>', critical, '</project_standards>');
                         }
                     } catch { /* ignore */ }
+
+                    // Inject grounding context (domain terms, project rules, relevant code)
+                    if (this._groundingStore) {
+                        try {
+                            const groundingCtx = this._groundingStore.buildGroundingContext(agentMode, {
+                                taskDescription: '',
+                                ticketId: null,
+                            });
+                            if (groundingCtx && groundingCtx.length > 0) {
+                                parts.push('', '<grounding_context>', groundingCtx, '</grounding_context>');
+                                console.log(`[ChatManager] 📚 Injected grounding context for ${agentMode} (${groundingCtx.length} chars)`);
+                            }
+                        } catch (err) {
+                            console.warn(`[ChatManager] ⚠️ Grounding context failed for ${agentMode}: ${err.message}`);
+                        }
+                    }
 
                     // SDK context: strip VS Code MCP tool prefix so LLM uses raw names
                     console.log(`[ChatManager] Loaded agent prompt: ${agentMode}.agent.md`);
@@ -316,6 +433,8 @@ class ChatSessionManager extends EventEmitter {
             const toolOpts = {
                 learningStore: this.learningStore,
                 config: this.config,
+                groundingStore: this._groundingStore || null,
+                chatManager: this,
             };
 
             let tools;
@@ -334,6 +453,7 @@ class ChatSessionManager extends EventEmitter {
                     ...createCustomTools(this.defineTool, 'codereviewer', toolOpts),
                     ...createCustomTools(this.defineTool, 'testgenie', toolOpts),
                     ...createCustomTools(this.defineTool, 'buggenie', toolOpts),
+                    ...createCustomTools(this.defineTool, 'taskgenie', toolOpts),
                 ];
             }
             // Deduplicate by tool name
@@ -355,7 +475,7 @@ class ChatSessionManager extends EventEmitter {
      *
      * @param {Object} [options]
      * @param {string} [options.model]     - Model override
-     * @param {string|null} [options.agentMode] - Agent mode: null (default), 'testgenie', 'scriptgenerator', 'buggenie'
+     * @param {string|null} [options.agentMode] - Agent mode: null (default), 'testgenie', 'scriptgenerator', 'buggenie', 'taskgenie'
      * @returns {Promise<{ sessionId, model, createdAt, agentMode }>}
      */
     async createSession(options = {}) {
@@ -460,7 +580,7 @@ class ChatSessionManager extends EventEmitter {
 
             const mcpServers = {};
             const needsBrowser = !agentMode || agentMode === 'scriptgenerator';
-            const needsJira = !agentMode || agentMode === 'testgenie' || agentMode === 'buggenie';
+            const needsJira = !agentMode || agentMode === 'testgenie' || agentMode === 'buggenie' || agentMode === 'taskgenie';
 
             // 1. Unified Automation MCP — live browser exploration
             if (needsBrowser) {
@@ -470,7 +590,7 @@ class ChatSessionManager extends EventEmitter {
                     // ScriptGenerator gets 'core' (~65 tools instead of 141), saving ~25K tokens.
                     // The tools/call handler still routes ANY valid tool name regardless of
                     // listing — filtering optimizes context, not capabilities.
-                    const AGENT_PROFILES = { scriptgenerator: 'core', testgenie: 'core', buggenie: 'core', codereviewer: 'core' };
+                    const AGENT_PROFILES = { scriptgenerator: 'core', testgenie: 'core', buggenie: 'core', codereviewer: 'core', taskgenie: 'core' };
                     const toolProfile = AGENT_PROFILES[agentMode] || 'full';
                     mcpServers['unified-automation'] = {
                         type: 'local',
@@ -784,8 +904,34 @@ class ChatSessionManager extends EventEmitter {
         if (!entry) throw new Error(`Session ${sessionId} not found`);
         if (entry.archived) throw new Error(`Session ${sessionId} is archived (read-only). Create a new session to chat.`);
 
-        // Track user message
-        entry.messages.push({ role: 'user', content, timestamp: new Date().toISOString() });
+        // Track user message (store attachment metadata only — no base64 in history)
+        const historyMessage = { role: 'user', content, timestamp: new Date().toISOString() };
+        if (attachments && attachments.length > 0) {
+            historyMessage.attachmentMeta = attachments.map(att => ({
+                type: att.type,
+                media_type: att.media_type,
+                size: att.data ? Math.ceil(att.data.length * 0.75) : 0, // estimated decoded size
+            }));
+
+            // Persist attachment data in session for Jira ticket attachment forwarding
+            // BugGenie may need these later when the user approves bug ticket creation
+            if (!entry.sessionAttachments) entry.sessionAttachments = [];
+            for (const att of attachments) {
+                if (att.type === 'image' && att.data) {
+                    entry.sessionAttachments.push({
+                        type: att.type,
+                        media_type: att.media_type,
+                        data: att.data, // base64 — retained for Jira upload
+                        timestamp: new Date().toISOString(),
+                    });
+                }
+            }
+            // Cap at 10 attachments per session to prevent memory bloat
+            if (entry.sessionAttachments.length > 10) {
+                entry.sessionAttachments = entry.sessionAttachments.slice(-10);
+            }
+        }
+        entry.messages.push(historyMessage);
 
         // Auto-set session title from first user message
         if (!entry.title) {
@@ -798,11 +944,25 @@ class ChatSessionManager extends EventEmitter {
         // Send to SDK session (non-blocking — response streams via events)
         // IMPORTANT: SDK MessageOptions requires { prompt }, not { content }
         const messageOptions = { prompt: content };
+
+        // Convert base64 image attachments → temp files for SDK
+        // The Copilot SDK only accepts { type: 'file', path } attachments,
+        // NOT inline base64 data. We decode to temp files and clean up after.
+        let tempFiles = [];
         if (attachments && attachments.length > 0) {
-            messageOptions.attachments = attachments;
+            const { sdkAttachments, tempFiles: files } = this._convertAttachmentsToTempFiles(attachments);
+            tempFiles = files;
+            if (sdkAttachments.length > 0) {
+                messageOptions.attachments = sdkAttachments;
+                console.log(`[ChatManager] \u{1F4CE} Sending ${sdkAttachments.length} image(s) as file attachments to SDK`);
+            }
         }
 
         const messageId = await entry.session.send(messageOptions);
+
+        // Schedule temp file cleanup (60s delay to ensure SDK has read them)
+        this._scheduleCleanup(tempFiles);
+
         return { messageId };
     }
 
@@ -944,6 +1104,22 @@ class ChatSessionManager extends EventEmitter {
         }
 
         this._sessions.delete(sessionId);
+
+        // Clean up stale temp image files (older than 5 minutes)
+        try {
+            const tempDir = os.tmpdir();
+            const staleFiles = fs.readdirSync(tempDir).filter(f => f.startsWith('copilot-img-'));
+            for (const f of staleFiles) {
+                const fp = path.join(tempDir, f);
+                try {
+                    const stat = fs.statSync(fp);
+                    if (Date.now() - stat.mtimeMs > 5 * 60 * 1000) {
+                        fs.unlinkSync(fp);
+                        console.log(`[ChatManager] \u{1F5D1}\uFE0F  Cleaned stale temp image: ${f}`);
+                    }
+                } catch { /* ignore individual file errors */ }
+            }
+        } catch { /* non-critical */ }
 
         // Clean up followup tracking for this session
         this._followupProvider.clearSession(sessionId);

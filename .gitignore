@@ -37,5 +37,17 @@ agentic-workflow/test-results/
 agentic-workflow/test-artifacts/
 agentic-workflow/learning-data/
 
+# ─── Testing Artifacts (generated, not project code) ─────────────────────────
+# Test case Excel files
+agentic-workflow/test-cases/
+# MCP exploration snapshots
+agentic-workflow/exploration-data/
+# Auto-generated grounding index files
+agentic-workflow/grounding-data/
+# Generated test scripts
+tests/specs/
+# Temp Excel lock files
+~$*.xlsx
+
 # ─── Playwright Cache ────────────────────────────────────────────────────────
 blob-report/

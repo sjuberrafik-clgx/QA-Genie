@@ -393,6 +393,15 @@
                 "test(",
                 "expect",
                 "await"
+            ],
+            "taskgenie": [
+                "task",
+                "testing",
+                "test case",
+                "assign",
+                "link",
+                "jira",
+                "ticket"
             ]
         }
     },

@@ -163,6 +163,30 @@ const CONTENT_PATTERNS = [
             { label: 'Check historical failures', prompt: 'Check if this error has occurred before using the learning store', category: 'explore', icon: 'history' },
         ],
     },
+    {
+        // AI generated a bug review copy (BugGenie)
+        patterns: [/steps to reproduce/i, /expected.*behav/i, /actual.*behav/i, /bug.*summary/i, /defect.*description/i, /review.*copy/i, /bug.*review/i],
+        followups: [
+            { label: 'Create bug ticket', prompt: 'Create a Jira defect ticket from this review copy', category: 'action', icon: 'bug' },
+            { label: 'Edit review copy', prompt: 'I want to modify the review copy before creating the ticket. Let me suggest changes.', category: 'review', icon: 'edit' },
+        ],
+    },
+    {
+        // AI created a Jira ticket/task successfully
+        patterns: [/ticket.*created/i, /created.*successfully/i, /browse\/AOTF-/i, /jira.*ticket.*url/i, /issue.*created/i],
+        followups: [
+            { label: 'Create another ticket', prompt: 'Create another Jira ticket for a different issue', category: 'action', icon: 'ticket' },
+            { label: 'Generate test cases', prompt: 'Generate test cases for the created ticket', category: 'action', icon: 'checklist' },
+        ],
+    },
+    {
+        // AI generated a testing task
+        patterns: [/testing task/i, /task.*created/i, /linked.*to.*AOTF/i, /assigned.*to/i],
+        followups: [
+            { label: 'Create another task', prompt: 'Create a Testing task for another Jira ticket', category: 'action', icon: 'ticket' },
+            { label: 'View task details', prompt: 'Show me the details of the created Testing task', category: 'review', icon: 'document' },
+        ],
+    },
 ];
 
 // ─── Agent Mode Followups ───────────────────────────────────────────────────
@@ -182,6 +206,10 @@ const AGENT_MODE_DEFAULTS = {
     buggenie: [
         { label: 'Review test results', prompt: 'Show the latest test execution results and failures', category: 'review', icon: 'chart' },
         { label: 'Create bug ticket', prompt: 'Create a Jira defect ticket for the latest test failures', category: 'action', icon: 'bug' },
+    ],
+    taskgenie: [
+        { label: 'Create Testing task', prompt: 'Create a linked Testing task for Jira ticket AOTF-', category: 'action', icon: 'ticket', prefill: true },
+        { label: 'Fetch Jira ticket', prompt: 'Fetch Jira ticket details for AOTF-', category: 'action', icon: 'ticket', prefill: true },
     ],
     default: [
         { label: 'Start pipeline', prompt: 'Run the full automation pipeline for Jira ticket AOTF-', category: 'action', icon: 'play', prefill: true },

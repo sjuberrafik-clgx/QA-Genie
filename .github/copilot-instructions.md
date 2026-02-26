@@ -38,7 +38,7 @@ If `frameworkMode` is `"basic"`, the POmanager/launchBrowser/testData patterns a
 
 ## Agent Ecosystem
 
-This workspace uses a 5-agent orchestrated workflow for end-to-end QA automation:
+This workspace uses a 6-agent orchestrated workflow for end-to-end QA automation:
 
 | Agent | Role |
 |---|---|
@@ -46,6 +46,7 @@ This workspace uses a 5-agent orchestrated workflow for end-to-end QA automation
 | `@testgenie` | Generates test cases from Jira tickets → Excel + chat markdown |
 | `@scriptgenerator` | Generates Playwright `.spec.js` scripts using MCP exploration |
 | `@buggenie` | Creates Jira defect tickets from test failures |
+| `@taskgenie` | Creates linked Testing tasks in Jira with auto-assignment and optional embedded test cases |
 | `@codereviewer` | Reviews generated scripts for quality, patterns, and best practices |
 
 **Pipeline stages (sequential, each validated before proceeding):**

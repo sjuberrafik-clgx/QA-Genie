@@ -106,7 +106,7 @@ class Router {
 
     /**
      * Read JSON body from request.
-     * Enforces a 1 MB size limit to prevent memory exhaustion.
+     * Default 1 MB limit; callers can override (e.g. 10 MB for image attachments).
      */
     _readBody(req, maxBytes = 1024 * 1024) {
         return new Promise((resolve, reject) => {
@@ -161,8 +161,11 @@ class Router {
 
         try {
             const query = this._parseQuery(req.url);
+            // Use higher body limit for chat message endpoint (supports base64 image attachments)
+            const isImageRoute = req.url.includes('/messages');
+            const maxBodyBytes = isImageRoute ? 10 * 1024 * 1024 : 1024 * 1024;
             const body = ['POST', 'PUT', 'PATCH'].includes(req.method)
-                ? await this._readBody(req)
+                ? await this._readBody(req, maxBodyBytes)
                 : {};
 
             req.params = route.params;
@@ -944,14 +947,45 @@ async function startServer(options = {}) {
      * POST /api/chat/sessions/:sessionId/messages
      * Body: { content, attachments? }
      * Returns: { messageId }
+     *
+     * Attachments are optional base64-encoded images:
+     *   [{ type: 'image', media_type: 'image/png', data: '<base64>' }]
+     * Body limit raised to 10 MB to accommodate image data.
      */
     router.post('/api/chat/sessions/:sessionId/messages', async (req, res) => {
         if (!chatManager) return json(res, 503, { error: 'Chat manager not ready' });
         const { sessionId } = req.params;
         const { content, attachments } = req.body;
-        if (!content) return badRequest(res, 'Message content is required');
+        if (!content && (!attachments || attachments.length === 0)) {
+            return badRequest(res, 'Message content or attachments required');
+        }
+
+        // Validate attachments if present
+        if (attachments && Array.isArray(attachments)) {
+            const VALID_MEDIA = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+            if (attachments.length > 4) {
+                return badRequest(res, 'Maximum 4 image attachments per message');
+            }
+            for (const att of attachments) {
+                if (!att.type || att.type !== 'image') {
+                    return badRequest(res, 'Attachment type must be "image"');
+                }
+                if (!VALID_MEDIA.includes(att.media_type)) {
+                    return badRequest(res, `Unsupported media type: ${att.media_type}. Allowed: ${VALID_MEDIA.join(', ')}`);
+                }
+                if (!att.data || typeof att.data !== 'string') {
+                    return badRequest(res, 'Attachment data must be a base64 string');
+                }
+                // Check decoded size (~5 MB max per image)
+                const estimatedSize = Math.ceil(att.data.length * 0.75);
+                if (estimatedSize > 5 * 1024 * 1024) {
+                    return badRequest(res, 'Individual image attachment must be under 5 MB');
+                }
+            }
+        }
+
         try {
-            const result = await chatManager.sendMessage(sessionId, content, attachments);
+            const result = await chatManager.sendMessage(sessionId, content || '', attachments);
             ok(res, result);
         } catch (error) {
             if (error.message.includes('not found')) return notFound(res, error.message);
