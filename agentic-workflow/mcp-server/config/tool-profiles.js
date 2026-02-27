@@ -92,6 +92,62 @@ export const TOOL_PROFILES = {
         'context',            // create_context, close_context, switch_context, list_contexts
     ],
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // COGNITIVE QA LOOP — Phase-Specific Profiles
+    // ═══════════════════════════════════════════════════════════════════════
+    // Each micro-phase of the Cognitive ScriptGenerator gets ONLY the tools
+    // it needs, radically reducing context window pressure (~4K–10K tokens
+    // per phase vs ~30K for the full core profile).
+
+    /**
+     * EXPLORER-NAV — Navigation + discovery tools for the Explorer phase (~35 tools)
+     * Covers: navigate, snapshot, find elements by semantic selectors, check states,
+     * extract content for assertions, verify page URLs/titles.
+     * Excludes: interaction tools (click/type/fill) — those use explorer-interact.
+     */
+    'explorer-nav': [
+        'navigation',        // navigate, navigate_back, navigate_forward, reload
+        'snapshot',          // snapshot, screenshot
+        'selectors',         // get_by_role, get_by_text, get_by_label, get_by_test_id, etc.
+        'element-state',     // is_visible, is_enabled, is_checked, is_hidden, is_disabled
+        'element-content',   // get_text_content, get_inner_text, get_attribute, get_input_value
+        'page-info',         // get_page_url, get_page_title, get_viewport_size
+        'assertions',        // expect_url, expect_title, expect_element_text, etc.
+        'wait',              // wait_for, wait_for_element
+        'testing',           // verify_element_visible, verify_text_visible
+    ],
+
+    /**
+     * EXPLORER-INTERACT — Interaction tools for the Explorer phase (~25 tools)
+     * Used when the Explorer needs to click buttons, fill forms, or type text
+     * to navigate through the application flow and reach deeper pages.
+     */
+    'explorer-interact': [
+        'navigation',        // navigate, navigate_back, reload
+        'snapshot',          // snapshot (re-snapshot after interaction)
+        'interaction',       // click, type, hover, drag, select_option, check
+        'form',              // fill_form, file_upload
+        'form-control',      // clear_input, focus, blur, press_key
+        'selectors',         // get_by_role, get_by_text (to find what to interact with)
+        'element-state',     // is_visible, is_enabled (pre-check before interaction)
+        'wait',              // wait_for, wait_for_element (wait after interaction)
+        'dialog',            // handle_dialog (popups after interaction)
+        'tab',               // tabs, list_all_pages (new tabs opened by clicks)
+    ],
+
+    /**
+     * DRYRUN — Minimal selector verification tools (~15 tools)
+     * Used by the Dry-Run Validator to re-verify that all selectors in the
+     * generated script still resolve to real elements on the page.
+     */
+    dryrun: [
+        'navigation',        // navigate to each page
+        'selectors',         // get_by_role, get_by_test_id, etc. (verify selector resolves)
+        'element-state',     // is_visible, is_enabled (confirm element is interactable)
+        'page-info',         // get_page_url, get_page_title (verify navigation state)
+        'snapshot',          // snapshot (if re-discovery needed)
+    ],
+
     /**
      * FULL — All 141 tools. Used as fallback or for default (no agent) sessions.
      * This is equivalent to the current behavior (no filtering).
@@ -112,6 +168,17 @@ export const AGENT_TOOL_PROFILES = {
     testgenie: 'core',
     buggenie: 'core',
     codereviewer: 'core',
+
+    // ── Cognitive QA Loop Phase Profiles ──
+    // Each micro-phase of the cognitive loop gets a minimal tool set.
+    // Analyst and Coder get NO MCP tools (pure reasoning / code generation).
+    'cognitive-analyst': null,          // No MCP tools needed (pure reasoning)
+    'cognitive-explorer-nav': 'explorer-nav',
+    'cognitive-explorer-interact': 'explorer-interact',
+    'cognitive-coder': null,            // No MCP tools needed (code generation)
+    'cognitive-reviewer': null,         // No MCP tools needed (code review)
+    'cognitive-dryrun': 'dryrun',
+
     // Default (null / unspecified) agent mode → full toolkit
     default: 'full',
 };

@@ -718,4 +718,221 @@ function getSnapshotQualityData(agentNamePrefix) {
     };
 }
 
-module.exports = { createEnforcementHooks, SessionEnforcementState, getSnapshotQualityData };
+// ─── Cognitive Phase Enforcement ────────────────────────────────────────────
+
+/**
+ * Phase-specific enforcement rules for the Cognitive QA Loop.
+ *
+ * Each phase gets structural constraints that PHYSICALLY prevent the LLM
+ * from violating the separation of concerns:
+ *
+ *   Analyst   → NO MCP, NO file writes (pure reasoning)
+ *   Explorer  → NO file writes, ONLY MCP tools
+ *   Coder     → NO MCP, ALLOW file writes
+ *   Reviewer  → NO MCP, NO file writes (pure reasoning)
+ *   DryRun    → NO file writes, ONLY selector-checking MCP tools
+ */
+
+const COGNITIVE_PHASE_RULES = {
+    'cognitive-analyst': {
+        allowMCP: false,
+        allowFileWrite: false,
+        allowedToolPatterns: [], // No tools at all — pure reasoning
+        description: 'Analyst phase: pure reasoning only — no MCP or file operations',
+    },
+    'cognitive-explorer-nav': {
+        allowMCP: true,
+        allowFileWrite: false,
+        allowedToolPatterns: ['unified_'], // All MCP tools
+        blockedToolPatterns: ['write_file', 'create_file', 'edit'],
+        description: 'Explorer phase: MCP exploration only — no file writes',
+    },
+    'cognitive-explorer-interact': {
+        allowMCP: true,
+        allowFileWrite: false,
+        allowedToolPatterns: ['unified_'],
+        blockedToolPatterns: ['write_file', 'create_file', 'edit'],
+        description: 'Explorer-interact phase: MCP interaction only — no file writes',
+    },
+    'cognitive-coder': {
+        allowMCP: false,
+        allowFileWrite: true,
+        blockedToolPatterns: ['unified_'],
+        description: 'Coder phase: file writes only — no MCP exploration',
+    },
+    'cognitive-reviewer': {
+        allowMCP: false,
+        allowFileWrite: false,
+        allowedToolPatterns: [],
+        description: 'Reviewer phase: pure reasoning only — no MCP or file operations',
+    },
+    'cognitive-dryrun': {
+        allowMCP: true,
+        allowFileWrite: false,
+        allowedToolPatterns: [
+            'unified_navigate', 'unified_get_by_role', 'unified_get_by_test_id',
+            'unified_get_by_label', 'unified_get_by_text', 'unified_get_by_placeholder',
+            'unified_is_visible', 'unified_is_enabled', 'unified_snapshot',
+            'unified_get_page_url', 'unified_get_text_content', 'unified_get_attribute',
+        ],
+        blockedToolPatterns: ['write_file', 'create_file', 'edit'],
+        description: 'DryRun phase: selector verification only — limited MCP, no file writes',
+    },
+};
+
+/**
+ * Create enforcement hooks for a cognitive phase.
+ *
+ * @param {string} phaseName - Cognitive phase agent name (e.g., 'cognitive-analyst')
+ * @param {Object} [options] - { verbose }
+ * @returns {Object} SessionHooks compatible with Copilot SDK
+ */
+function createCognitiveEnforcementHooks(phaseName, options = {}) {
+    const { verbose = false } = options;
+    const rules = COGNITIVE_PHASE_RULES[phaseName];
+
+    if (!rules) {
+        // Unknown phase — fall back to standard scriptgenerator hooks
+        return createEnforcementHooks('scriptgenerator', options);
+    }
+
+    const stableFallbackId = `${phaseName}-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    const log = (msg) => { if (verbose) console.log(`[CognitiveEnforcement:${phaseName}] ${msg}`); };
+
+    const hooks = {};
+
+    hooks.onPreToolUse = async (input, invocation) => {
+        const toolName = input.toolName || '';
+        const toolArgs = input.toolArgs || {};
+
+        // ── Block MCP tools when not allowed ────────────────────────
+        if (!rules.allowMCP && toolName.includes('unified_')) {
+            log(`🚫 DENIED: MCP tool "${toolName}" blocked in ${phaseName}`);
+            return {
+                permissionDecision: 'deny',
+                additionalContext:
+                    `⛔ BLOCKED: MCP tools are not available in the ${phaseName} phase.\n` +
+                    `${rules.description}\n` +
+                    'Complete your analysis using the context already provided.',
+            };
+        }
+
+        // ── Block file writes when not allowed ──────────────────────
+        const isFileWrite = ['write_file', 'create_file', 'edit'].some(t => toolName.includes(t));
+        if (!rules.allowFileWrite && isFileWrite) {
+            log(`🚫 DENIED: File write "${toolName}" blocked in ${phaseName}`);
+            return {
+                permissionDecision: 'deny',
+                additionalContext:
+                    `⛔ BLOCKED: File creation/editing is not available in the ${phaseName} phase.\n` +
+                    `${rules.description}\n` +
+                    'Output your analysis in the response text, not as files.',
+            };
+        }
+
+        // ── Block shell/terminal tools always ───────────────────────
+        const shellToolPatterns = ['runInTerminal', 'powershell', 'terminal', 'bash', 'cmd', 'run_in_terminal', 'shell'];
+        const isShellTool = shellToolPatterns.some(p => toolName.toLowerCase().includes(p.toLowerCase()));
+        if (isShellTool) {
+            log(`🚫 DENIED: Shell tool "${toolName}" blocked in ${phaseName}`);
+            return {
+                permissionDecision: 'deny',
+                additionalContext: '⛔ BLOCKED: Shell/terminal tools are prohibited in cognitive phases.',
+            };
+        }
+
+        // ── DryRun: only allow specific MCP tools ───────────────────
+        if (phaseName === 'cognitive-dryrun' && toolName.includes('unified_')) {
+            const allowed = rules.allowedToolPatterns.some(pattern => toolName.includes(pattern));
+            if (!allowed) {
+                log(`🚫 DENIED: MCP tool "${toolName}" not in DryRun allowlist`);
+                return {
+                    permissionDecision: 'deny',
+                    additionalContext:
+                        `⛔ BLOCKED: "${toolName}" is not allowed during dry-run validation.\n` +
+                        'Only selector verification tools are permitted:\n' +
+                        '- unified_navigate, unified_snapshot\n' +
+                        '- unified_get_by_role, unified_get_by_test_id, unified_get_by_label, unified_get_by_text\n' +
+                        '- unified_is_visible, unified_is_enabled\n' +
+                        '- unified_get_page_url, unified_get_text_content',
+                };
+            }
+        }
+
+        // ── Block waitForTimeout in coder ───────────────────────────
+        if (phaseName === 'cognitive-coder' && isFileWrite) {
+            const content = toolArgs.content || toolArgs.newString || '';
+            if (content.includes('waitForTimeout')) {
+                return {
+                    permissionDecision: 'deny',
+                    additionalContext:
+                        '⛔ BLOCKED: page.waitForTimeout() is a PROHIBITED anti-pattern.\n' +
+                        'Use condition-based waits: waitForLoadState(), toBeVisible(), waitForSelector().',
+                };
+            }
+        }
+
+        return { permissionDecision: 'allow' };
+    };
+
+    hooks.onPostToolUse = async (input, invocation) => {
+        // ── Auto-validate spec files written by Coder ───────────────
+        if (phaseName === 'cognitive-coder') {
+            const toolName = input.toolName || '';
+            const isFileWrite = ['write_file', 'create_file'].some(t => toolName.includes(t));
+            const filePath = input.toolArgs?.filePath || input.toolArgs?.path || '';
+
+            if (isFileWrite && filePath.endsWith('.spec.js')) {
+                log('Auto-validating generated spec file...');
+                try {
+                    const { validateGeneratedScript } = require('../scripts/validate-script');
+                    const content = fs.readFileSync(filePath, 'utf-8');
+                    const origLog = console.log;
+                    console.log = () => { };
+                    const result = validateGeneratedScript(filePath, content);
+                    console.log = origLog;
+
+                    if (!result.valid) {
+                        return {
+                            additionalContext:
+                                '🚨 AUTO-VALIDATION FAILED:\n' +
+                                result.errors.join('\n') + '\n\n' +
+                                'Please fix these issues in the spec file.',
+                        };
+                    }
+                } catch (error) {
+                    log(`Validation error: ${error.message}`);
+                }
+            }
+        }
+
+        return {};
+    };
+
+    hooks.onErrorOccurred = async (input, invocation) => {
+        const errorMsg = input.error || '';
+
+        if (errorMsg.includes('MCP') || errorMsg.includes('connection refused')) {
+            return { errorHandling: 'retry', additionalContext: 'MCP server may not be ready. Retrying.' };
+        }
+        if (errorMsg.includes('timeout')) {
+            return { errorHandling: 'retry', additionalContext: 'Timed out. Retrying with extended wait.' };
+        }
+        return { errorHandling: 'skip' };
+    };
+
+    hooks.onSessionStart = async (input, invocation) => {
+        log(`Cognitive phase session started: ${phaseName}`);
+        return { additionalContext: '' };
+    };
+
+    return hooks;
+}
+
+module.exports = {
+    createEnforcementHooks,
+    createCognitiveEnforcementHooks,
+    SessionEnforcementState,
+    getSnapshotQualityData,
+    COGNITIVE_PHASE_RULES,
+};

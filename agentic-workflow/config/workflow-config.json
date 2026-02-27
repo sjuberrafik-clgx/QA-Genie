@@ -691,6 +691,57 @@
             "warnThreshold": 60
         }
     },
+    "cognitiveLoop": {
+        "_comment": "Cognitive QA Loop — replaces single-shot ScriptGenerator with 5 focused micro-phases that mimic human QA thinking. Each phase is a separate LLM session with phase-specific tool profiles (0-35 tools vs 65 monolithic). Feature flag: set enabled=false to use legacy single-shot generation.",
+        "enabled": true,
+        "fallbackToLegacy": true,
+        "_fallbackNote": "If cognitive loop fails (e.g., Analyst cannot parse plan), automatically fall back to legacy single-shot ScriptGenerator.",
+        "phases": {
+            "analyst": {
+                "enabled": true,
+                "timeout": 120000,
+                "maxTokens": 5000,
+                "_comment": "Pure reasoning — creates structured exploration plan from test cases. NO MCP, NO file writes."
+            },
+            "explorer": {
+                "enabled": true,
+                "timeout": 300000,
+                "maxTokens": 8000,
+                "_comment": "Plan-guided MCP exploration — follows Analyst plan step-by-step. MCP only, NO file writes."
+            },
+            "coder": {
+                "enabled": true,
+                "timeout": 180000,
+                "maxTokens": 10000,
+                "_comment": "Incremental script generation using ONLY verified selectors. File writes only, NO MCP."
+            },
+            "reviewer": {
+                "enabled": true,
+                "timeout": 120000,
+                "maxTokens": 8000,
+                "_comment": "Pre-execution quality gate with 7-category review checklist. Pure reasoning only."
+            },
+            "dryrun": {
+                "enabled": true,
+                "timeout": 180000,
+                "maxTokens": 4000,
+                "_comment": "Pre-execution selector verification on live page. Limited MCP (selector tools only), NO file writes."
+            }
+        },
+        "retryLimits": {
+            "maxCoderRetries": 2,
+            "_coderRetryNote": "Coder↔Reviewer inner loop: if Reviewer says FAIL, Coder re-generates with fix instructions.",
+            "maxDryRunRetries": 1,
+            "_dryRunRetryNote": "DryRun→Coder loop: if selector verification fails, Coder fixes broken selectors."
+        },
+        "qualityThresholds": {
+            "analystPlanMinScore": 50,
+            "explorerMinScore": 30,
+            "reviewerConfidenceThreshold": 70,
+            "dryRunPassRate": 80,
+            "_comment": "Minimum scores for each phase to proceed. Below these thresholds, the loop retries or falls back to legacy."
+        }
+    },
     "sdk": {
         "_comment": "Copilot SDK Orchestrator configuration — enables programmatic pipeline control",
         "enabled": true,

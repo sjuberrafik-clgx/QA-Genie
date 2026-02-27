@@ -84,6 +84,9 @@ class PipelineRunner {
         this.projectRoot = path.join(__dirname, '..', '..');
         this._contextStoreManager = getContextStoreManager();
         this._eventBridge = options.eventBridge || getEventBridge();
+
+        // Grounding store — pull from options or from session factory's internal store
+        this.groundingStore = options.groundingStore || options.sessionFactory?._groundingStore || null;
     }
 
     /**
@@ -476,7 +479,7 @@ class PipelineRunner {
                 return this._runQualityGate('excel', context);
 
             case STAGES.SCRIPTGEN:
-                return this._runScriptGenerator(context, onProgress);
+                return this._runScriptGeneratorDispatch(context, onProgress);
 
             case STAGES.QG_SCRIPT:
                 return this._runQualityGate('script', context);
@@ -654,6 +657,110 @@ class PipelineRunner {
             if (sessionId) {
                 await this.sessionFactory.destroySession(sessionId).catch(() => { });
             }
+        }
+    }
+
+    async _runScriptGeneratorDispatch(context, onProgress) {
+        const cognitiveConfig = this.config.cognitiveLoop || {};
+        const useCognitive = cognitiveConfig.enabled !== false;
+
+        if (useCognitive) {
+            this._log('🧠 Cognitive QA Loop ENABLED — using multi-phase generation');
+            try {
+                const result = await this._runCognitiveScriptGen(context, onProgress);
+
+                // If cognitive loop succeeded, return its result
+                if (result.success) return result;
+
+                // If fallback is enabled and cognitive loop failed, try legacy
+                if (cognitiveConfig.fallbackToLegacy !== false) {
+                    this._log('⚠️ Cognitive loop failed — falling back to legacy single-shot ScriptGenerator');
+                    onProgress(STAGES.SCRIPTGEN, 'Cognitive loop failed, falling back to legacy generation...');
+                    return this._runScriptGenerator(context, onProgress);
+                }
+
+                return result;
+            } catch (error) {
+                this._log(`❌ Cognitive loop error: ${error.message}`);
+                if (cognitiveConfig.fallbackToLegacy !== false) {
+                    this._log('⚠️ Falling back to legacy ScriptGenerator');
+                    return this._runScriptGenerator(context, onProgress);
+                }
+                throw error;
+            }
+        }
+
+        // Legacy mode
+        return this._runScriptGenerator(context, onProgress);
+    }
+
+    async _runCognitiveScriptGen(context, onProgress) {
+        this._log('🧠 Running Cognitive Script Generation (5-phase loop)...');
+
+        try {
+            const { CognitiveScriptGenerator } = require('./cognitive-script-generator');
+
+            const cognitive = new CognitiveScriptGenerator({
+                sessionFactory: this.sessionFactory,
+                config: this.config,
+                learningStore: this.learningStore,
+                groundingStore: this.groundingStore,
+                eventBridge: this._eventBridge,
+                verbose: this.verbose,
+            });
+
+            const result = await cognitive.generate({
+                ticketId: context.ticketId,
+                testCases: context.testCasesPath
+                    ? `Test cases at: ${context.testCasesPath}`
+                    : '',
+                testCasesPath: context.testCasesPath,
+                appUrl: context.appUrl,
+                contextStore: context.contextStore,
+            }, (phase, message) => {
+                onProgress(STAGES.SCRIPTGEN, `[${phase.toUpperCase()}] ${message}`);
+            });
+
+            // Map cognitive result to pipeline stage result
+            if (result.success && result.specPath) {
+                context.specPath = result.specPath;
+                context.explorationPath = result.explorationPath;
+
+                // Register artifacts
+                if (context.contextStore) {
+                    context.contextStore.registerArtifact('cognitive-scriptgen', 'specFile', result.specPath, {
+                        summary: `Cognitive-generated Playwright spec for ${context.ticketId}`,
+                        confidence: result.confidence,
+                        phases: result.phaseResults,
+                    });
+                    if (result.explorationPath) {
+                        context.contextStore.registerArtifact('cognitive-scriptgen', 'exploration', result.explorationPath, {
+                            summary: `Cognitive exploration data for ${context.ticketId}`,
+                        });
+                    }
+                }
+            }
+
+            return {
+                success: result.success,
+                blocking: !result.success,
+                message: result.success
+                    ? `Cognitive script generated (confidence: ${result.confidence}%): ${path.basename(result.specPath)}`
+                    : `Cognitive loop ${result.status}: ${result.metrics?.error || 'phase failed'}`,
+                artifact: result.specPath,
+                exploration: result.explorationPath,
+                error: result.success ? null : `Cognitive loop status: ${result.status}`,
+                cognitiveMetrics: result.metrics,
+                phaseResults: result.phaseResults,
+            };
+        } catch (error) {
+            this._log(`❌ Cognitive script generation error: ${error.message}`);
+            return {
+                success: false,
+                blocking: true,
+                message: `Cognitive generation failed: ${error.message}`,
+                error: error.message,
+            };
         }
     }
 

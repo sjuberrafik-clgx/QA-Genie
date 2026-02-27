@@ -37,6 +37,14 @@ const ENTRY_TYPES = {
     QUESTION: 'question',
     ANSWER: 'answer',
     NOTE: 'note',
+
+    // ── Cognitive Loop Phase Handoff Types ───────────────────────────
+    EXPLORATION_PLAN: 'exploration_plan',       // Analyst → Explorer
+    VERIFIED_SELECTORS: 'verified_selectors',   // Explorer → Coder
+    PAGE_TRANSITION_GRAPH: 'page_transition_graph', // Explorer → Coder/DryRun
+    GENERATION_PROGRESS: 'generation_progress', // Coder incremental progress
+    REVIEW_FEEDBACK: 'review_feedback',         // Reviewer → Coder (retry)
+    DRYRUN_RESULTS: 'dryrun_results',           // DryRun → Coder (fix)
 };
 
 // ─── Shared Context Store ───────────────────────────────────────────────────
@@ -202,6 +210,222 @@ class SharedContextStore {
             content: note,
             metadata,
         });
+    }
+
+    // ─── Cognitive Loop Phase Handoff Methods ───────────────────────
+
+    /**
+     * Store the exploration plan from the Analyst phase.
+     * @param {Object} plan - Structured exploration plan
+     * @param {number} [score] - Plan quality score (0–100)
+     */
+    storeExplorationPlan(plan, score = 0) {
+        this._phaseData = this._phaseData || {};
+        this._phaseData.explorationPlan = plan;
+
+        return this._addEntry({
+            type: ENTRY_TYPES.EXPLORATION_PLAN,
+            agent: 'cognitive-analyst',
+            content: `Exploration plan with ${plan?.testCaseMapping?.length || 0} mapped test steps`,
+            metadata: { plan, score },
+        });
+    }
+
+    /**
+     * Retrieve the exploration plan for the Explorer phase.
+     * @returns {Object|null}
+     */
+    getExplorationPlan() {
+        if (this._phaseData?.explorationPlan) return this._phaseData.explorationPlan;
+        const entries = this.query({ type: ENTRY_TYPES.EXPLORATION_PLAN });
+        return entries.length > 0 ? entries[entries.length - 1].metadata?.plan || null : null;
+    }
+
+    /**
+     * Store verified selectors from the Explorer phase.
+     * @param {Object[]} selectors - Array of { page, element, selector, method, verified }
+     */
+    storeVerifiedSelectors(selectors) {
+        this._phaseData = this._phaseData || {};
+        this._phaseData.verifiedSelectors = selectors;
+
+        return this._addEntry({
+            type: ENTRY_TYPES.VERIFIED_SELECTORS,
+            agent: 'cognitive-explorer',
+            content: `${selectors.length} selectors verified via MCP`,
+            metadata: { selectors, count: selectors.length },
+        });
+    }
+
+    /**
+     * Retrieve verified selectors for the Coder phase.
+     * @returns {Object[]|null}
+     */
+    getVerifiedSelectors() {
+        if (this._phaseData?.verifiedSelectors) return this._phaseData.verifiedSelectors;
+        const entries = this.query({ type: ENTRY_TYPES.VERIFIED_SELECTORS });
+        return entries.length > 0 ? entries[entries.length - 1].metadata?.selectors || null : null;
+    }
+
+    /**
+     * Store page transition graph from the Explorer phase.
+     * @param {Object} graph - { nodes: [{url, title}], edges: [{from, to, action}] }
+     */
+    storePageTransitionGraph(graph) {
+        this._phaseData = this._phaseData || {};
+        this._phaseData.pageTransitionGraph = graph;
+
+        return this._addEntry({
+            type: ENTRY_TYPES.PAGE_TRANSITION_GRAPH,
+            agent: 'cognitive-explorer',
+            content: `Page graph: ${graph?.nodes?.length || 0} pages, ${graph?.edges?.length || 0} transitions`,
+            metadata: { graph },
+        });
+    }
+
+    /**
+     * Retrieve the page transition graph.
+     * @returns {Object|null}
+     */
+    getPageTransitionGraph() {
+        if (this._phaseData?.pageTransitionGraph) return this._phaseData.pageTransitionGraph;
+        const entries = this.query({ type: ENTRY_TYPES.PAGE_TRANSITION_GRAPH });
+        return entries.length > 0 ? entries[entries.length - 1].metadata?.graph || null : null;
+    }
+
+    /**
+     * Track incremental code generation progress.
+     * @param {string} stage - Current generation stage (e.g., 'imports', 'beforeAll', 'test_1')
+     * @param {Object} [details] - Stage-specific details
+     */
+    trackGenerationProgress(stage, details = {}) {
+        return this._addEntry({
+            type: ENTRY_TYPES.GENERATION_PROGRESS,
+            agent: 'cognitive-coder',
+            content: `Code generation stage: ${stage}`,
+            metadata: { stage, ...details },
+        });
+    }
+
+    /**
+     * Store review feedback for Coder retry.
+     * @param {string} verdict - 'PASS' or 'FAIL'
+     * @param {Object[]} issues - Array of { category, severity, description, fix }
+     * @param {number} confidence - Review confidence (0–100)
+     */
+    storeReviewFeedback(verdict, issues, confidence) {
+        this._phaseData = this._phaseData || {};
+        this._phaseData.lastReview = { verdict, issues, confidence };
+
+        return this._addEntry({
+            type: ENTRY_TYPES.REVIEW_FEEDBACK,
+            agent: 'cognitive-reviewer',
+            content: `Review verdict: ${verdict} (confidence: ${confidence}%, issues: ${issues.length})`,
+            metadata: { verdict, issues, confidence },
+        });
+    }
+
+    /**
+     * Retrieve last review feedback.
+     * @returns {Object|null}
+     */
+    getLastReview() {
+        if (this._phaseData?.lastReview) return this._phaseData.lastReview;
+        const entries = this.query({ type: ENTRY_TYPES.REVIEW_FEEDBACK });
+        return entries.length > 0 ? entries[entries.length - 1].metadata || null : null;
+    }
+
+    /**
+     * Store dry-run validation results for Coder retry.
+     * @param {string} verdict - 'PROCEED', 'FIX_REQUIRED', 'MANUAL_REVIEW'
+     * @param {Object[]} brokenSelectors - Array of { selector, error, suggestion }
+     * @param {number} score - Pass rate (0–100)
+     */
+    storeDryRunResults(verdict, brokenSelectors, score) {
+        this._phaseData = this._phaseData || {};
+        this._phaseData.lastDryRun = { verdict, brokenSelectors, score };
+
+        return this._addEntry({
+            type: ENTRY_TYPES.DRYRUN_RESULTS,
+            agent: 'cognitive-dryrun',
+            content: `DryRun: ${verdict} (score: ${score}%, broken: ${brokenSelectors.length})`,
+            metadata: { verdict, brokenSelectors, score },
+        });
+    }
+
+    /**
+     * Retrieve last dry-run results.
+     * @returns {Object|null}
+     */
+    getLastDryRun() {
+        if (this._phaseData?.lastDryRun) return this._phaseData.lastDryRun;
+        const entries = this.query({ type: ENTRY_TYPES.DRYRUN_RESULTS });
+        return entries.length > 0 ? entries[entries.length - 1].metadata || null : null;
+    }
+
+    /**
+     * Build a cognitive-phase-aware context summary.
+     * Extends the standard summary with phase handoff data.
+     *
+     * @param {string} targetPhase - Phase name ('analyst', 'explorer', 'coder', 'reviewer', 'dryrun')
+     * @returns {string} Formatted context block
+     */
+    buildPhaseContext(targetPhase) {
+        const sections = [];
+
+        switch (targetPhase) {
+            case 'explorer': {
+                const plan = this.getExplorationPlan();
+                if (plan) {
+                    sections.push('## Exploration Plan (from Analyst)');
+                    sections.push(JSON.stringify(plan, null, 2));
+                }
+                break;
+            }
+            case 'coder': {
+                const selectors = this.getVerifiedSelectors();
+                if (selectors) {
+                    sections.push(`## Verified Selectors (${selectors.length} total)`);
+                    selectors.forEach(s => {
+                        sections.push(`- [${s.page}] ${s.element}: ${s.selector} (${s.method})`);
+                    });
+                }
+                const graph = this.getPageTransitionGraph();
+                if (graph) {
+                    sections.push('## Page Transitions');
+                    (graph.edges || []).forEach(e => {
+                        sections.push(`- ${e.from} → ${e.to} (${e.action})`);
+                    });
+                }
+                const review = this.getLastReview();
+                if (review && review.verdict === 'FAIL') {
+                    sections.push('## Review Fixes Required');
+                    (review.issues || []).forEach(i => {
+                        sections.push(`- [${i.severity}] ${i.category}: ${i.description}`);
+                        if (i.fix) sections.push(`  Fix: ${i.fix}`);
+                    });
+                }
+                break;
+            }
+            case 'reviewer': {
+                const selectors = this.getVerifiedSelectors();
+                if (selectors) {
+                    sections.push(`## Verified Selectors for Cross-Reference (${selectors.length})`);
+                }
+                break;
+            }
+            case 'dryrun': {
+                const selectors = this.getVerifiedSelectors();
+                if (selectors) {
+                    sections.push(`## Expected Selectors (${selectors.length})`);
+                }
+                break;
+            }
+        }
+
+        return sections.length > 0
+            ? '\n<phase_context>\n' + sections.join('\n') + '\n</phase_context>'
+            : '';
     }
 
     // ─── Read Operations ────────────────────────────────────────────

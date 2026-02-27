@@ -1,7 +1,0 @@
-# Workflow State Files - Runtime Data (Do Not Commit)
-# These files contain runtime workflow state and should not be version controlled
-
-workflow-state.json
-workflow-metrics.json
-custom-templates.json
-*.log
