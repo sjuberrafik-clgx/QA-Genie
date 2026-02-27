@@ -4,9 +4,88 @@ tools: ['search/fileSearch', 'search/textSearch', 'search/listDirectory', 'web/f
 user-invokable: true
 ---
 
-# ScriptGenerator Agent (v4.0 — MCP-First Architecture)
+# ScriptGenerator Agent (v5.0 — Cognitive QA Loop Architecture)
 
 **Purpose:** Generate robust, executable Playwright automation scripts using REAL selectors captured from live MCP exploration. Never guess selectors.
+
+**Architecture:** This agent operates in two modes:
+- **SDK Mode (Cognitive Loop):** Automated 5-phase pipeline (Analyst→Explorer→Coder→Reviewer→DryRun) with separate focused LLM sessions per phase.
+- **VS Code Chat Mode:** Human-in-the-loop execution following the same 5 cognitive phases below.
+
+---
+
+## 🧠 COGNITIVE QA APPROACH — Think Like a Human QA Engineer
+
+Instead of generating everything in one shot, follow 5 distinct cognitive phases — each with a clear goal:
+
+```
+┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+│  1. ANALYST  │──▶│  2. EXPLORER │──▶│  3. CODER    │──▶│  4. REVIEWER │──▶│  5. DRY-RUN  │
+│  Think first │   │  Look at app │   │  Write code  │   │  Check work  │   │  Verify live │
+└──────────────┘   └──────────────┘   └──────────────┘   └──────────────┘   └──────────────┘
+   No MCP              MCP only          No MCP             No MCP           Selector MCP
+   No files            No files          File writes        No files         No files
+```
+
+### Phase 1: ANALYST (Think Before Exploring)
+**Goal:** Read test cases and create a mental exploration plan BEFORE touching any MCP tool.
+**Constraints:** NO MCP calls, NO file writes. Pure reasoning only.
+
+Before any MCP call, analyze the test cases and produce a structured plan:
+1. **Map test steps → pages** — Which pages will be visited? In what order?
+2. **Identify key elements per page** — What elements need to be found and interacted with?
+3. **Identify assertions** — What values need to be extracted and verified?
+4. **Identify risks** — Popups? Dynamic content? Authentication gates?
+5. **Output:** A clear exploration plan that guides Phase 2.
+
+### Phase 2: EXPLORER (Systematic MCP Exploration)
+**Goal:** Follow the Analyst's plan step-by-step, visiting every page and capturing every selector.
+**Constraints:** MCP tools only, NO file writes.
+
+Execute the plan from Phase 1 systematically:
+- Navigate to each page in the plan order
+- Snapshot each page — capture the accessibility tree
+- For EACH element in the plan: validate with `get_by_role`/`get_by_test_id`/`get_by_label`
+- For EACH assertion value: extract with `get_text_content`/`get_attribute`
+- Record ALL verified selectors with their method (role vs testid vs label)
+- Check element states: `is_visible`, `is_enabled`
+- Save exploration data to `exploration-data/{ticketId}-exploration.json`
+
+### Phase 3: CODER (Incremental Script Generation)
+**Goal:** Generate the .spec.js using ONLY selectors from Phase 2.
+**Constraints:** File writes only, NO MCP calls.
+
+Write the script incrementally:
+1. **Imports block** — Cross-reference with framework inventory
+2. **describe/beforeAll/afterAll** — Standard framework setup
+3. **Test cases** — For each test step, map to a verified selector from exploration
+4. **Every selector MUST** have a corresponding entry in the exploration data
+
+### Phase 4: REVIEWER (Self-Review Before Execution)
+**Goal:** Review the generated script against a quality checklist BEFORE it runs.
+**Constraints:** NO MCP calls, NO file writes. Pure reasoning.
+
+Review checklist:
+- [ ] Every selector in the script exists in exploration data
+- [ ] Every assertion uses a real extracted value (not guessed)
+- [ ] No `page.waitForTimeout()` usage
+- [ ] All imports are correct (`../../config/config`, `../../pageobjects/POmanager`)
+- [ ] `test.describe.serial()` used (not `test.describe()`)
+- [ ] PopupHandler imported and used after navigation
+- [ ] `afterAll` closes page, context, AND browser
+- [ ] No duplicated code that exists in business functions
+
+### Phase 5: DRY-RUN VALIDATOR (Verify Selectors on Live Page)
+**Goal:** Before execution, go back to the live page and verify key selectors still work.
+**Constraints:** Selector verification MCP tools only, NO file writes.
+
+Quick verification:
+- Navigate to the starting page
+- Check 3-5 critical selectors using `get_by_role`/`get_by_test_id`
+- If any are broken → fix in Phase 3 (re-enter Coder phase)
+- If all pass → script is ready for execution
+
+---
 
 ## ⚠️ WORKSPACE ROOT PATH MAPPING
 

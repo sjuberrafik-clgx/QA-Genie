@@ -27,17 +27,12 @@ function sanitizeMermaidCode(raw) {
         .replace(/&nbsp;/g, ' ');
 
     // ── Step 2: Replace <br/> with SPACE (not newline) ──
-    // Converting to \n breaks mermaid: labels like D{Check<br/>Config} become
-    // D{Check\nConfig} which splits the node across two lines. Mermaid's parser
-    // then sees an incomplete node on each line and emits parse errors.
-    // Spaces are safe — labels stay on one line and render correctly.
     code = code.replace(/<br\s*\/?>/gi, ' ');
 
     // ── Step 3: Remove remaining HTML tags (preserve --> arrows) ──
     code = code.replace(/<(?!\s*-)[^>]+>/g, '');
 
     // ── Step 4: Replace literal \n escape sequences with space ──
-    // LLMs sometimes emit backslash-n in labels as a text escape
     code = code.replace(/\\n/g, ' ');
 
     // ── Step 5: Clean up whitespace ──
@@ -46,20 +41,42 @@ function sanitizeMermaidCode(raw) {
         .join('\n')
         .trim();
 
-    // ── Step 6: Auto-quote problematic node labels ──
+    // ── Step 6: Auto-quote problematic node / edge labels ──
     // Characters like / ( ) : ; ' inside unquoted labels break mermaid's parser.
-    // Wrapping in "..." fixes this. Only handles [...] and {...} shapes.
-    const needsQuote = /[\/():;']/;
+    // Wrapping in "..." fixes this.
+    const needsQuote = /[\/():;',]/;
+    const esc = s => s.replace(/"/g, "'");
+
     code = code.split('\n').map(line => {
-        // [...] labels — quote if contains problematic chars
-        line = line.replace(/(\b\w+)\[([^\]"]+)\]/g, (m, id, c) =>
-            needsQuote.test(c) ? `${id}["${c.replace(/"/g, "'")}"]` : m);
-        // {...} labels (diamonds)
-        line = line.replace(/(\b\w+)\{([^\}"]+)\}/g, (m, id, c) =>
-            needsQuote.test(c) ? `${id}{"${c.replace(/"/g, "'")}"}` : m);
-        // Edge labels: -- text --> with special chars → -->|text|
+        // [...] rectangle labels — use a permissive ID match (not \b)
+        line = line.replace(/(\w+)\[([^\]"]+)\]/g, (m, id, c) =>
+            needsQuote.test(c) ? `${id}["${esc(c)}"]` : m);
+
+        // {...} diamond labels
+        line = line.replace(/(\w+)\{([^\}"]+)\}/g, (m, id, c) =>
+            needsQuote.test(c) ? `${id}{"${esc(c)}"}` : m);
+
+        // (...) stadium / round-bracket labels  (NOT ((...)) double-parens)
+        // Match ID( content ) but not ID(( content )) — negative lookahead
+        line = line.replace(/(\w+)\((?!\()([^)"]+)\)(?!\))/g, (m, id, c) =>
+            needsQuote.test(c) ? `${id}("${esc(c)}")` : m);
+
+        // ([...]) subroutine labels
+        line = line.replace(/(\w+)\(\[([^\]"]+)\]\)/g, (m, id, c) =>
+            needsQuote.test(c) ? `${id}(["${esc(c)}"])` : m);
+
+        // ((...)) circle labels
+        line = line.replace(/(\w+)\(\(([^)"]+)\)\)/g, (m, id, c) =>
+            needsQuote.test(c) ? `${id}(("${esc(c)}"))` : m);
+
+        // |...| pipe-delimited edge labels — quote if they contain special chars
+        line = line.replace(/(-->|---)\|([^|"]+)\|/g, (m, arrow, label) =>
+            needsQuote.test(label) ? `${arrow}|"${esc(label)}"|` : m);
+
+        // Edge labels: -- text --> with special chars → -->|"text"|
         line = line.replace(/ -- ([^|\n]+?) -->/g, (m, label) =>
-            needsQuote.test(label.trim()) ? ` -->|${label.trim()}|` : m);
+            needsQuote.test(label.trim()) ? ` -->|"${esc(label.trim())}"|` : m);
+
         return line;
     }).join('\n');
 
@@ -200,6 +217,27 @@ function DiagramModal({ svgHtml, diagramType, onClose }) {
     );
 }
 
+/**
+ * Heuristic: is the mermaid code likely complete (not mid-stream)?
+ * During SSE streaming, partial mermaid fragments arrive token-by-token.
+ * We avoid rendering until the code looks structurally complete.
+ */
+function looksComplete(code) {
+    if (!code || code.length < 10) return false;
+    const trimmed = code.trim();
+    // Must start with a known diagram keyword
+    const firstLine = trimmed.split('\n')[0].trim().toLowerCase();
+    const validStart = /^(graph|flowchart|sequencediagram|classd|state|erdiagram|gantt|pie|journey|gitgraph|mindmap|timeline)/.test(firstLine);
+    if (!validStart) return false;
+    // Must have at least 2 lines (header + content)
+    const lines = trimmed.split('\n').filter(l => l.trim().length > 0);
+    if (lines.length < 2) return false;
+    // Should not end mid-token (heuristic: last line shouldn't end with -->, |, or unmatched brackets)
+    const lastLine = lines[lines.length - 1].trim();
+    if (/[|\-]$/.test(lastLine) && !lastLine.endsWith('|')) return false;
+    return true;
+}
+
 function MermaidBlock({ children }) {
     const containerRef = useRef(null);
     const [status, setStatus] = useState('loading');
@@ -208,6 +246,8 @@ function MermaidBlock({ children }) {
     const [showSource, setShowSource] = useState(false);
     const [copyState, setCopyState] = useState('idle');
     const [modalOpen, setModalOpen] = useState(false);
+    const debounceRef = useRef(null);
+    const lastCodeRef = useRef('');
 
     const rawCode = typeof children === 'string' ? children.trim() : String(children).trim();
     const code = sanitizeMermaidCode(rawCode);
@@ -228,9 +268,26 @@ function MermaidBlock({ children }) {
             return;
         }
 
+        // Skip re-render if code hasn't actually changed
+        if (code === lastCodeRef.current) return;
+        lastCodeRef.current = code;
+
+        // During streaming, code arrives token-by-token. Debounce to avoid
+        // hammering mermaid.render() on every keystroke and flooding the
+        // console with parse errors from incomplete fragments.
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+
+        // If the code doesn't look complete yet, stay in loading state silently
+        if (!looksComplete(code)) {
+            setStatus('loading');
+            return;
+        }
+
         let cancelled = false;
 
-        (async () => {
+        debounceRef.current = setTimeout(async () => {
+            if (cancelled) return;
+
             try {
                 const mermaid = (await import('mermaid')).default;
 
@@ -263,6 +320,16 @@ function MermaidBlock({ children }) {
                     securityLevel: 'loose',
                 });
 
+                // Pre-validate with mermaid.parse() before render (throws on invalid syntax)
+                try {
+                    await mermaid.parse(code);
+                } catch {
+                    // If parse fails, don't attempt render — stay in loading
+                    // (might still be streaming and the next update could fix it)
+                    if (!cancelled) setStatus('loading');
+                    return;
+                }
+
                 const uniqueId = `mermaid-${Date.now()}-${++idCounter}`;
                 const { svg } = await mermaid.render(uniqueId, code);
 
@@ -272,14 +339,17 @@ function MermaidBlock({ children }) {
                 }
             } catch (err) {
                 if (!cancelled) {
-                    console.warn('[MermaidBlock] Parse failed:', err.message);
+                    console.warn('[MermaidBlock] Render failed:', err.message);
                     setErrorMsg(err.message || 'Failed to parse diagram');
                     setStatus('error');
                 }
             }
-        })();
+        }, 350); // 350ms debounce — lets streaming settle before attempting render
 
-        return () => { cancelled = true; };
+        return () => {
+            cancelled = true;
+            if (debounceRef.current) clearTimeout(debounceRef.current);
+        };
     }, [code]);
 
     // ── Loading skeleton ──

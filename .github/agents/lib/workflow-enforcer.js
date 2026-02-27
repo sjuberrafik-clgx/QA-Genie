@@ -36,6 +36,74 @@ const MCP_EXPLORATION_TIMEOUT_MS = 180000; // 3 minutes for MCP exploration
 const REQUIRED_STAGES = ['JIRA_FETCH', 'EXCEL_CREATE', 'MCP_EXPLORE', 'SCRIPT_GENERATE', 'SCRIPT_EXECUTE'];
 
 /**
+ * Cognitive QA Loop — Intermediate Stages (splits MCP_EXPLORE + SCRIPT_GENERATE)
+ * When cognitive loop is enabled, the MCP_EXPLORE and SCRIPT_GENERATE stages
+ * are decomposed into finer-grained sub-stages for better tracking.
+ */
+const COGNITIVE_STAGES = [
+    'JIRA_FETCH',
+    'EXCEL_CREATE',
+    'EXPLORATION_PLAN',          // Analyst phase — test case analysis
+    'MCP_EXPLORE_GUIDED',        // Explorer phase — plan-guided MCP
+    'SCRIPT_GENERATE_INCREMENTAL', // Coder phase — incremental generation
+    'INLINE_REVIEW',             // Reviewer phase — quality gate
+    'DRYRUN_VALIDATE',           // DryRun phase — selector verification
+    'SCRIPT_EXECUTE',
+];
+
+const CognitiveStageValidationRules = {
+    EXPLORATION_PLAN: {
+        required: true,
+        validates: (artifacts) => {
+            return !!(artifacts.explorationPlan &&
+                artifacts.explorationPlan.testCaseMapping &&
+                artifacts.explorationPlan.testCaseMapping.length > 0);
+        },
+        errorMessage: 'Analyst did not produce a valid exploration plan',
+    },
+    MCP_EXPLORE_GUIDED: {
+        required: true,
+        validates: (artifacts, ticketId) => {
+            const explorationPath = path.join('exploration-data', `${ticketId}-exploration.json`);
+            if (!fs.existsSync(explorationPath)) return false;
+            try {
+                const data = JSON.parse(fs.readFileSync(explorationPath, 'utf8'));
+                return data.source === 'mcp-live-snapshot' &&
+                    data.selectorMap && data.selectorMap.length > 0;
+            } catch { return false; }
+        },
+        errorMessage: 'Guided MCP exploration did not produce verified selectors',
+    },
+    SCRIPT_GENERATE_INCREMENTAL: {
+        required: true,
+        validates: (artifacts, ticketId) => {
+            const pp = getProjectPaths();
+            const specsDir = pp ? pp.specsDir : 'tests/specs';
+            const scriptDir = path.join(specsDir, ticketId.toLowerCase());
+            if (!fs.existsSync(scriptDir)) return false;
+            const files = fs.readdirSync(scriptDir);
+            return files.some(f => f.endsWith('.spec.js'));
+        },
+        errorMessage: 'Coder did not generate a .spec.js file',
+    },
+    INLINE_REVIEW: {
+        required: false, // Reviewer is advisory, not blocking
+        validates: (artifacts) => {
+            return artifacts.reviewVerdict === 'PASS' ||
+                artifacts.reviewVerdict === 'WARN';
+        },
+        errorMessage: 'Inline review flagged critical issues',
+    },
+    DRYRUN_VALIDATE: {
+        required: false, // DryRun is advisory unless all selectors break
+        validates: (artifacts) => {
+            return (artifacts.dryRunScore || 0) >= 50;
+        },
+        errorMessage: 'DryRun validation found too many broken selectors',
+    },
+};
+
+/**
  * Workflow Stage Status
  */
 const StageStatus = {
@@ -462,6 +530,8 @@ module.exports = {
     WorkflowEnforcer,
     StageStatus,
     StageValidationRules,
+    CognitiveStageValidationRules,
     REQUIRED_STAGES,
+    COGNITIVE_STAGES,
     runDemoPreflightChecks
 };

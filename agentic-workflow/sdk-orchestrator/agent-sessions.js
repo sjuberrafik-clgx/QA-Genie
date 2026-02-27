@@ -15,7 +15,7 @@
 const fs = require('fs');
 const path = require('path');
 const { createCustomTools } = require('./custom-tools');
-const { createEnforcementHooks } = require('./enforcement-hooks');
+const { createEnforcementHooks, createCognitiveEnforcementHooks, COGNITIVE_PHASE_RULES } = require('./enforcement-hooks');
 
 // Grounding system — provides local context to reduce LLM hallucinations
 let _groundingStoreModule;
@@ -24,6 +24,31 @@ function getGroundingModule() {
         try { _groundingStoreModule = require('../grounding/grounding-store'); } catch { _groundingStoreModule = null; }
     }
     return _groundingStoreModule;
+}
+
+// ─── Cognitive Role Mapper ──────────────────────────────────────────────────
+
+/**
+ * Map cognitive phase agent names to their base role for prompt loading,
+ * MCP gating, custom tool registration, and dynamic context injection.
+ * Cognitive agents inherit all capabilities of their base role but receive
+ * phase-specific system prompts and enforcement hooks.
+ */
+const COGNITIVE_ROLE_MAP = {
+    'cognitive-analyst': 'scriptgenerator',
+    'cognitive-explorer-nav': 'scriptgenerator',
+    'cognitive-explorer-interact': 'scriptgenerator',
+    'cognitive-coder': 'scriptgenerator',
+    'cognitive-reviewer': 'codereviewer',
+    'cognitive-dryrun': 'scriptgenerator',
+};
+
+function getCognitiveBaseRole(agentName) {
+    return COGNITIVE_ROLE_MAP[agentName] || null;
+}
+
+function isCognitiveAgent(agentName) {
+    return agentName?.startsWith('cognitive-') && !!COGNITIVE_ROLE_MAP[agentName];
 }
 
 // ─── Agent Prompt Loader ────────────────────────────────────────────────────
@@ -193,8 +218,17 @@ class AgentSessionFactory {
     async createAgentSession(agentName, context = {}) {
         this._log(`Creating ${agentName} session...`);
 
-        // 1. Load the agent's system prompt from .agent.md
-        const basePrompt = loadAgentPrompt(agentName);
+        // Resolve cognitive agent names to their base role
+        const baseRole = getCognitiveBaseRole(agentName);
+        const effectiveRole = baseRole || agentName;
+        const isCognitive = !!baseRole;
+
+        if (isCognitive) {
+            this._log(`🧠 Cognitive agent '${agentName}' → base role '${effectiveRole}'`);
+        }
+
+        // 1. Load the system prompt — prefer phase-specific override, else load from .agent.md
+        const basePrompt = context.systemPromptOverride || loadAgentPrompt(effectiveRole);
 
         // 2. Build grounding context if available
         let groundingContext = null;
@@ -226,7 +260,7 @@ class AgentSessionFactory {
                     }
                 }
 
-                groundingContext = gStore.buildGroundingContext(agentName, {
+                groundingContext = gStore.buildGroundingContext(effectiveRole, {
                     taskDescription: context.taskDescription || context.ticketContext || '',
                     ticketId: context.ticketId || null,
                     kbContext,
@@ -238,7 +272,7 @@ class AgentSessionFactory {
         }
 
         // 2b. Build dynamic context injection (includes grounding)
-        const dynamicCtx = buildDynamicContext(agentName, {
+        const dynamicCtx = buildDynamicContext(effectiveRole, {
             ...context,
             groundingContext,
         });
@@ -250,7 +284,7 @@ class AgentSessionFactory {
         }
 
         // 3. Get role-specific custom tools (with context store and grounding store)
-        const tools = createCustomTools(this.defineTool, agentName, {
+        const tools = createCustomTools(this.defineTool, effectiveRole, {
             learningStore: this.learningStore,
             config: this.config,
             contextStore: context.contextStore || null,
@@ -258,18 +292,24 @@ class AgentSessionFactory {
         });
 
         // 4. Get role-specific enforcement hooks
-        const hooks = createEnforcementHooks(agentName, {
-            config: this.config,
-            learningStore: this.learningStore,
-            groundingStore: gStore || null,
-            verbose: this.verbose,
-        });
+        const hooks = isCognitive
+            ? createCognitiveEnforcementHooks(agentName, { verbose: this.verbose })
+            : createEnforcementHooks(agentName, {
+                config: this.config,
+                learningStore: this.learningStore,
+                groundingStore: gStore || null,
+                verbose: this.verbose,
+            });
 
         // 5. Build MCP server config
         const mcpServers = {};
 
-        // ScriptGenerator needs the unified automation MCP server (local stdio)
-        if (['scriptgenerator'].includes(agentName)) {
+        // MCP server: attach for scriptgenerator AND cognitive phases that need MCP
+        const needsMCP = context.disableMCP !== true && (
+            (!isCognitive && ['scriptgenerator'].includes(agentName)) ||
+            (isCognitive && COGNITIVE_PHASE_RULES[agentName]?.allowMCP)
+        );
+        if (needsMCP) {
             // CRITICAL: Pass environment variables to the MCP child process.
             // Without explicit env passthrough, the spawned process does NOT inherit
             // MCP_HEADLESS, MCP_TIMEOUT, etc. from .env — the browser always launches
@@ -278,7 +318,7 @@ class AgentSessionFactory {
             // Dynamic Tool Scoping: pass the agent's tool profile to the MCP server.
             // ScriptGenerator gets 'core' (~65 tools instead of 141), saving ~25K tokens.
             const AGENT_PROFILES = { scriptgenerator: 'core', testgenie: 'core', buggenie: 'core', codereviewer: 'core' };
-            const toolProfile = AGENT_PROFILES[agentName] || 'full';
+            const toolProfile = context.toolProfile || AGENT_PROFILES[effectiveRole] || 'full';
             this._log(`🖥️  Unified MCP: headless=${mcpHeadless}, browser=${process.env.MCP_BROWSER || 'chromium'}, toolProfile=${toolProfile}`);
             mcpServers['unified-automation'] = {
                 type: 'local',
@@ -593,4 +633,4 @@ class AgentSessionFactory {
     }
 }
 
-module.exports = { AgentSessionFactory, loadAgentPrompt, buildDynamicContext };
+module.exports = { AgentSessionFactory, loadAgentPrompt, buildDynamicContext, getCognitiveBaseRole, isCognitiveAgent };
