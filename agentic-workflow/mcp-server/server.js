@@ -32,11 +32,23 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// ── Load .env (single source of truth) ───────────────────────────────────────
+// When VS Code or the SDK spawns this process, env vars may not be forwarded.
+// Loading dotenv here ensures MCP_HEADLESS, MCP_BROWSER, etc. always come from
+// agentic-workflow/.env regardless of how the server was launched.
+import { config as dotenvConfig } from 'dotenv';
+const __envDir = path.dirname(fileURLToPath(import.meta.url));
+dotenvConfig({ path: path.resolve(__envDir, '..', '.env') });
+
 import { PlaywrightBridge } from './bridges/playwright-bridge-direct.js';
 import { ChromeDevToolsBridge } from './bridges/chromedevtools-bridge-direct.js';
 import { IntelligentRouter } from './router/intelligent-router.js';
-import { ALL_TOOLS, UNIFIED_TOOLS, getToolStats } from './tools/tool-definitions.js';
+import { ALL_TOOLS, UNIFIED_TOOLS, getToolStats, isToolDeferred, getAlwaysLoadedTools } from './tools/tool-definitions.js';
 import { getProfileCategories } from './config/tool-profiles.js';
+import { getToolExamples } from './tools/tool-examples.js';
+import { TOOL_SEARCH_DEFINITION, handleToolSearch, getToolSearchIndex } from './tools/tool-search.js';
+import { EXECUTE_EXPLORATION_DEFINITION, executeExploration } from './tools/programmatic-executor.js';
+import { getTemplates } from './tools/exploration-templates.js';
 import { ServerConfig } from './config/server-config.js';
 import { EventManager } from './utils/event-manager.js';
 
@@ -100,6 +112,9 @@ class UnifiedAutomationServer {
         this.registerToolCallHandler();
         this.registerResourceHandlers();
 
+        // Pre-build tool search index at startup (one-time ~10ms)
+        getToolSearchIndex();
+
         // Setup error handling
         this.server.onerror = (error) => {
             console.error('[UnifiedMCP] Server error:', error);
@@ -119,19 +134,35 @@ class UnifiedAutomationServer {
         const toolProfile = process.env.MCP_TOOL_PROFILE || 'full';
         const allowedCategories = getProfileCategories(toolProfile);
 
+        // Deferred loading mode (Anthropic Technique 3: Tool Search).
+        // When enabled, only always-loaded tools + tool_search are exposed in tools/list.
+        // All other tools are discoverable via unified_tool_search and callable via tools/call.
+        // Set MCP_DEFERRED_LOADING=true to enable. Default: false for backward compatibility.
+        const deferredLoading = process.env.MCP_DEFERRED_LOADING === 'true';
+
         this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-            // Filter tools by profile categories (if a profile is active)
+            // Step 1: Start with all tools
             let toolsToExpose = ALL_TOOLS;
+
+            // Step 2: Apply profile category filter (if a profile is active)
             if (allowedCategories) {
-                toolsToExpose = ALL_TOOLS.filter(tool => {
+                toolsToExpose = toolsToExpose.filter(tool => {
                     const category = tool._meta?.category || 'unknown';
                     return allowedCategories.includes(category);
                 });
             }
 
-            const statsInfo = allowedCategories
-                ? `${toolsToExpose.length}/${ALL_TOOLS.length} tools (profile: ${toolProfile})`
-                : `${toolsToExpose.length} tools (profile: full)`;
+            // Step 3: Apply deferred loading filter
+            // Only expose always-loaded tools — deferred tools discoverable via tool_search
+            if (deferredLoading) {
+                toolsToExpose = toolsToExpose.filter(tool => !isToolDeferred(tool.name));
+            }
+
+            const statsInfo = deferredLoading
+                ? `${toolsToExpose.length + 1}/${ALL_TOOLS.length} tools (profile: ${toolProfile}, deferred: ON)`
+                : allowedCategories
+                    ? `${toolsToExpose.length}/${ALL_TOOLS.length} tools (profile: ${toolProfile})`
+                    : `${toolsToExpose.length} tools (profile: full)`;
             console.error(`[UnifiedMCP] Handling tools/list request - Exposing ${statsInfo}`);
 
             // Sanitize tools for MCP protocol compliance:
@@ -148,8 +179,39 @@ class UnifiedAutomationServer {
                         additionalProperties: false,
                     };
                 }
+                // Inject tool use examples (Anthropic Technique 4)
+                // Improves complex parameter accuracy ~72% → ~90%
+                const examples = getToolExamples(cleanTool.name);
+                if (examples) {
+                    cleanTool.examples = examples;
+                }
                 return cleanTool;
             });
+
+            // Append the tool_search meta-tool when deferred loading is active
+            if (deferredLoading) {
+                const { _meta, ...cleanSearch } = TOOL_SEARCH_DEFINITION;
+                cleanSearch.inputSchema = {
+                    ...cleanSearch.inputSchema,
+                    additionalProperties: false,
+                };
+                sanitizedTools.push(cleanSearch);
+            }
+
+            // Append execute_exploration meta-tool (always available — it's in ALWAYS_LOADED_TOOLS)
+            // Only append if not already present from ALL_TOOLS (it's a custom tool, not in definitions)
+            if (!sanitizedTools.some(t => t.name === 'unified_execute_exploration')) {
+                const { _meta, ...cleanExec } = EXECUTE_EXPLORATION_DEFINITION;
+                cleanExec.inputSchema = {
+                    ...cleanExec.inputSchema,
+                    additionalProperties: false,
+                };
+                const examples = getToolExamples('unified_execute_exploration');
+                if (examples) {
+                    cleanExec.examples = examples;
+                }
+                sanitizedTools.push(cleanExec);
+            }
 
             return {
                 tools: sanitizedTools,
@@ -172,7 +234,38 @@ class UnifiedAutomationServer {
             console.error(`[UnifiedMCP] Handling tool call: ${name}`);
 
             try {
+                // Handle tool_search internally (no routing needed)
+                if (name === 'unified_tool_search') {
+                    const searchResult = handleToolSearch(args || {});
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: JSON.stringify(searchResult, null, 2),
+                            },
+                        ],
+                    };
+                }
+
+                // Handle execute_exploration internally (Anthropic Technique 1: Programmatic Tool Calling)
+                // Routes tool calls through the existing router — same timeout/routing as normal calls
+                if (name === 'unified_execute_exploration') {
+                    const routeToolCall = async (toolName, toolArgs) => {
+                        return await this.router.route(toolName, toolArgs);
+                    };
+                    const execResult = await executeExploration(args || {}, routeToolCall, getTemplates());
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: JSON.stringify(execResult, null, 2),
+                            },
+                        ],
+                    };
+                }
+
                 // Route the tool call with a timeout guard
+                // NOTE: tools/call accepts ANY valid tool name regardless of deferred status.
                 const result = await Promise.race([
                     this.router.route(name, args || {}),
                     new Promise((_, reject) =>

@@ -1,0 +1,52 @@
+{
+    "$schema": "./brand-kit.schema.json",
+    "name": "Doremon Team",
+    "description": "Default brand kit for Doremon Team — professional QA automation branding",
+    "version": "2.0.0",
+    "logo": null,
+    "logoDark": null,
+    "favicon": null,
+    "fontFamily": "Calibri",
+    "fontFamilySecondary": "Arial",
+    "fontFamilyDisplay": "Calibri Light",
+    "fontFamilyMono": "Consolas",
+    "colors": {
+        "primary": "#0066CC",
+        "primaryDark": "#004C99",
+        "primaryLight": "#E3F0FF",
+        "accent": "#00B4D8",
+        "accentDark": "#0090AD"
+    },
+    "gradients": {
+        "hero": {
+            "start": "#0066CC",
+            "end": "#00B4D8",
+            "angle": 120
+        },
+        "primary": {
+            "start": "#0066CC",
+            "end": "#004C99",
+            "angle": 135
+        },
+        "dark": {
+            "start": "#1A1A2E",
+            "end": "#16213E",
+            "angle": 135
+        }
+    },
+    "slideDefaults": {
+        "titleStyle": "centered",
+        "showLogo": true,
+        "logoPosition": "bottom-right",
+        "footerText": "Powered by Doremon Team",
+        "showSlideNumbers": true,
+        "defaultTransition": "fade"
+    },
+    "docDefaults": {
+        "showCoverPage": true,
+        "showTableOfContents": true,
+        "headerText": "",
+        "footerText": "Powered by Doremon Team",
+        "watermark": null
+    }
+}

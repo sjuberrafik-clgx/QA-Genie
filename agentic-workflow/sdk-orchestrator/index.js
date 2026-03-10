@@ -276,6 +276,7 @@ class SDKOrchestrator {
 
         return this.pipelineRunner.run(ticketId, {
             mode,
+            runId: options.runId || undefined,
             onProgress: options.onProgress || this._defaultProgressHandler.bind(this),
         });
     }
@@ -381,6 +382,7 @@ class SDKOrchestrator {
         const icons = {
             preflight: '🔍', testgenie: '📝', scriptgenerator: '⚙️',
             execute: '🧪', healing: '🔧', buggenie: '🐛', report: '📊',
+
         };
         console.log(`  ${icons[stage] || '▸'} [${stage.toUpperCase()}] ${message}`);
     }

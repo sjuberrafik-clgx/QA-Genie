@@ -74,6 +74,201 @@ class CognitiveScriptGenerator {
         this.reviewConfidenceThreshold = cogConfig.qualityThresholds?.reviewerConfidenceThreshold || 70;
         this.enableDryRun = cogConfig.phases?.dryrun?.enabled !== false;
         this.enableReview = cogConfig.phases?.reviewer?.enabled !== false;
+
+        // Adaptive scaling config (inference-time scaling)
+        this.adaptiveScaling = cogConfig.adaptiveScaling || { enabled: false };
+    }
+
+    /**
+     * Determine complexity tier from the Analyst's exploration plan.
+     * Adjusts timeouts, retry budgets, and quality thresholds dynamically.
+     *
+     * @param {Object} plan - Analyst output plan
+     * @returns {Object} Scaling parameters for this run
+     */
+    _computeAdaptiveScaling(plan) {
+        if (!this.adaptiveScaling?.enabled || !plan) {
+            return {
+                tier: 'moderate',
+                timeoutMultiplier: 1.0,
+                maxCoderRetries: this.maxCoderRetries,
+                maxDryRunRetries: this.maxDryRunRetries,
+                reviewerConfidenceThreshold: this.reviewConfidenceThreshold,
+                dryRunPassRate: this.dryRunThreshold * 100,
+                enableSupervisor: false,
+            };
+        }
+
+        const depth = plan.estimatedExplorationDepth || {};
+        const testSteps = plan.testCaseMapping?.length || 0;
+        const pages = depth.totalPages || Object.keys(plan.pageTransitionGraph || {}).length || 1;
+        const elements = depth.totalElements || 0;
+        const riskCount = (plan.riskAreas || []).length;
+
+        // Determine tier
+        const tiers = this.adaptiveScaling.complexityTiers || {};
+        let tier = 'moderate';
+        let tierConfig = tiers.moderate || {};
+
+        if (testSteps <= (tiers.simple?.maxTestSteps || 5) &&
+            pages <= (tiers.simple?.maxPages || 2) &&
+            elements <= (tiers.simple?.maxElements || 10)) {
+            tier = 'simple';
+            tierConfig = tiers.simple || {};
+        } else if (testSteps > (tiers.moderate?.maxTestSteps || 12) ||
+            pages > (tiers.moderate?.maxPages || 5) ||
+            elements > (tiers.moderate?.maxElements || 25)) {
+            tier = 'complex';
+            tierConfig = tiers.complex || {};
+        }
+
+        // Apply risk multiplier
+        const riskConfig = this.adaptiveScaling.riskMultiplier || {};
+        const isHighRisk = riskCount >= (riskConfig.highRiskThreshold || 3);
+        const riskTimeoutBoost = isHighRisk ? (riskConfig.timeoutBoost || 1.3) : 1.0;
+        const riskRetryBoost = isHighRisk ? (riskConfig.additionalRetries || 1) : 0;
+
+        const scaling = {
+            tier,
+            isHighRisk,
+            testSteps,
+            pages,
+            elements,
+            riskCount,
+            timeoutMultiplier: (tierConfig.timeoutMultiplier || 1.0) * riskTimeoutBoost,
+            maxCoderRetries: (tierConfig.maxCoderRetries ?? this.maxCoderRetries) + riskRetryBoost,
+            maxDryRunRetries: (tierConfig.maxDryRunRetries ?? this.maxDryRunRetries) + (isHighRisk ? 1 : 0),
+            reviewerConfidenceThreshold: tierConfig.reviewerConfidenceThreshold ?? this.reviewConfidenceThreshold,
+            dryRunPassRate: tierConfig.dryRunPassRate ?? (this.dryRunThreshold * 100),
+            enableSupervisor: tierConfig.enableSupervisor ?? false,
+        };
+
+        this._log(`  Adaptive scaling: tier=${tier} | multiplier=${scaling.timeoutMultiplier.toFixed(1)}x | coderRetries=${scaling.maxCoderRetries} | dryRunRetries=${scaling.maxDryRunRetries} | highRisk=${isHighRisk}`);
+        return scaling;
+    }
+
+    /**
+     * Get phase timeout adjusted by adaptive scaling.
+     * @param {string} phaseName
+     * @param {number} multiplier
+     * @returns {number} Adjusted timeout in ms
+     */
+    _getScaledTimeout(phaseName, multiplier = 1.0) {
+        const phase = phases.getPhase(phaseName);
+        return Math.round((phase?.timeout || 180000) * multiplier);
+    }
+
+    /**
+     * Dynamic threshold calibration — adjusts quality thresholds using
+     * historical learning store data for the specific feature/pages under test.
+     *
+     * If a feature has high historical failure rate → lower thresholds slightly
+     * (more forgiving, extra retries). If a feature has strong track record →
+     * raise thresholds (stricter, fewer retries needed).
+     *
+     * @param {Object} scaling - Adaptive scaling from _computeAdaptiveScaling()
+     * @param {Object} plan - Analyst plan output
+     * @param {string} ticketId - Current ticket ID
+     * @returns {Object} Calibrated scaling (mutated in place)
+     */
+    _calibrateThresholds(scaling, plan, ticketId) {
+        if (!this.learningStore) return scaling;
+
+        try {
+            // Gather historical data for pages in the plan
+            const planPages = Object.keys(plan?.pageTransitionGraph || {});
+            const ticketFailures = this.learningStore.getFailuresForTicket(ticketId);
+            const pageFailures = [];
+            for (const pageUrl of planPages) {
+                pageFailures.push(...this.learningStore.getFailuresForPage(pageUrl));
+            }
+
+            // Compute feature reliability score (0-100)
+            const allRelevant = [...ticketFailures, ...pageFailures];
+            if (allRelevant.length === 0) {
+                // No history — use defaults
+                this._log('  Threshold calibration: no historical data, using defaults');
+                return scaling;
+            }
+
+            // Deduplicate by timestamp
+            const seen = new Set();
+            const unique = allRelevant.filter(f => {
+                const key = `${f.ticketId}-${f.selector}-${f.timestamp}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
+
+            const fixedCount = unique.filter(f => f.outcome === 'fixed').length;
+            const persistedCount = unique.filter(f => f.outcome === 'persisted').length;
+            const totalCount = unique.length;
+            const fixRate = totalCount > 0 ? fixedCount / totalCount : 0.5;
+
+            // Selector stability from stable mappings
+            const stableSelectors = [];
+            for (const pageUrl of planPages) {
+                stableSelectors.push(...this.learningStore.getStableSelectors(pageUrl));
+            }
+            const avgSelectorConfidence = stableSelectors.length > 0
+                ? stableSelectors.reduce((sum, s) => sum + (s.confidence || 0.5), 0) / stableSelectors.length
+                : 0.5;
+
+            // Page pattern issues
+            const pagePatternIssues = planPages.reduce((count, url) => {
+                const pattern = this.learningStore.getPagePattern(url);
+                return count + (pattern?.commonIssues?.length || 0);
+            }, 0);
+
+            // Compute reliability score: 0 (unreliable) to 100 (rock-solid)
+            const reliabilityScore = Math.round(
+                (fixRate * 40) +                              // Fix rate weight
+                (avgSelectorConfidence * 30) +                // Selector stability weight
+                (Math.max(0, 30 - (persistedCount * 5)))      // Penalty for persistent failures
+            );
+
+            // ── Calibrate thresholds based on reliability ───────────
+            if (reliabilityScore >= 70) {
+                // Strong history → raise bar
+                scaling.reviewerConfidenceThreshold = Math.min(90,
+                    scaling.reviewerConfidenceThreshold + 5
+                );
+                scaling.dryRunPassRate = Math.min(95,
+                    scaling.dryRunPassRate + 5
+                );
+                this._log(`  Threshold calibration: RELIABLE (${reliabilityScore}) → thresholds ↑ (reviewer=${scaling.reviewerConfidenceThreshold}, dryRun=${scaling.dryRunPassRate}%)`);
+            } else if (reliabilityScore <= 30) {
+                // Fragile feature → be more forgiving, grant extra retries
+                scaling.reviewerConfidenceThreshold = Math.max(50,
+                    scaling.reviewerConfidenceThreshold - 10
+                );
+                scaling.maxCoderRetries = Math.min(5,
+                    scaling.maxCoderRetries + 1
+                );
+                scaling.maxDryRunRetries = Math.min(3,
+                    scaling.maxDryRunRetries + 1
+                );
+                this._log(`  Threshold calibration: FRAGILE (${reliabilityScore}) → thresholds ↓, retries ↑ (reviewer=${scaling.reviewerConfidenceThreshold}, coderRetries=${scaling.maxCoderRetries}, dryRunRetries=${scaling.maxDryRunRetries})`);
+            } else {
+                this._log(`  Threshold calibration: MODERATE (${reliabilityScore}) → defaults maintained`);
+            }
+
+            // Record calibration decision
+            scaling._calibration = {
+                reliabilityScore,
+                fixRate: Math.round(fixRate * 100),
+                avgSelectorConfidence: Math.round(avgSelectorConfidence * 100),
+                historicalFailures: totalCount,
+                persistedFailures: persistedCount,
+                stableSelectorsFound: stableSelectors.length,
+                pagePatternIssues,
+            };
+
+            return scaling;
+        } catch (error) {
+            this._log(`  Threshold calibration error (non-blocking): ${error.message}`);
+            return scaling;
+        }
     }
 
     /**
@@ -129,24 +324,68 @@ class CognitiveScriptGenerator {
             });
 
             // ═══════════════════════════════════════════════════════════════
+            // ADAPTIVE SCALING — Compute complexity tier from Analyst plan
+            // ═══════════════════════════════════════════════════════════════
+            const scaling = this._computeAdaptiveScaling(analystResult.plan);
+
+            // Dynamic threshold calibration from learning store history
+            this._calibrateThresholds(scaling, analystResult.plan, context.ticketId);
+
+            metrics.adaptiveScaling = {
+                tier: scaling.tier,
+                timeoutMultiplier: scaling.timeoutMultiplier,
+                isHighRisk: scaling.isHighRisk,
+                maxCoderRetries: scaling.maxCoderRetries,
+                maxDryRunRetries: scaling.maxDryRunRetries,
+                calibration: scaling._calibration || null,
+                enableSupervisor: scaling.enableSupervisor,
+            };
+
+            store.recordDecision('adaptive-scaling', `Complexity: ${scaling.tier}`,
+                `${scaling.testSteps} steps, ${scaling.pages} pages, ${scaling.elements} elements | ` +
+                `timeout: ${scaling.timeoutMultiplier.toFixed(1)}x | retries: coder=${scaling.maxCoderRetries}, dryrun=${scaling.maxDryRunRetries}` +
+                (scaling.isHighRisk ? ' | HIGH RISK' : ''),
+                { tier: scaling.tier, isHighRisk: scaling.isHighRisk }
+            );
+
+            // ═══════════════════════════════════════════════════════════════
             // PHASE 2: EXPLORER — Execute the plan via MCP
             // ═══════════════════════════════════════════════════════════════
-            onProgress('explorer', 'Exploring application via MCP (plan-guided)...');
-            this._log('\n── Phase 2: EXPLORER ─────────────────────────');
+            // Respects MCP_EXPLORATION_ENABLED from .env — when 'false', skip exploration
+            // and let the coder generate from analyst plan + KB/grounding data only.
+            const explorationEnabled = process.env.MCP_EXPLORATION_ENABLED !== 'false';
+            let explorerResult;
 
-            const explorerResult = await this._runExplorerPhase(context, store, analystResult.plan);
-            phaseResults.explorer = explorerResult;
-            metrics.phases.explorer = explorerResult.metrics;
+            if (explorationEnabled) {
+                onProgress('explorer', 'Exploring application via MCP (plan-guided)...');
+                this._log('\n── Phase 2: EXPLORER ─────────────────────────');
 
-            if (!explorerResult.success) {
-                this._log('⚠️ Explorer failed — insufficient exploration data');
-                return this._buildResult(context, phaseResults, metrics, startTime, 'explorer-failed');
+                explorerResult = await this._runExplorerPhase(context, store, analystResult.plan);
+                phaseResults.explorer = explorerResult;
+                metrics.phases.explorer = explorerResult.metrics;
+
+                if (!explorerResult.success) {
+                    this._log('⚠️ Explorer failed — insufficient exploration data');
+                    return this._buildResult(context, phaseResults, metrics, startTime, 'explorer-failed');
+                }
+
+                store.recordDecision('cognitive-explorer', 'Exploration completed', `Found ${explorerResult.exploration?.statistics?.totalElementsFound || 0} elements across ${explorerResult.exploration?.pagesVisited?.length || 0} pages`, {
+                    explorationScore: explorerResult.score,
+                    coverage: explorerResult.exploration?.statistics?.coveragePercent || 0,
+                });
+            } else {
+                this._log('\n── Phase 2: EXPLORER (SKIPPED — MCP_EXPLORATION_ENABLED=false) ──');
+                explorerResult = {
+                    success: true,
+                    skipped: true,
+                    exploration: { pagesVisited: [], statistics: { totalElementsFound: 0, coveragePercent: 0 } },
+                    score: 0,
+                    metrics: { durationMs: 0 },
+                };
+                phaseResults.explorer = explorerResult;
+                metrics.phases.explorer = explorerResult.metrics;
+                store.recordDecision('cognitive-explorer', 'Exploration SKIPPED', 'MCP_EXPLORATION_ENABLED=false in .env — generating from analyst plan + KB data only', {});
             }
-
-            store.recordDecision('cognitive-explorer', 'Exploration completed', `Found ${explorerResult.exploration?.statistics?.totalElementsFound || 0} elements across ${explorerResult.exploration?.pagesVisited?.length || 0} pages`, {
-                explorationScore: explorerResult.score,
-                coverage: explorerResult.exploration?.statistics?.coveragePercent || 0,
-            });
 
             // ═══════════════════════════════════════════════════════════════
             // PHASE 3: CODER — Generate script (with retry loop)
@@ -174,9 +413,9 @@ class CognitiveScriptGenerator {
                 phaseResults.reviewer = reviewResult;
                 metrics.phases.reviewer = reviewResult.metrics;
 
-                // Coder ↔ Reviewer inner loop
-                if (reviewResult.verdict === 'FAIL' && metrics.coderRetries < this.maxCoderRetries) {
-                    this._log(`⚠️ Review FAILED — retrying Coder with fixes (attempt ${metrics.coderRetries + 1}/${this.maxCoderRetries})`);
+                // Coder ↔ Reviewer inner loop (uses adaptive retry limit)
+                if (reviewResult.verdict === 'FAIL' && metrics.coderRetries < scaling.maxCoderRetries) {
+                    this._log(`⚠️ Review FAILED — retrying Coder with fixes (attempt ${metrics.coderRetries + 1}/${scaling.maxCoderRetries})`);
                     metrics.coderRetries++;
 
                     onProgress('coder', `Re-generating script with reviewer fixes (attempt ${metrics.coderRetries})...`);
@@ -201,8 +440,8 @@ class CognitiveScriptGenerator {
                 phaseResults.dryrun = dryRunResult;
                 metrics.phases.dryrun = dryRunResult.metrics;
 
-                // DryRun ↔ Coder retry loop
-                if (dryRunResult.verdict === 'FIX_REQUIRED' && metrics.dryRunRetries < this.maxDryRunRetries) {
+                // DryRun ↔ Coder retry loop (uses adaptive retry limit and pass rate)
+                if (dryRunResult.verdict === 'FIX_REQUIRED' && metrics.dryRunRetries < scaling.maxDryRunRetries) {
                     this._log(`⚠️ DryRun FAILED (${dryRunResult.score}%) — retrying Coder with fixes`);
                     metrics.dryRunRetries++;
 
@@ -287,10 +526,13 @@ class CognitiveScriptGenerator {
             });
 
             // Parse and validate
-            const { valid, plan, errors } = phases.analyst.parseAnalystOutput(response);
+            const { valid, plan, errors, strategyEvaluation, hasFallback } = phases.analyst.parseAnalystOutput(response);
             const { score } = phases.analyst.scorePlan(plan);
 
             this._log(`  Plan quality: ${score}/100 | Valid: ${valid} | Steps: ${plan?.testCaseMapping?.length || 0}`);
+            if (strategyEvaluation) {
+                this._log(`  ToT strategies: ${strategyEvaluation.strategies?.length || 0} evaluated | Selected: ${strategyEvaluation.selectedStrategy || '?'} | Fallback: ${hasFallback}`);
+            }
             if (errors.length > 0) {
                 this._log(`  Warnings: ${errors.join(', ')}`);
             }
@@ -300,7 +542,10 @@ class CognitiveScriptGenerator {
                 plan,
                 score,
                 errors,
-                metrics: { duration: Date.now() - phaseStart, score, valid },
+                strategyEvaluation,
+                hasFallback,
+                fallbackPlan: plan?.fallbackStrategy || null,
+                metrics: { duration: Date.now() - phaseStart, score, valid, strategyCount: strategyEvaluation?.strategies?.length || 0 },
             };
         } catch (error) {
             this._log(`  ❌ Analyst error: ${error.message}`);

@@ -36,6 +36,7 @@ const { EventBridge, EVENT_TYPES, getEventBridge } = require('./event-bridge');
 const { LearningStore } = require('./learning-store');
 const { ChatSessionManager, CHAT_EVENTS } = require('./chat-session-manager');
 const { getFollowupProvider } = require('./followup-provider');
+const { setSessionRoot, getSessionRoot, BLOCKED_PATHS } = require('./filesystem-tools');
 const {
     loadEnv, isValidTicketId, isValidMode, generateBatchId, truncate,
 } = require('./utils');
@@ -161,10 +162,10 @@ class Router {
 
         try {
             const query = this._parseQuery(req.url);
-            // Use higher body limit for chat message endpoint (supports base64 image attachments)
-            // Supports up to 10 images × 5 MB × 1.37 base64 overhead ≈ 68 MB max
-            const isImageRoute = req.url.includes('/messages');
-            const maxBodyBytes = isImageRoute ? 75 * 1024 * 1024 : 1024 * 1024;
+            // Use higher body limit for chat message endpoint (supports base64 image + document attachments)
+            // Supports up to 10 images × 5 MB + 5 docs × 50 MB × 1.37 base64 overhead
+            const isMessageRoute = req.url.includes('/messages');
+            const maxBodyBytes = isMessageRoute ? 400 * 1024 * 1024 : 1024 * 1024;
             const body = ['POST', 'PUT', 'PATCH'].includes(req.method)
                 ? await this._readBody(req, maxBodyBytes)
                 : {};
@@ -195,6 +196,28 @@ function ok(res, data) { json(res, 200, data); }
 function badRequest(res, msg) { json(res, 400, { error: msg }); }
 function notFound(res, msg) { json(res, 404, { error: msg || 'Not found' }); }
 function conflict(res, msg) { json(res, 409, { error: msg }); }
+
+// ─── Native App Name Mapping ────────────────────────────────────────────────
+
+function getAppNameForExtension(ext) {
+    const map = {
+        '.xlsx': 'Microsoft Excel', '.xls': 'Microsoft Excel', '.csv': 'Microsoft Excel',
+        '.docx': 'Microsoft Word', '.doc': 'Microsoft Word',
+        '.pptx': 'Microsoft PowerPoint', '.ppt': 'Microsoft PowerPoint',
+        '.pdf': 'PDF Viewer',
+        '.html': 'Default Browser', '.htm': 'Default Browser',
+        '.png': 'Image Viewer', '.jpg': 'Image Viewer', '.jpeg': 'Image Viewer',
+        '.gif': 'Image Viewer', '.webp': 'Image Viewer', '.svg': 'Image Viewer',
+        '.mp4': 'Video Player', '.mkv': 'Video Player', '.avi': 'Video Player',
+        '.mov': 'Video Player', '.wmv': 'Video Player', '.webm': 'Video Player',
+        '.mp3': 'Audio Player', '.wav': 'Audio Player', '.flac': 'Audio Player',
+        '.txt': 'Text Editor', '.md': 'Text Editor', '.log': 'Text Editor',
+        '.json': 'Text Editor', '.xml': 'Text Editor',
+        '.js': 'Code Editor', '.ts': 'Code Editor', '.py': 'Code Editor',
+        '.zip': 'Archive Manager', '.rar': 'Archive Manager', '.7z': 'Archive Manager',
+    };
+    return map[ext] || 'Default Application';
+}
 
 // ─── Report Classification Helpers (hoisted — no closure deps) ──────────────
 
@@ -576,7 +599,11 @@ async function startServer(options = {}) {
             runId: run.runId,
             ticketId: run.ticketId,
             status: run.status,
+            mode: run.mode,
+            environment: run.environment,
             stages: run.stages,
+            startedAt: run.startedAt,
+            completedAt: run.completedAt,
             duration: run.duration,
             error: run.error,
         });
@@ -914,6 +941,318 @@ async function startServer(options = {}) {
     });
 
     // ═════════════════════════════════════════════════════════════════
+    // FILESYSTEM BROWSE (FileGenie directory picker)
+    // ═════════════════════════════════════════════════════════════════
+
+    /**
+     * GET /api/filesystem/quick-access
+     * Returns platform-specific common directories for quick selection.
+     */
+    router.get('/api/filesystem/quick-access', (req, res) => {
+        const os = require('os');
+        const home = os.homedir();
+        const dirs = [
+            { name: 'Home', path: home },
+            { name: 'Desktop', path: path.join(home, 'Desktop') },
+            { name: 'Documents', path: path.join(home, 'Documents') },
+            { name: 'Downloads', path: path.join(home, 'Downloads') },
+        ];
+
+        // Add project root
+        const projectRoot = path.resolve(__dirname, '..', '..');
+        dirs.push({ name: 'Project Root', path: projectRoot });
+
+        // Check existence
+        const results = dirs.map(d => ({
+            name: d.name,
+            path: d.path,
+            exists: fs.existsSync(d.path) && fs.statSync(d.path).isDirectory(),
+        }));
+
+        ok(res, { home, directories: results });
+    });
+
+    /**
+     * POST /api/filesystem/pick-directory
+     * Opens the native OS folder picker dialog and returns the selected path.
+     * Works because the server always runs on the same machine as the browser.
+     */
+    router.post('/api/filesystem/pick-directory', async (req, res) => {
+        const { execFile } = require('child_process');
+
+        const pick = () => new Promise((resolve, reject) => {
+            let cmd, args;
+
+            if (process.platform === 'win32') {
+                // PowerShell: use .NET FolderBrowserDialog (built-in, no extra deps)
+                const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+$dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+$dlg.Description = 'Select a workspace folder'
+$dlg.ShowNewFolderButton = $true
+$result = $dlg.ShowDialog()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+    Write-Output $dlg.SelectedPath
+} else {
+    Write-Output '::CANCELLED::'
+}`;
+                cmd = 'powershell';
+                args = ['-NoProfile', '-NonInteractive', '-Command', psScript];
+            } else if (process.platform === 'darwin') {
+                // macOS: AppleScript folder dialog
+                cmd = 'osascript';
+                args = ['-e', 'try\nset f to POSIX path of (choose folder with prompt "Select a workspace folder")\nreturn f\non error\nreturn "::CANCELLED::"\nend try'];
+            } else {
+                // Linux: zenity (GNOME) or kdialog (KDE)
+                cmd = 'zenity';
+                args = ['--file-selection', '--directory', '--title=Select a workspace folder'];
+            }
+
+            const child = execFile(cmd, args, { timeout: 60000, windowsHide: false }, (err, stdout) => {
+                if (err) {
+                    // zenity returns exit code 1 on cancel
+                    if (err.killed) return reject(new Error('Dialog timed out'));
+                    return resolve(null); // cancelled or failed
+                }
+                const selected = (stdout || '').trim();
+                if (!selected || selected === '::CANCELLED::') return resolve(null);
+                resolve(selected);
+            });
+
+            // Ensure cleanup
+            child.on('error', () => resolve(null));
+        });
+
+        try {
+            const selected = await pick();
+            if (!selected) return ok(res, { cancelled: true });
+
+            const resolved = path.resolve(selected);
+
+            // Validate against blocked paths
+            const normalizedForCheck = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+            for (const blocked of BLOCKED_PATHS) {
+                if (normalizedForCheck.startsWith(blocked) || normalizedForCheck === blocked) {
+                    return json(res, 403, { error: `Access denied: "${resolved}" is a protected system directory.` });
+                }
+            }
+
+            // Verify it's an existing directory
+            if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+                return badRequest(res, `Selected path is not a valid directory: ${resolved}`);
+            }
+
+            ok(res, { path: resolved });
+        } catch (error) {
+            json(res, 500, { error: `Failed to open folder picker: ${error.message}` });
+        }
+    });
+
+    /**
+     * GET /api/filesystem/browse?path=<encodedPath>&dirsOnly=true
+     * List contents of a directory. Returns names, types, sizes.
+     * Blocks system directories for safety.
+     */
+    router.get('/api/filesystem/browse', async (req, res) => {
+        const dirPath = req.query?.path;
+        if (!dirPath) return badRequest(res, 'Missing "path" query parameter');
+
+        const resolved = path.resolve(dirPath);
+        const normalizedForCheck = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+
+        // Block system directories
+        for (const blocked of BLOCKED_PATHS) {
+            if (normalizedForCheck.startsWith(blocked) || normalizedForCheck === blocked) {
+                return json(res, 403, { error: `Access denied: "${resolved}" is a protected system directory.` });
+            }
+        }
+
+        try {
+            if (!fs.existsSync(resolved)) return notFound(res, `Directory not found: ${resolved}`);
+            const st = fs.statSync(resolved);
+            if (!st.isDirectory()) return badRequest(res, `Path is not a directory: ${resolved}`);
+
+            const items = fs.readdirSync(resolved);
+            const dirsOnly = req.query?.dirsOnly === 'true';
+            const MAX_ENTRIES = 500;
+
+            const entries = [];
+            for (const name of items) {
+                if (entries.length >= MAX_ENTRIES) break;
+                try {
+                    const fullPath = path.join(resolved, name);
+                    const s = fs.statSync(fullPath);
+                    const isDir = s.isDirectory();
+                    if (dirsOnly && !isDir) continue;
+                    entries.push({
+                        name,
+                        type: isDir ? 'directory' : 'file',
+                        size: isDir ? null : s.size,
+                        modified: s.mtime.toISOString(),
+                    });
+                } catch { /* skip inaccessible entries */ }
+            }
+
+            // Sort: directories first, then files, alphabetical within each
+            entries.sort((a, b) => {
+                if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+                return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+            });
+
+            ok(res, {
+                path: resolved,
+                parent: path.dirname(resolved) !== resolved ? path.dirname(resolved) : null,
+                entries,
+                truncated: items.length > MAX_ENTRIES,
+            });
+        } catch (error) {
+            json(res, 500, { error: `Failed to browse directory: ${error.message}` });
+        }
+    });
+
+    /**
+     * POST /api/filesystem/open-file
+     * Opens a file with its default native application.
+     * Body: { path: string (absolute path to file) }
+     * Works because the server always runs on the same machine as the browser.
+     */
+    router.post('/api/filesystem/open-file', async (req, res) => {
+        const { execFile } = require('child_process');
+        const filePath = req.body?.path;
+
+        if (!filePath || typeof filePath !== 'string') {
+            return badRequest(res, 'Missing or invalid "path" in request body');
+        }
+
+        const resolved = path.resolve(filePath);
+
+        // Block system directories
+        const normalizedForCheck = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+        for (const blocked of BLOCKED_PATHS) {
+            if (normalizedForCheck.startsWith(blocked) || normalizedForCheck === blocked) {
+                return json(res, 403, { error: `Access denied: "${resolved}" is in a protected system directory.` });
+            }
+        }
+
+        // Verify the file exists
+        if (!fs.existsSync(resolved)) {
+            return notFound(res, `File not found: ${resolved}`);
+        }
+        const fileStat = fs.statSync(resolved);
+        if (fileStat.isDirectory()) {
+            return badRequest(res, `Path is a directory — use /api/filesystem/open-folder instead.`);
+        }
+
+        try {
+            let cmd, args;
+            if (process.platform === 'win32') {
+                cmd = 'cmd';
+                args = ['/c', 'start', '', resolved];
+            } else if (process.platform === 'darwin') {
+                cmd = 'open';
+                args = [resolved];
+            } else {
+                cmd = 'xdg-open';
+                args = [resolved];
+            }
+
+            await new Promise((resolve, reject) => {
+                execFile(cmd, args, { timeout: 15000, windowsHide: true }, (err) => {
+                    if (err) return reject(err);
+                    resolve();
+                });
+            });
+
+            const ext = path.extname(resolved).toLowerCase();
+            ok(res, {
+                opened: true,
+                file: path.basename(resolved),
+                extension: ext,
+                application: getAppNameForExtension(ext),
+            });
+        } catch (error) {
+            json(res, 500, { error: `Failed to open file: ${error.message}` });
+        }
+    });
+
+    /**
+     * POST /api/filesystem/open-folder
+     * Opens a folder (or the containing folder of a file) in the native file explorer.
+     * Body: { path: string (absolute path to file or folder) }
+     */
+    router.post('/api/filesystem/open-folder', async (req, res) => {
+        const { execFile } = require('child_process');
+        const targetPath = req.body?.path;
+
+        if (!targetPath || typeof targetPath !== 'string') {
+            return badRequest(res, 'Missing or invalid "path" in request body');
+        }
+
+        const resolved = path.resolve(targetPath);
+
+        // Block system directories
+        const normalizedForCheck = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+        for (const blocked of BLOCKED_PATHS) {
+            if (normalizedForCheck.startsWith(blocked) || normalizedForCheck === blocked) {
+                return json(res, 403, { error: `Access denied: "${resolved}" is in a protected system directory.` });
+            }
+        }
+
+        // Verify path exists
+        if (!fs.existsSync(resolved)) {
+            return notFound(res, `Path not found: ${resolved}`);
+        }
+
+        // Determine what to open — if it's a file, open its parent and select it
+        const fileStat = fs.statSync(resolved);
+        const isFile = !fileStat.isDirectory();
+
+        try {
+            let cmd, args;
+            if (process.platform === 'win32') {
+                if (isFile) {
+                    // Explorer /select highlights the file in its folder
+                    cmd = 'explorer';
+                    args = ['/select,', resolved];
+                } else {
+                    cmd = 'explorer';
+                    args = [resolved];
+                }
+            } else if (process.platform === 'darwin') {
+                if (isFile) {
+                    cmd = 'open';
+                    args = ['-R', resolved]; // -R reveals in Finder
+                } else {
+                    cmd = 'open';
+                    args = [resolved];
+                }
+            } else {
+                const folderPath = isFile ? path.dirname(resolved) : resolved;
+                cmd = 'xdg-open';
+                args = [folderPath];
+            }
+
+            await new Promise((resolvePromise, reject) => {
+                const child = execFile(cmd, args, { timeout: 15000, windowsHide: true }, (err) => {
+                    // explorer.exe on Windows returns exit code 1 even on success
+                    if (err && process.platform !== 'win32') return reject(err);
+                    resolvePromise();
+                });
+                child.on('error', () => resolvePromise()); // Don't fail on non-critical errors
+            });
+
+            ok(res, {
+                opened: true,
+                target: path.basename(resolved),
+                isFile,
+                folder: isFile ? path.dirname(resolved) : resolved,
+            });
+        } catch (error) {
+            json(res, 500, { error: `Failed to open folder: ${error.message}` });
+        }
+    });
+
+    // ═════════════════════════════════════════════════════════════════
     // CHAT SESSIONS (AI Assistant)
     // ═════════════════════════════════════════════════════════════════
 
@@ -949,11 +1288,23 @@ async function startServer(options = {}) {
      * Body: { content, attachments? }
      * Returns: { messageId }
      *
-     * Attachments are optional base64-encoded images:
-     *   [{ type: 'image', media_type: 'image/png', data: '<base64>' }]
-     * Body limit raised to 75 MB to accommodate up to 10 image attachments.
+     * Attachments are optional base64-encoded images or documents:
+     *   Images:    [{ type: 'image',    media_type: 'image/png', data: '<base64>' }]
+     *   Documents: [{ type: 'document', media_type: 'application/pdf', data: '<base64>', filename: 'report.pdf' }]
      */
     const MAX_IMAGES_PER_MESSAGE = 10;
+    const MAX_DOCS_PER_MESSAGE = 5;
+    const VALID_IMAGE_MEDIA = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+    const VALID_DOC_MEDIA = [
+        'application/pdf',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/msword',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'application/vnd.ms-powerpoint',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.ms-excel',
+        'text/csv', 'text/plain', 'text/markdown', 'application/json',
+    ];
     router.post('/api/chat/sessions/:sessionId/messages', async (req, res) => {
         if (!chatManager) return json(res, 503, { error: 'Chat manager not ready' });
         const { sessionId } = req.params;
@@ -964,25 +1315,45 @@ async function startServer(options = {}) {
 
         // Validate attachments if present
         if (attachments && Array.isArray(attachments)) {
-            const VALID_MEDIA = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
-            if (attachments.length > MAX_IMAGES_PER_MESSAGE) {
-                return badRequest(res, `Maximum ${MAX_IMAGES_PER_MESSAGE} image attachments per message`);
-            }
+            let imageCount = 0;
+            let docCount = 0;
             for (const att of attachments) {
-                if (!att.type || att.type !== 'image') {
-                    return badRequest(res, 'Attachment type must be "image"');
-                }
-                if (!VALID_MEDIA.includes(att.media_type)) {
-                    return badRequest(res, `Unsupported media type: ${att.media_type}. Allowed: ${VALID_MEDIA.join(', ')}`);
+                if (!att.type || !['image', 'document'].includes(att.type)) {
+                    return badRequest(res, 'Attachment type must be "image" or "document"');
                 }
                 if (!att.data || typeof att.data !== 'string') {
                     return badRequest(res, 'Attachment data must be a base64 string');
                 }
-                // Check decoded size (~5 MB max per image)
-                const estimatedSize = Math.ceil(att.data.length * 0.75);
-                if (estimatedSize > 5 * 1024 * 1024) {
-                    return badRequest(res, 'Individual image attachment must be under 5 MB');
+
+                if (att.type === 'image') {
+                    imageCount++;
+                    if (!VALID_IMAGE_MEDIA.includes(att.media_type)) {
+                        return badRequest(res, `Unsupported image type: ${att.media_type}. Allowed: ${VALID_IMAGE_MEDIA.join(', ')}`);
+                    }
+                    const estimatedSize = Math.ceil(att.data.length * 0.75);
+                    if (estimatedSize > 5 * 1024 * 1024) {
+                        return badRequest(res, 'Individual image attachment must be under 5 MB');
+                    }
+                } else if (att.type === 'document') {
+                    docCount++;
+                    if (!VALID_DOC_MEDIA.includes(att.media_type)) {
+                        return badRequest(res, `Unsupported document type: ${att.media_type}`);
+                    }
+                    // Sanitize filename — strip path traversal
+                    if (att.filename) {
+                        att.filename = String(att.filename).replace(/[\\/]/g, '').replace(/\.\./g, '');
+                    }
+                    const estimatedSize = Math.ceil(att.data.length * 0.75);
+                    if (estimatedSize > 50 * 1024 * 1024) {
+                        return badRequest(res, `Document "${att.filename || 'unknown'}" exceeds 50 MB limit`);
+                    }
                 }
+            }
+            if (imageCount > MAX_IMAGES_PER_MESSAGE) {
+                return badRequest(res, `Maximum ${MAX_IMAGES_PER_MESSAGE} image attachments per message`);
+            }
+            if (docCount > MAX_DOCS_PER_MESSAGE) {
+                return badRequest(res, `Maximum ${MAX_DOCS_PER_MESSAGE} document attachments per message`);
             }
         }
 
@@ -1081,7 +1452,7 @@ async function startServer(options = {}) {
     /**
      * POST /api/chat/sessions/:sessionId/user-input
      * Submit a user's response to an agent's ask_user / ask_questions request.
-     * Body: { requestId: string, answer: string }
+     * Body: { requestId: string, answer: string | { username, password } }
      */
     router.post('/api/chat/sessions/:sessionId/user-input', (req, res) => {
         if (!chatManager) return json(res, 503, { error: 'Chat manager not ready' });
@@ -1091,8 +1462,9 @@ async function startServer(options = {}) {
         if (!requestId || typeof requestId !== 'string') {
             return badRequest(res, 'requestId (string) is required');
         }
-        if (!answer || typeof answer !== 'string') {
-            return badRequest(res, 'answer (string) is required');
+        // Accept answer as string OR structured object (e.g., { username, password } for credentials)
+        if (answer === undefined || answer === null || (typeof answer !== 'string' && typeof answer !== 'object')) {
+            return badRequest(res, 'answer (string or object) is required');
         }
 
         try {
@@ -1117,6 +1489,54 @@ async function startServer(options = {}) {
         } catch (error) {
             json(res, 500, { error: error.message });
         }
+    });
+
+    /**
+     * POST /api/chat/sessions/:sessionId/workspace-root
+     * Body: { path }
+     * Directly sets the FileGenie workspace root for this session (no AI call).
+     */
+    router.post('/api/chat/sessions/:sessionId/workspace-root', (req, res) => {
+        const { sessionId } = req.params;
+        const userPath = req.body?.path;
+        if (!userPath) return badRequest(res, 'Missing "path" in request body');
+
+        const resolved = path.resolve(userPath);
+        const normalizedForCheck = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+
+        // Block system directories
+        for (const blocked of BLOCKED_PATHS) {
+            if (normalizedForCheck.startsWith(blocked) || normalizedForCheck === blocked) {
+                return json(res, 403, { error: `Cannot use system directory: ${resolved}` });
+            }
+        }
+
+        if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+            return badRequest(res, `Path is not an existing directory: ${resolved}`);
+        }
+
+        setSessionRoot(sessionId, resolved);
+
+        // Quick stats
+        const items = fs.readdirSync(resolved);
+        let files = 0, dirs = 0;
+        for (const name of items) {
+            try {
+                if (fs.statSync(path.join(resolved, name)).isDirectory()) dirs++;
+                else files++;
+            } catch { /* skip */ }
+        }
+
+        ok(res, { root: resolved, files, directories: dirs, itemCount: items.length });
+    });
+
+    /**
+     * GET /api/chat/sessions/:sessionId/workspace-root
+     * Returns the current workspace root for a FileGenie session.
+     */
+    router.get('/api/chat/sessions/:sessionId/workspace-root', (req, res) => {
+        const root = getSessionRoot(req.params.sessionId);
+        ok(res, { root });
     });
 
     // ═════════════════════════════════════════════════════════════════
@@ -1182,7 +1602,7 @@ async function startServer(options = {}) {
  * Execute a pipeline run in the background.
  * Updates RunStore and EventBridge as stages progress.
  */
-function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBridge, activePipelines, model) {
+function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBridge, activePipelines, model, extraOptions = {}) {
     let cancelled = false;
 
     activePipelines.set(runId, {
@@ -1235,7 +1655,9 @@ function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBr
             const result = await orchestrator.runPipeline(ticketId, {
                 mode,
                 model,
+                runId,
                 onProgress,
+                ...extraOptions,
             });
 
             // Mark completed

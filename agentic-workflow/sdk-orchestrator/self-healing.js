@@ -44,13 +44,24 @@ class SelfHealingEngine {
      *
      * @param {string} ticketId  - Jira ticket ID
      * @param {string} specPath  - Path to the .spec.js file
+     * @param {Object} [runtimeOptions] - Runtime overrides from pipeline cognitive scaling
+     * @param {number} [runtimeOptions.maxIterations] - Override max iterations from cognitive tier
+     * @param {number} [runtimeOptions.timeoutMs] - Override timeout from cognitive tier
+     * @param {string} [runtimeOptions.cognitiveTier] - Complexity tier (simple/moderate/complex)
      * @returns {Object} Healing result
      */
-    async heal(ticketId, specPath) {
+    async heal(ticketId, specPath, runtimeOptions = {}) {
+        // Apply cognitive scaling overrides if provided
+        const effectiveMaxIterations = runtimeOptions.maxIterations || this.maxIterations;
+        const cognitiveTier = runtimeOptions.cognitiveTier || null;
+
         this._log('═══════════════════════════════════════════════');
         this._log('  SELF-HEALING ENGINE');
         this._log(`  Ticket: ${ticketId}`);
         this._log(`  Spec: ${specPath}`);
+        if (cognitiveTier) {
+            this._log(`  Cognitive Tier: ${cognitiveTier} (maxIter: ${effectiveMaxIterations})`);
+        }
         this._log('═══════════════════════════════════════════════');
 
         const resolvedSpec = path.isAbsolute(specPath)
@@ -69,9 +80,9 @@ class SelfHealingEngine {
         let totalFixesApplied = 0;
         const healingLog = [];
 
-        while (iteration < this.maxIterations) {
+        while (iteration < effectiveMaxIterations) {
             iteration++;
-            this._log(`\n── Iteration ${iteration}/${this.maxIterations} ──`);
+            this._log(`\n── Iteration ${iteration}/${effectiveMaxIterations} ──`);
 
             // Step 1: Run tests
             const testResult = await this._runTests(resolvedSpec);
@@ -86,59 +97,151 @@ class SelfHealingEngine {
             this._log(`❌ ${testResult.failedCount}/${testResult.totalCount} tests failed`);
             healingLog.push({ iteration, action: 'tests_failed', tests: testResult });
 
-            // Step 2: Analyze failures
+            // Step 2: Analyze failures — now with cognitive multi-hypothesis (ToT) reasoning
             const analysis = this._analyzeFailures(testResult);
-            this._log(`Analysis: category=${analysis.category}, autoFixable=${analysis.autoFixable}`);
+            const hypotheses = analysis.hypotheses || [];
+            const causalChain = analysis.causalChain || null;
 
-            // Step 3: Attempt auto-fix (regex transforms — no AI)
+            this._log(`Analysis: category=${analysis.category}, autoFixable=${analysis.autoFixable}`);
+            if (hypotheses.length > 1) {
+                this._log(`  🧠 ToT Hypotheses (${hypotheses.length}):`);
+                for (const h of hypotheses) {
+                    this._log(`    [${h.rank}] ${h.category} — confidence=${h.confidence}% | ${h.pattern}`);
+                }
+            }
+            if (causalChain) {
+                this._log(`  🔗 Causal chain detected: ${causalChain.chain?.map(c => c.category).join(' → ') || 'unknown'}`);
+                this._log(`  🎯 Root cause: ${causalChain.rootCause?.category || analysis.category}`);
+            }
+
+            healingLog.push({
+                iteration,
+                action: 'cognitive_analysis',
+                hypotheses: hypotheses.map(h => ({ rank: h.rank, category: h.category, confidence: h.confidence, pattern: h.pattern })),
+                causalChain: causalChain ? { rootCause: causalChain.rootCause?.category, chainLength: causalChain.chain?.length } : null,
+            });
+
+            // ──────────────────────────────────────────────────────────────
+            // Step 3: COGNITIVE HEALING — Tree-of-Thoughts Strategy Selection
+            // Instead of single-path (auto-fix or SDK), evaluate hypotheses
+            // ranked by confidence and try cheapest fix first.
+            // ──────────────────────────────────────────────────────────────
+
+            let healed = false;
+
+            // Strategy A: Try auto-fix from primary hypothesis first
             if (analysis.autoFixable && analysis.autoFix) {
-                this._log('Attempting auto-fix (regex transform)...');
+                this._log('Strategy A: Attempting auto-fix from primary hypothesis...');
                 const autoFixResult = this._applyAutoFix(resolvedSpec, analysis.autoFix);
 
                 if (autoFixResult.success) {
                     totalFixesApplied += autoFixResult.changes.length;
                     this._log(`✅ Auto-fix applied: ${autoFixResult.changes.join(', ')}`);
-                    healingLog.push({ iteration, action: 'auto_fix', changes: autoFixResult.changes });
-
-                    // Record in learning store
+                    healingLog.push({ iteration, action: 'auto_fix', strategy: 'primary', changes: autoFixResult.changes });
                     this._recordLearning(ticketId, analysis, autoFixResult, 'auto-fix');
-                    continue; // Re-run tests with the fix
+                    healed = true;
+                } else {
+                    this._log('Primary auto-fix did not produce changes');
                 }
-
-                this._log('Auto-fix did not produce changes');
             }
 
-            // Step 4: For selector errors → SDK session with MCP re-exploration
-            if (analysis.category === 'SELECTOR' && iteration < this.maxIterations) {
-                this._log('Launching SDK healing session for selector repair...');
+            // Strategy B: If primary fix failed, try secondary/tertiary hypotheses
+            // (ToT branching — evaluate alternative fix paths before expensive SDK)
+            if (!healed && hypotheses.length > 1) {
+                for (let i = 1; i < hypotheses.length && !healed; i++) {
+                    const altHypothesis = hypotheses[i];
+                    this._log(`Strategy B: Trying alternative hypothesis [${altHypothesis.rank}] ${altHypothesis.category} (confidence=${altHypothesis.confidence}%)...`);
+
+                    // Check if this alternative hypothesis has an auto-fix
+                    const altAutoFix = this._generateAutoFixForHypothesis(altHypothesis, testResult);
+                    if (altAutoFix) {
+                        const altFixResult = this._applyAutoFix(resolvedSpec, altAutoFix);
+                        if (altFixResult.success) {
+                            totalFixesApplied += altFixResult.changes.length;
+                            this._log(`✅ Alternative fix [${altHypothesis.rank}] applied: ${altFixResult.changes.join(', ')}`);
+                            healingLog.push({
+                                iteration,
+                                action: 'auto_fix',
+                                strategy: `hypothesis-${altHypothesis.rank}`,
+                                category: altHypothesis.category,
+                                changes: altFixResult.changes,
+                            });
+                            this._recordLearning(ticketId, { ...analysis, category: altHypothesis.category }, altFixResult, 'auto-fix-alt');
+                            healed = true;
+                        }
+                    }
+                }
+                if (!healed) {
+                    this._log('No alternative hypotheses produced viable auto-fixes');
+                }
+            }
+
+            // Strategy C: If causal chain detected, target root cause with SDK
+            // (more efficient than fixing the symptom — e.g., fix AUTH root cause
+            // instead of repeatedly repairing SELECTOR symptoms)
+            if (!healed && causalChain && causalChain.rootCause) {
+                const rootCategory = causalChain.rootCause.category;
+                if (rootCategory !== analysis.category) {
+                    this._log(`Strategy C: Causal chain — targeting root cause (${rootCategory}) instead of symptom (${analysis.category})...`);
+                    healingLog.push({
+                        iteration,
+                        action: 'causal_chain_redirect',
+                        symptom: analysis.category,
+                        rootCause: rootCategory,
+                    });
+                    // Adjust the analysis category to root cause for SDK healing
+                    analysis.category = rootCategory;
+                    analysis._causalChainApplied = true;
+                }
+            }
+
+            // Strategy D: SDK session with MCP re-exploration (expensive — last resort)
+            if (!healed && (analysis.category === 'SELECTOR' || analysis.category === 'TIMING' || analysis._causalChainApplied) && iteration < effectiveMaxIterations) {
+                this._log(`Strategy D: Launching SDK healing session for ${analysis.category} repair...`);
+
+                // Enrich SDK prompt with cognitive insights from all hypotheses
+                const enrichedAnalysis = {
+                    ...analysis,
+                    cognitiveInsights: {
+                        hypotheses: hypotheses.map(h => `[${h.rank}] ${h.category}: ${h.matchedText || h.pattern} (${h.confidence}%)`),
+                        causalChain: causalChain ? `Root: ${causalChain.rootCause?.category} → ${causalChain.chain?.map(c => c.category).join(' → ')}` : null,
+                        suggestedFocus: hypotheses[0]?.suggestions?.slice(0, 3) || [],
+                    },
+                };
 
                 const healResult = await this._healWithSDK(
-                    ticketId, resolvedSpec, testResult, analysis
+                    ticketId, resolvedSpec, testResult, enrichedAnalysis
                 );
 
                 if (healResult.success) {
                     totalFixesApplied += healResult.changesCount;
                     this._log(`✅ SDK healing applied ${healResult.changesCount} fix(es)`);
-                    healingLog.push({ iteration, action: 'sdk_heal', result: healResult });
-
+                    healingLog.push({ iteration, action: 'sdk_heal', strategy: 'cognitive-enriched', result: healResult });
                     this._recordLearning(ticketId, analysis, healResult, 'sdk-heal');
-                    continue; // Re-run tests
+                    healed = true;
+                } else {
+                    this._log(`SDK healing failed: ${healResult.error}`);
+                    healingLog.push({ iteration, action: 'sdk_heal_failed', error: healResult.error });
                 }
-
-                this._log(`SDK healing failed: ${healResult.error}`);
-                healingLog.push({ iteration, action: 'sdk_heal_failed', error: healResult.error });
             }
 
-            // Step 5: For non-selector errors — log and stop
-            if (analysis.category !== 'SELECTOR') {
-                this._log(`Non-selector error (${analysis.category}) — cannot heal automatically`);
-                healingLog.push({
-                    iteration,
-                    action: 'cannot_heal',
-                    reason: `${analysis.category} errors require manual intervention`,
-                });
-                break;
-            }
+            if (healed) continue; // Re-run tests with the fix
+
+            // Step 4: Cannot heal — log reasoning from all hypotheses
+            const cannotHealReason = hypotheses.length > 0
+                ? `Primary: ${hypotheses[0].category} (${hypotheses[0].confidence}%). ` +
+                `Tried ${hypotheses.length} hypothes${hypotheses.length > 1 ? 'es' : 'is'}. ` +
+                `All strategies exhausted for this iteration.`
+                : `${analysis.category} errors require manual intervention`;
+
+            this._log(`Cannot heal: ${cannotHealReason}`);
+            healingLog.push({
+                iteration,
+                action: 'cannot_heal',
+                reason: cannotHealReason,
+                hypothesesExhausted: hypotheses.length,
+            });
+            break;
         }
 
         const success = lastTestResult?.passed || false;
@@ -326,6 +429,40 @@ class SelfHealingEngine {
     }
 
     /**
+     * Generate auto-fix for an alternative hypothesis (ToT branching).
+     * Attempts to create a fix based on the hypothesis category when the
+     * primary hypothesis fix failed. This avoids expensive SDK sessions
+     * by trying cheaper regex-based fixes from secondary hypotheses.
+     *
+     * @param {Object} hypothesis - A ranked hypothesis from ErrorAnalyzer
+     * @param {Object} testResult - Test execution result
+     * @returns {Object|null} Auto-fix object or null if not auto-fixable
+     */
+    _generateAutoFixForHypothesis(hypothesis, testResult) {
+        try {
+            const { ErrorAnalyzer } = require('../../.github/agents/lib/error-analyzer');
+            const analyzer = new ErrorAnalyzer();
+
+            // Build a synthetic analysis from the hypothesis for auto-fix generation
+            const syntheticAnalysis = {
+                category: hypothesis.category,
+                severity: hypothesis.severity,
+                matchedPatterns: [{ name: hypothesis.pattern, match: hypothesis.matchedText || '' }],
+                suggestions: hypothesis.suggestions || [],
+                rawError: testResult.error || testResult.rawOutput || '',
+            };
+
+            // Check if this category is auto-fixable
+            if (!analyzer.canAutoFix(syntheticAnalysis)) return null;
+
+            // Generate the auto-fix
+            return analyzer.generateAutoFix(syntheticAnalysis, {});
+        } catch {
+            return null;
+        }
+    }
+
+    /**
      * Heal with an SDK session — creates a scriptgenerator session that
      * performs live MCP exploration to fix broken selectors.
      */
@@ -360,7 +497,26 @@ class SelfHealingEngine {
             session = sessionInfo.session;
             sessionId = sessionInfo.sessionId;
 
-            // Build the healing prompt
+            // Build the healing prompt — enriched with cognitive insights
+            const cognitiveContext = analysis.cognitiveInsights
+                ? [
+                    '',
+                    '## Cognitive Analysis (Chain-of-Thought reasoning from ErrorAnalyzer):',
+                    '',
+                    '### Ranked Hypotheses (Tree-of-Thoughts — try fixes in this priority):',
+                    ...(analysis.cognitiveInsights.hypotheses || []).map(h => `  ${h}`),
+                    '',
+                    analysis.cognitiveInsights.causalChain
+                        ? `### Causal Chain: ${analysis.cognitiveInsights.causalChain}`
+                        : '',
+                    '',
+                    '### Suggested Focus Areas:',
+                    ...(analysis.cognitiveInsights.suggestedFocus || []).map(s => `  - ${s}`),
+                    '',
+                    'Use the above analysis to guide your repair — fix the ROOT CAUSE, not just the first symptom.',
+                ].filter(Boolean)
+                : [];
+
             const prompt = [
                 `Fix the failing tests in ${specPath}`,
                 '',
@@ -368,13 +524,15 @@ class SelfHealingEngine {
                 '',
                 'Error output (first 1000 chars):',
                 (testResult.error || '').substring(0, 1000),
+                ...cognitiveContext,
                 '',
                 'Instructions:',
                 '1. Navigate to the application page where these tests run',
                 '2. Take a fresh snapshot to get current selectors',
                 '3. Compare the snapshot selectors with the ones in the spec file',
                 '4. Update ONLY the broken selectors — minimize changes',
-                '5. Use the validate_generated_script tool to verify your fix',
+                '5. If causal chain indicates a root cause different from selector issues, address that first',
+                '6. Use the validate_generated_script tool to verify your fix',
             ].join('\n');
 
             // Send prompt and wait for completion

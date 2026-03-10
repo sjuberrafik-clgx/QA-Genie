@@ -7,6 +7,7 @@ import PipelineCard from '@/components/PipelineCard';
 import ModelSelect from '@/components/ModelSelect';
 import PageHeader from '@/components/PageHeader';
 import ErrorBanner from '@/components/ErrorBanner';
+import CognitiveInsights from '@/components/CognitiveInsights';
 import apiClient from '@/lib/api-client';
 import { ClockIcon, RetryIcon, DashboardIcon } from '@/components/Icons';
 import RefreshButton from '@/components/RefreshButton';
@@ -14,7 +15,7 @@ import RefreshButton from '@/components/RefreshButton';
 export default function DashboardPage() {
     const {
         runs, activeRunId, stages, loading, error, networkWarning,
-        sseStatus, retryCount, startPipeline, cancelPipeline, refreshRuns, setError,
+        cognitiveInsights, sseStatus, retryCount, startPipeline, cancelPipeline, refreshRuns, setError,
     } = usePipeline();
 
     const [ticketId, setTicketId] = useState('');
@@ -156,6 +157,11 @@ export default function DashboardPage() {
                         </div>
                         <StageProgress stages={stages} />
                     </div>
+                )}
+
+                {/* Cognitive Insights (shown during/after pipeline runs with cognitive data) */}
+                {cognitiveInsights && cognitiveInsights.tier && (
+                    <CognitiveInsights insights={cognitiveInsights} />
                 )}
 
                 {/* Recent Runs */}

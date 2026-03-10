@@ -140,7 +140,7 @@ class ApiClient {
      * Submit a user's answer to a pending ask_user / ask_questions request.
      * @param {string} sessionId
      * @param {string} requestId - ID of the pending user-input request
-     * @param {string} answer    - The user's answer text
+     * @param {string|Object} answer - The user's answer text, or structured object (e.g., { username, password })
      */
     async submitUserInput(sessionId, requestId, answer) {
         return this._fetch(EP.chatUserInput(sessionId), {
@@ -152,6 +152,32 @@ class ApiClient {
 
     async deleteChatSession(sessionId) {
         return this._fetch(EP.chatSession(sessionId), { method: 'DELETE' });
+    }
+
+    // ─── Filesystem (FileGenie Directory Picker) ────────────────
+    async browseDirectory(dirPath) {
+        const qs = new URLSearchParams({ path: dirPath, dirsOnly: 'true' }).toString();
+        return this._fetch(`${EP.filesystemBrowse}?${qs}`, { retries: 0 });
+    }
+
+    async getQuickAccess() {
+        return this._fetch(EP.filesystemQuickAccess, { retries: 0 });
+    }
+
+    async pickDirectory() {
+        return this._fetch(EP.filesystemPickDirectory, { method: 'POST', retries: 0, timeout: 65000 });
+    }
+
+    async setWorkspaceRoot(sessionId, dirPath) {
+        return this._fetch(EP.chatWorkspaceRoot(sessionId), {
+            method: 'POST',
+            body: JSON.stringify({ path: dirPath }),
+            retries: 0,
+        });
+    }
+
+    async getWorkspaceRoot(sessionId) {
+        return this._fetch(EP.chatWorkspaceRoot(sessionId), { retries: 0 });
     }
 
     // ─── Reports ────────────────────────────────────────────────

@@ -153,6 +153,16 @@ export const TOOL_PROFILES = {
      * This is equivalent to the current behavior (no filtering).
      */
     full: null, // null = no filtering, return ALL_TOOLS
+
+    /**
+     * DEFERRED — Only always-loaded core tools (~20-25 tools).
+     * Used when MCP_DEFERRED_LOADING=true is set.
+     * All other tools are discoverable via unified_tool_search meta-tool.
+     * This is NOT a category-based profile — deferred filtering is handled
+     * in server.js using isToolDeferred(). This entry exists for documentation.
+     * Expected token savings: ~85% reduction (30-40K → 4-6K).
+     */
+    deferred: null,  // Handled by isToolDeferred() in server.js, not category filter
 };
 
 /**

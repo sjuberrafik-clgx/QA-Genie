@@ -7,17 +7,17 @@
 export const AGENT_MODES = [
     {
         value: null,
-        label: 'Default',
-        shortLabel: 'AI',
-        description: 'General QA assistant with all capabilities',
-        placeholder: 'Message AI Assistant...',
-        color: 'surface',       // neutral gray
-        bgClass: 'bg-surface-100',
-        textClass: 'text-surface-600',
-        activeClass: 'bg-surface-800 text-white',
-        badgeBg: 'bg-surface-100',
-        badgeText: 'text-surface-600',
-        icon: 'sparkle',
+        label: 'TPM',
+        shortLabel: 'TPM',
+        description: 'Test Project Manager — unified agent with all capabilities',
+        placeholder: 'Message TPM — I can generate test cases, automation scripts, bug tickets, and tasks...',
+        color: 'violet',        // command-center purple
+        bgClass: 'bg-violet-50',
+        textClass: 'text-violet-600',
+        activeClass: 'bg-violet-600 text-white',
+        badgeBg: 'bg-violet-100',
+        badgeText: 'text-violet-700',
+        icon: 'tpm',
     },
     {
         value: 'testgenie',
@@ -74,6 +74,20 @@ export const AGENT_MODES = [
         badgeBg: 'bg-amber-100',
         badgeText: 'text-amber-700',
         icon: 'task',
+    },
+    {
+        value: 'filegenie',
+        label: 'FileGenie',
+        shortLabel: 'FG',
+        description: 'Interact with local files — organize, search, summarize documents',
+        placeholder: 'Ask me to organize files, summarize a PDF, search documents...',
+        color: 'cyan',
+        bgClass: 'bg-cyan-50',
+        textClass: 'text-cyan-600',
+        activeClass: 'bg-cyan-600 text-white',
+        badgeBg: 'bg-cyan-100',
+        badgeText: 'text-cyan-700',
+        icon: 'file',
     },
 ];
 

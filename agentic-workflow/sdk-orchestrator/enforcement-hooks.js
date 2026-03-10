@@ -169,6 +169,17 @@ function createEnforcementHooks(agentName, options = {}) {
                 log('✅ MCP snapshot called — selectors captured');
             }
 
+            // Track programmatic execution (Anthropic Technique 1)
+            // execute_exploration batches multiple tool calls — credit the checks that the
+            // script implicitly performs. The executor logs every tool call it makes, so the
+            // agent still performs real MCP exploration, just more efficiently.
+            if (toolName.includes('unified_execute_exploration')) {
+                // A batch exploration script inherently navigates and snapshots
+                state.mcpNavigateCalled = true;
+                state.mcpSnapshotCalled = true;
+                log('✅ MCP batch exploration executed — navigate + snapshot credited');
+            }
+
             // Track semantic selector validation (get_by_role, get_by_test_id, get_by_label, get_by_text, get_by_placeholder, get_by_alt_text, get_by_title)
             if (toolName.includes('unified_get_by_role') || toolName.includes('unified_get_by_test_id') ||
                 toolName.includes('unified_get_by_label') || toolName.includes('unified_get_by_text') ||
@@ -211,7 +222,10 @@ function createEnforcementHooks(agentName, options = {}) {
             }
 
             // Block file creation before MCP exploration
-            if (mcpConfig.blockScriptCreationWithoutExploration !== false) {
+            // When MCP_EXPLORATION_ENABLED=false (.env), exploration is intentionally
+            // skipped — do NOT block file creation in that case.
+            const explorationEnabled = process.env.MCP_EXPLORATION_ENABLED !== 'false';
+            if (explorationEnabled && mcpConfig.blockScriptCreationWithoutExploration !== false) {
                 const isFileWrite = ['write_file', 'create_file', 'edit'].some(t =>
                     toolName.includes(t)
                 );
@@ -427,6 +441,24 @@ function createEnforcementHooks(agentName, options = {}) {
     hooks.onPostToolUse = async (input, invocation) => {
         const state = getState(invocation.sessionId || stableFallbackId);
         const toolName = input.toolName;
+
+        // ── Context Engineering: Trim bloated tool results to save context budget ──
+        // MCP snapshots, network requests, console messages can be 50K+ chars.
+        // Trimming here reduces what enters the conversation history.
+        try {
+            const { getContextEngine } = require('./context-engine');
+            const contextEngine = getContextEngine();
+            if (contextEngine && typeof input.result === 'string' && input.result.length > 2000) {
+                const trimmed = contextEngine.trimToolResult(toolName, input.result);
+                if (trimmed && trimmed.length < input.result.length) {
+                    const saved = input.result.length - trimmed.length;
+                    log(`📦 Tool result trimmed: ${toolName} ${input.result.length} → ${trimmed.length} chars (saved ${saved})`);
+                    input.result = trimmed;
+                }
+            }
+        } catch (trimErr) {
+            // Non-blocking: if trimming fails, use original result
+        }
 
         // ── After MCP snapshot: OODA quality assessment ────────────
         if (toolName.includes('unified_snapshot')) {
@@ -929,10 +961,58 @@ function createCognitiveEnforcementHooks(phaseName, options = {}) {
     return hooks;
 }
 
+// ─── Document Quality Analyzer ──────────────────────────────────────────────
+
+/**
+ * Validates document generation tool outputs for structural quality.
+ * Runs as a post-tool-use analyzer for DocGenie's generate_* tools.
+ */
+class DocumentQualityAnalyzer {
+    constructor(config = {}) {
+        this.minSections = config.minSections || 2;
+        this.maxSections = config.maxSections || 100;
+        this.warnThreshold = config.warnThreshold || 60;
+    }
+
+    analyze(toolResult) {
+        let result;
+        try { result = typeof toolResult === 'string' ? JSON.parse(toolResult) : toolResult; } catch { return null; }
+        if (!result || !result.success) return null;
+
+        const issues = [];
+        let score = 100;
+
+        // File size check (< 1KB is suspiciously small, > 50MB is excessive)
+        if (result.fileSize && result.fileSize < 1024) {
+            issues.push('Document is suspiciously small (< 1 KB) — may be missing content.');
+            score -= 20;
+        }
+        if (result.fileSize && result.fileSize > 50 * 1024 * 1024) {
+            issues.push('Document exceeds 50 MB — may contain unoptimized images.');
+            score -= 15;
+        }
+
+        // Section/slide/sheet count validation
+        const count = result.sectionCount || result.slideCount || result.sheetCount || 0;
+        if (count < this.minSections) {
+            issues.push(`Only ${count} content items generated — expected at least ${this.minSections}.`);
+            score -= 25;
+        }
+        if (count > this.maxSections) {
+            issues.push(`${count} content items generated — exceeds maximum of ${this.maxSections}. Consider splitting.`);
+            score -= 10;
+        }
+
+        const decision = score >= this.warnThreshold ? 'ACCEPT' : 'WARN';
+        return { score, decision, issues, fileSize: result.fileSizeHuman, itemCount: count };
+    }
+}
+
 module.exports = {
     createEnforcementHooks,
     createCognitiveEnforcementHooks,
     SessionEnforcementState,
     getSnapshotQualityData,
+    DocumentQualityAnalyzer,
     COGNITIVE_PHASE_RULES,
 };

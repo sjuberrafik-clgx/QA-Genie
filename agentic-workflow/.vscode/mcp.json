@@ -6,12 +6,7 @@
 			"args": [
 				"${workspaceFolder}/mcp-server/server.js"
 			],
-			"env": {
-				"MCP_HEADLESS": "false",
-				"MCP_BROWSER": "chromium",
-				"MCP_TIMEOUT": "60000",
-				"MCP_WAIT_FOR_NETWORK_IDLE": "true"
-			}
+			"env": {}
 		},
 		"atlassian/atlassian-mcp-server": {
 			"type": "http",

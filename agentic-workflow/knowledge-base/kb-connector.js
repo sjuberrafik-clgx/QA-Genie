@@ -297,6 +297,11 @@ class KnowledgeBaseConnector {
      * Build a formatted knowledge base context string for injection
      * into an agent's system prompt.
      *
+     * Uses a lightweight cognitive re-ranking step: after BM25 retrieval,
+     * each result is scored against the task description using term overlap,
+     * title relevance, and recency signals. This is a deterministic CoT-style
+     * reasoning chain (zero LLM calls) that improves context quality.
+     *
      * @param {string} agentName - Agent role
      * @param {string} taskDescription - Current task description
      * @param {Object} [options]
@@ -310,28 +315,41 @@ class KnowledgeBaseConnector {
 
         try {
             const result = await this.queryForAgent(agentName, taskDescription, {
-                maxResults: 5,
+                maxResults: 8, // Fetch more candidates for re-ranking
             });
 
             if (result.results.length === 0) return '';
+
+            // ── Cognitive Re-Ranking (deterministic, zero LLM) ──────
+            // Apply multi-signal scoring to re-rank BM25 results based on:
+            //   1. Term overlap with task description (semantic proximity)
+            //   2. Title keyword match (structural relevance)
+            //   3. Recency boost (fresher docs are more likely accurate)
+            //   4. Agent-specific priority patterns
+            const reranked = this._cognitiveRerank(result.results, taskDescription, agentName);
+
+            // Take top 5 after re-ranking
+            const topResults = reranked.slice(0, 5);
 
             // Build formatted context
             const sections = [];
             sections.push('KNOWLEDGE BASE:');
             sections.push(`Source: ${this._providers.map(p => p.getProviderName()).join(', ')}`);
+            sections.push(`Re-ranked: ${reranked.length} candidates → top ${topResults.length}`);
             sections.push('');
 
             let currentLength = sections.join('\n').length;
 
-            for (const r of result.results) {
-                const entry = `[${r.title}] (${r.url})\n${r.excerpt}\n`;
+            for (const r of topResults) {
+                const scoreTag = r._cogScore ? ` [relevance: ${r._cogScore.toFixed(2)}]` : '';
+                const entry = `[${r.title}]${scoreTag} (${r.url})\n${r.excerpt}\n`;
 
                 if (currentLength + entry.length > maxChars) {
                     // Try truncating the excerpt
-                    const remaining = maxChars - currentLength - `[${r.title}] (${r.url})\n\n`.length;
+                    const remaining = maxChars - currentLength - `[${r.title}]${scoreTag} (${r.url})\n\n`.length;
                     if (remaining > 50) {
                         const truncatedExcerpt = r.excerpt.slice(0, remaining) + '...';
-                        sections.push(`[${r.title}] (${r.url})\n${truncatedExcerpt}`);
+                        sections.push(`[${r.title}]${scoreTag} (${r.url})\n${truncatedExcerpt}`);
                     }
                     break;
                 }
@@ -345,6 +363,76 @@ class KnowledgeBaseConnector {
             this._log(`buildKBContext failed: ${error.message}`);
             return '';
         }
+    }
+
+    /**
+     * Cognitive re-ranking: deterministic multi-signal scoring.
+     *
+     * Reasoning chain (CoT-style, applied per result):
+     *   Step 1: How many task description terms appear in the result? (term overlap)
+     *   Step 2: Does the title contain key feature/action words? (title relevance)
+     *   Step 3: How recent is the document? (recency bias)
+     *   Step 4: Does the result match the agent's priority patterns? (agent boost)
+     *
+     * @param {Array} results - BM25 search results
+     * @param {string} taskDescription - The agent's current task
+     * @param {string} agentName - Agent role for priority patterns
+     * @returns {Array} Re-ranked results with _cogScore attached
+     * @private
+     */
+    _cognitiveRerank(results, taskDescription, agentName) {
+        // Extract meaningful terms from task description (>3 chars, not stop words)
+        const stopWords = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'have', 'will', 'should', 'must', 'into', 'when', 'been', 'each', 'then', 'also', 'test', 'page']);
+        const taskTerms = taskDescription.toLowerCase()
+            .replace(/[^a-z0-9\s]/g, ' ')
+            .split(/\s+/)
+            .filter(t => t.length > 3 && !stopWords.has(t));
+        const uniqueTerms = [...new Set(taskTerms)];
+
+        // Agent-specific priority patterns
+        const agentPatterns = {
+            testgenie: ['acceptance criteria', 'requirement', 'user story', 'test case', 'scenario'],
+            scriptgenerator: ['selector', 'locator', 'page object', 'api', 'endpoint', 'navigation'],
+            buggenie: ['defect', 'bug', 'known issue', 'regression', 'workaround'],
+            codereviewer: ['standard', 'convention', 'pattern', 'best practice', 'guideline'],
+        };
+        const priorities = agentPatterns[agentName] || [];
+
+        const now = Date.now();
+
+        return results.map(r => {
+            const titleLower = (r.title || '').toLowerCase();
+            const excerptLower = (r.excerpt || '').toLowerCase();
+            const content = `${titleLower} ${excerptLower}`;
+
+            // Signal 1: Term overlap (0-1) — what fraction of task terms appear in result?
+            const overlapCount = uniqueTerms.filter(t => content.includes(t)).length;
+            const termOverlap = uniqueTerms.length > 0 ? overlapCount / uniqueTerms.length : 0;
+
+            // Signal 2: Title relevance (0-1) — are key task terms in the title?
+            const titleMatches = uniqueTerms.filter(t => titleLower.includes(t)).length;
+            const titleRelevance = uniqueTerms.length > 0 ? titleMatches / Math.min(uniqueTerms.length, 5) : 0;
+
+            // Signal 3: Recency (0-1) — boost docs modified in last 30 days
+            let recencyScore = 0.5;
+            if (r.lastModified) {
+                const age = now - new Date(r.lastModified).getTime();
+                const dayMs = 86400000;
+                if (age < 7 * dayMs) recencyScore = 1.0;
+                else if (age < 30 * dayMs) recencyScore = 0.8;
+                else if (age < 90 * dayMs) recencyScore = 0.5;
+                else recencyScore = 0.3;
+            }
+
+            // Signal 4: Agent-specific pattern match (0-1)
+            const patternMatches = priorities.filter(p => content.includes(p)).length;
+            const agentBoost = priorities.length > 0 ? patternMatches / priorities.length : 0;
+
+            // Weighted composite score
+            const cogScore = (termOverlap * 0.40) + (titleRelevance * 0.25) + (recencyScore * 0.15) + (agentBoost * 0.20);
+
+            return { ...r, _cogScore: cogScore };
+        }).sort((a, b) => b._cogScore - a._cogScore);
     }
 
     // ─── Sync API ───────────────────────────────────────────────────

@@ -129,6 +129,29 @@ For each selector you use, add a comment showing its source:
 await page.getByRole('button', { name: 'Apply Filters' }).click();
 \`\`\`
 
+## Self-Reflection (Chain-of-Thought — MANDATORY BEFORE OUTPUT)
+After writing each test block, STOP and perform this internal self-check before proceeding:
+
+### Per-Test-Block Reflection (after writing each test() block):
+1. SELECTOR CHECK: "Does every selector in this block exist in the exploration selectorMap?"
+   - If NO → replace with a verified selector or flag as UNVERIFIED
+2. ASSERTION CHECK: "Is every assertion auto-retrying? Am I using expect(el).toBeVisible() not expect(await el.isVisible())?"
+   - If NO → rewrite the assertion to use auto-retrying form
+3. ANTI-PATTERN CHECK: "Am I using waitForTimeout()? page.type()? Hardcoded URLs/tokens?"
+   - If YES → replace with proper alternatives (waitForLoadState, fill(), userTokens)
+4. REUSE CHECK: "Does the framework inventory have a function that already does this?"
+   - If YES → replace inline code with the framework function call
+
+### Final Script Reflection (after all tests written, BEFORE outputting):
+Think through these questions and FIX any issues before emitting:
+1. "Do I have orphan selectors not traceable to exploration data?" → Remove or flag them
+2. "Are there duplicate code blocks that should be extracted to a helper?" → Extract
+3. "Does every test have at least one MEANINGFUL assertion (not trivial)?" → Add if missing
+4. "Is the total script under 300 lines?" → Refactor if over
+5. "Does test flow follow a logical user journey?" → Reorder if needed
+
+Output a selfReflection summary in the generation report showing what you caught and fixed.
+
 ## Output
 Generate the complete .spec.js file content. Also output a generation report:
 
@@ -139,7 +162,15 @@ Generate the complete .spec.js file content. Also output a generation report:
     "selectorsFromExploration": 12,
     "functionsReused": ["loginConsumer", "dismissPopups"],
     "warnings": ["Step 1.3 selector was marked partial — may be flaky"],
-    "confidence": 85
+    "confidence": 85,
+    "selfReflection": {
+      "issuesCaught": 2,
+      "issuesFixed": 2,
+      "details": [
+        "Replaced non-retrying assertion on line 45 with await expect(el).toBeVisible()",
+        "Extracted duplicate navigation to helper function navigateToSearch()"
+      ]
+    }
   }
 }`;
 }
@@ -253,8 +284,8 @@ function buildCoderUserPrompt(options) {
 function parseCoderOutput(rawResponse) {
     let report = null;
 
-    // Try to extract JSON generation report
-    const reportMatch = rawResponse.match(/"generationReport"\s*:\s*\{[\s\S]*?\}/);
+    // Try to extract JSON generation report (including nested selfReflection)
+    const reportMatch = rawResponse.match(/"generationReport"\s*:\s*\{[\s\S]*?\}\s*\}/);
     if (reportMatch) {
         try {
             report = JSON.parse(`{${reportMatch[0]}}`).generationReport;
@@ -277,7 +308,10 @@ function parseCoderOutput(rawResponse) {
         }
     }
 
-    return { report };
+    // Extract self-reflection metrics
+    const selfReflection = report?.selfReflection || null;
+
+    return { report, selfReflection };
 }
 
 /**

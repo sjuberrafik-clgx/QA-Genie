@@ -9,6 +9,15 @@
     --gradient-accent: linear-gradient(135deg, #059669 0%, #10b981 50%, #34d399 100%);
     --gradient-hero: linear-gradient(135deg, #1c8090 0%, #1a9baa 30%, #23b4c4 60%, #3abac6 100%);
     --gradient-surface: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+
+    /* ─── Nuxt UI–inspired layout tokens ──────────────────────────── */
+    --ui-container: 1280px;
+    --ui-border-default: #e5e7eb;
+}
+
+/* App Footer */
+.app-footer {
+    border-top: 1px solid var(--ui-border-default);
 }
 
 body {
@@ -171,15 +180,52 @@ body {
     @apply bg-brand-50 text-brand-700 px-1.5 py-0.5 rounded text-[13px] font-mono border border-brand-100;
 }
 
-/* ── Code blocks ── */
+/* ── Code blocks — safety-net for any residual <pre> not handled by CodeBlock ── */
 .chat-markdown pre {
-    @apply bg-[#1e1e2e] text-green-400 p-4 rounded-xl my-3 overflow-x-auto text-sm;
+    @apply bg-[#1e1e2e] p-0 rounded-xl my-3 overflow-x-auto text-sm;
+    color: #c9d1d9;
+    border: 1px solid #2a2a3e;
+}
+
+.chat-markdown pre code {
+    @apply bg-transparent p-0 border-0;
+    color: #c9d1d9;
+}
+
+/* ── CodeBlock header bar ── */
+.code-block-wrapper {
+    @apply rounded-xl overflow-hidden my-3;
     border: 1px solid #2a2a3e;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
-.chat-markdown pre code {
-    @apply bg-transparent text-green-400 p-0 border-0;
+.code-block-header {
+    @apply flex items-center justify-between px-4 py-2;
+    background: #16161e;
+    border-bottom: 1px solid #2a2a3e;
+}
+
+.code-block-lang {
+    @apply text-[11px] font-semibold tracking-wider uppercase;
+    color: #7c899a;
+}
+
+.code-block-copy {
+    @apply flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-md transition-all;
+    color: #7c899a;
+    background: transparent;
+}
+
+.code-block-copy:hover {
+    color: #c8d3e0;
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.code-block-wrapper .react-syntax-highlighter-line-number {
+    color: #636d83 !important;
+    font-size: 12px !important;
+    padding-right: 16px !important;
+    user-select: none;
 }
 
 /* ── Lists ── */
@@ -335,6 +381,77 @@ body {
 /* ── Strong / Bold ── */
 .chat-markdown strong {
     @apply font-semibold text-surface-900;
+}
+
+/* ── Italic / Emphasis ── */
+.chat-markdown em {
+    @apply italic text-surface-700;
+}
+
+/* ── Strikethrough ── */
+.chat-markdown del {
+    @apply line-through text-surface-400;
+}
+
+/* ── Task list checkboxes (GFM) ── */
+.chat-markdown input[type='checkbox'] {
+    @apply w-4 h-4 rounded border-2 border-brand-400 mr-2 accent-brand-500;
+    vertical-align: middle;
+}
+
+.chat-markdown li:has(> input[type='checkbox']) {
+    list-style: none;
+    padding-left: 0;
+}
+
+.chat-markdown li:has(> input[type='checkbox'])::before {
+    display: none;
+}
+
+/* ── KaTeX math overrides ── */
+.chat-markdown .katex-display {
+    @apply my-3 overflow-x-auto;
+}
+
+.chat-markdown .katex {
+    font-size: 1.05em;
+}
+
+/* ─── Message Entrance Animation ─────────────────────────────────── */
+@keyframes messageSlideIn {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.message-entrance {
+    animation: messageSlideIn 0.3s ease-out both;
+}
+
+/* ─── Streaming cursor blink ─────────────────────────────────────── */
+.streaming-cursor::after {
+    content: '\25AE';
+    @apply text-brand-500 ml-0.5;
+    animation: cursorBlink 1s step-end infinite;
+    font-size: 0.85em;
+}
+
+@keyframes cursorBlink {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0;
+    }
 }
 
 /* ─── Mermaid Diagram Containers ─────────────────────────────────── */
@@ -791,4 +908,332 @@ body {
 
 [data-theme="dark"] .rpt-donut-track {
     stroke: #334155;
+}
+
+/* ═════════════════════════════════════════════════════════════════════
+   Bouncing Loader — Adapted from uiverse.io/mobinkakei/grumpy-turtle-41
+   Themed to brand-500 (#1f9eab) palette
+   ═════════════════════════════════════════════════════════════════════ */
+.bouncing-loader-wrapper {
+    width: 200px;
+    height: 60px;
+    position: relative;
+    z-index: 1;
+}
+
+.bouncing-circle {
+    width: 20px;
+    height: 20px;
+    position: absolute;
+    border-radius: 50%;
+    background-color: #1f9eab;
+    left: 15%;
+    transform-origin: 50%;
+    animation: bouncingCircle 0.5s alternate infinite ease;
+}
+
+.bouncing-circle:nth-child(2) {
+    left: 45%;
+    animation-delay: 0.2s;
+}
+
+.bouncing-circle:nth-child(3) {
+    left: auto;
+    right: 15%;
+    animation-delay: 0.3s;
+}
+
+@keyframes bouncingCircle {
+    0% {
+        top: 60px;
+        height: 5px;
+        border-radius: 50px 50px 25px 25px;
+        transform: scaleX(1.7);
+    }
+
+    40% {
+        height: 20px;
+        border-radius: 50%;
+        transform: scaleX(1);
+    }
+
+    100% {
+        top: 0%;
+    }
+}
+
+.bouncing-shadow {
+    width: 20px;
+    height: 4px;
+    border-radius: 50%;
+    background-color: rgba(28, 128, 144, 0.25);
+    position: absolute;
+    top: 62px;
+    transform-origin: 50%;
+    z-index: -1;
+    left: 15%;
+    filter: blur(1px);
+    animation: bouncingShadow 0.5s alternate infinite ease;
+}
+
+.bouncing-shadow:nth-child(5) {
+    left: 45%;
+    animation-delay: 0.2s;
+}
+
+.bouncing-shadow:nth-child(6) {
+    left: auto;
+    right: 15%;
+    animation-delay: 0.3s;
+}
+
+@keyframes bouncingShadow {
+    0% {
+        transform: scaleX(1.5);
+    }
+
+    40% {
+        transform: scaleX(1);
+        opacity: 0.7;
+    }
+
+    100% {
+        transform: scaleX(0.2);
+        opacity: 0.4;
+    }
+}
+
+/* ═════════════════════════════════════════════════════════════════════
+   Glowing Input — Adapted from uiverse.io/Lakshay-art/curvy-earwig-22
+   Themed to brand palette. Uses isolation stacking context so glow
+   layers sit between the wrapper and the inner card — never behind
+   the page background.
+   ═════════════════════════════════════════════════════════════════════ */
+
+/* Outer wrapper — creates stacking context */
+.glow-input-wrap {
+    position: relative;
+    isolation: isolate;
+    padding: 3px;
+    /* glow peeks through as a border */
+    border-radius: 18px;
+}
+
+/* ── Shared base for all four glow layers ── */
+.glow-input-wrap .gi-layer {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    border-radius: 18px;
+    z-index: 0;
+    /* above wrapper bg, below inner card */
+    pointer-events: none;
+}
+
+/* Layer 1 — outer glow (blurry, diffuse) */
+.glow-input-wrap .gi-glow {
+    filter: blur(18px);
+    opacity: 0.35;
+    inset: -8px;
+    /* bleeds outward for soft halo */
+    border-radius: 24px;
+}
+
+.glow-input-wrap .gi-glow::before {
+    content: "";
+    position: absolute;
+    inset: -150px;
+    background-image: conic-gradient(#000, #1c8090 5%, #000 38%,
+            #000 50%, #1f9eab 60%, #000 87%);
+    transform: translate(-50%, -50%) rotate(60deg);
+    top: 50%;
+    left: 50%;
+    width: 600px;
+    height: 600px;
+    transition: all 2s;
+}
+
+/* Layer 2 — dark border (subtle inner shadow) */
+.glow-input-wrap .gi-dark::before {
+    content: "";
+    position: absolute;
+    inset: -150px;
+    background-image: conic-gradient(rgba(0, 0, 0, 0), #0d2e37,
+            rgba(0, 0, 0, 0) 10%, rgba(0, 0, 0, 0) 50%,
+            #1d6876, rgba(0, 0, 0, 0) 60%);
+    transform: translate(-50%, -50%) rotate(82deg);
+    top: 50%;
+    left: 50%;
+    width: 600px;
+    height: 600px;
+    transition: all 2s;
+}
+
+/* Layer 3 — crisp border line */
+.glow-input-wrap .gi-border {
+    filter: blur(0.5px);
+}
+
+.glow-input-wrap .gi-border::before {
+    content: "";
+    position: absolute;
+    inset: -150px;
+    background-image: conic-gradient(#e2e8f0, #1c8090 5%, #e2e8f0 14%,
+            #e2e8f0 50%, #1f9eab 60%, #e2e8f0 64%);
+    filter: brightness(1.3);
+    transform: translate(-50%, -50%) rotate(70deg);
+    top: 50%;
+    left: 50%;
+    width: 600px;
+    height: 600px;
+    transition: all 2s;
+}
+
+/* Layer 4 — white highlight */
+.glow-input-wrap .gi-white {
+    filter: blur(2px);
+}
+
+.glow-input-wrap .gi-white::before {
+    content: "";
+    position: absolute;
+    inset: -150px;
+    background-image: conic-gradient(rgba(0, 0, 0, 0) 0%, #78d6dd,
+            rgba(0, 0, 0, 0) 8%, rgba(0, 0, 0, 0) 50%,
+            #3abac6, rgba(0, 0, 0, 0) 58%);
+    filter: brightness(1.4);
+    transform: translate(-50%, -50%) rotate(83deg);
+    top: 50%;
+    left: 50%;
+    width: 600px;
+    height: 600px;
+    transition: all 2s;
+}
+
+/* Inner card — sits on top of glow layers */
+.glow-input-inner {
+    position: relative;
+    z-index: 1;
+    background: white;
+    border-radius: 16px;
+    border: 1px solid #e2e8f0;
+}
+
+/* ── Hover — gentle rotation ── */
+.glow-input-wrap:hover .gi-dark::before {
+    transform: translate(-50%, -50%) rotate(-98deg);
+}
+
+.glow-input-wrap:hover .gi-glow::before {
+    transform: translate(-50%, -50%) rotate(-120deg);
+}
+
+.glow-input-wrap:hover .gi-white::before {
+    transform: translate(-50%, -50%) rotate(-97deg);
+}
+
+.glow-input-wrap:hover .gi-border::before {
+    transform: translate(-50%, -50%) rotate(-110deg);
+}
+
+/* ── Focus-within — full animated spin ── */
+.glow-input-wrap:focus-within .gi-dark::before {
+    transform: translate(-50%, -50%) rotate(442deg);
+    transition: all 4s;
+}
+
+.glow-input-wrap:focus-within .gi-glow::before {
+    transform: translate(-50%, -50%) rotate(420deg);
+    transition: all 4s;
+}
+
+.glow-input-wrap:focus-within .gi-white::before {
+    transform: translate(-50%, -50%) rotate(443deg);
+    transition: all 4s;
+}
+
+.glow-input-wrap:focus-within .gi-border::before {
+    transform: translate(-50%, -50%) rotate(430deg);
+    transition: all 4s;
+}
+
+/* ═════════════════════════════════════════════════════════════════════
+   Send Button — Adapted from uiverse.io/adamgiebl/smart-moth-68
+   Themed to brand palette
+   ═════════════════════════════════════════════════════════════════════ */
+.send-btn {
+    font-family: inherit;
+    font-size: 13px;
+    background: linear-gradient(135deg, #1c8090 0%, #1f9eab 100%);
+    color: white;
+    padding: 0.45em 0.85em;
+    padding-left: 0.65em;
+    display: inline-flex;
+    align-items: center;
+    gap: 0;
+    border: none;
+    border-radius: 10px;
+    overflow: hidden;
+    transition: all 0.2s;
+    cursor: pointer;
+    white-space: nowrap;
+    height: 32px;
+    line-height: 1;
+}
+
+.send-btn:disabled {
+    background: #e2e8f0;
+    color: #94a3b8;
+    cursor: not-allowed;
+}
+
+.send-btn:disabled:hover .send-btn-svg-wrapper {
+    animation: none;
+}
+
+.send-btn:disabled:hover svg {
+    transform: none;
+}
+
+.send-btn:disabled:hover span {
+    transform: none;
+}
+
+.send-btn span {
+    display: block;
+    margin-left: 0.3em;
+    transition: all 0.3s ease-in-out;
+    font-weight: 500;
+}
+
+.send-btn svg {
+    display: block;
+    transform-origin: center center;
+    transition: transform 0.3s ease-in-out;
+}
+
+.send-btn:not(:disabled):hover .send-btn-svg-wrapper {
+    animation: sendBtnFly 0.6s ease-in-out infinite alternate;
+}
+
+.send-btn:not(:disabled):hover svg {
+    transform: translateX(1.2em) rotate(45deg) scale(1.1);
+}
+
+.send-btn:not(:disabled):hover span {
+    transform: translateX(5em);
+}
+
+.send-btn:not(:disabled):active {
+    transform: scale(0.95);
+}
+
+@keyframes sendBtnFly {
+    from {
+        transform: translateY(0.1em);
+    }
+
+    to {
+        transform: translateY(-0.1em);
+    }
 }

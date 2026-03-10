@@ -2,15 +2,17 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { AGENT_MODES, getAgentConfig } from '@/lib/agent-options';
-import { SparkleIcon, DocumentIcon, CodeIcon, BugIcon, TaskIcon } from '@/components/Icons';
+import { SparkleIcon, TPMIcon, DocumentIcon, CodeIcon, BugIcon, TaskIcon, FileIcon } from '@/components/Icons';
 
 /* ── Icon mapping per agent (references Icons.js components) ─────────────── */
 const ICON_MAP = {
     sparkle: SparkleIcon,
+    tpm: TPMIcon,
     document: DocumentIcon,
     code: CodeIcon,
     bug: BugIcon,
     task: TaskIcon,
+    file: FileIcon,
 };
 
 function AgentIcon({ icon, className = 'w-4 h-4' }) {
@@ -46,7 +48,7 @@ export default function AgentSelect({ value, onChange, disabled = false, classNa
 
     return (
         <div ref={containerRef} className={`relative flex items-center ${className}`}>
-            <div className={`flex items-center gap-0.5 p-0.5 rounded-xl border bg-surface-50/80 ${disabled ? 'opacity-60 pointer-events-none' : ''} border-surface-200/60`}>
+            <div className={`flex items-center gap-0.5 p-0.5 rounded-xl border bg-surface-50/80 overflow-x-auto ${disabled ? 'opacity-60 pointer-events-none' : ''} border-surface-200/60`}>
                 {AGENT_MODES.map((agent) => {
                     const isActive = agent.value === value;
                     return (
@@ -96,7 +98,6 @@ export default function AgentSelect({ value, onChange, disabled = false, classNa
  */
 export function AgentBadge({ agentMode, size = 'sm' }) {
     const agent = getAgentConfig(agentMode);
-    if (agent.value === null) return null; // No badge for default mode
 
     const sizeClasses = size === 'xs'
         ? 'text-[9px] px-1.5 py-0.5 gap-0.5'

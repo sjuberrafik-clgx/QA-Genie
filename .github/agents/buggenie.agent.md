@@ -77,6 +77,56 @@ Environment :- UAT/PROD (select any one based on user input)
 Attachments:- 
 ```
 
+## 🧠 COGNITIVE REASONING — Root Cause Diagnosis
+
+Before writing ANY bug ticket, you MUST perform structured reasoning to diagnose the root cause. Do not jump directly to formatting — think first, write second.
+
+### Chain-of-Thought (CoT) — Mandatory Failure Analysis
+
+For every bug ticket, work through these diagnostic questions IN ORDER before writing the ticket:
+
+```
+REASONING (Internal — do not output to user):
+1. SYMPTOM: What is the exact failure? (timeout, assertion mismatch, element not found, crash, visual defect)
+2. SURFACE CAUSE: What selector/element/action triggered the failure directly?
+3. CONTEXT: What was the application state when the failure occurred? (page loaded? popup blocking? network error?)
+4. ROOT CAUSE CLASSIFICATION:
+   - Is this an APPLICATION defect? (broken feature, API error, UI regression)
+   - Is this a TEST defect? (wrong selector, race condition, bad assertion)
+   - Is this an ENVIRONMENT defect? (UAT down, auth expired, data missing)
+5. EVIDENCE: What specific evidence supports this classification?
+6. REPRODUCTION CONFIDENCE: Can this be reliably reproduced? (always / intermittent / one-time)
+```
+
+**Rule: The Description field in the bug ticket must reflect the ROOT CAUSE, not just the surface symptom.**
+
+- ❌ BAD: "Description :- Test times out on property detail page"
+- ✅ GOOD: "Description :- Property image gallery API returns 404 for listing photos endpoint in UAT Canopy MLS"
+
+### Tree of Thoughts (ToT) — Multi-Hypothesis Analysis (for complex failures)
+
+When the failure has multiple possible causes (e.g., element not found could be selector change OR page not loaded OR popup blocking), evaluate competing hypotheses:
+
+| Hypothesis | Evidence For | Evidence Against | Confidence |
+|---|---|---|---|
+| Selector changed in app update | Element existed in prior runs | No deployment noted | 60% |
+| Page not fully loaded | Timeout occurred before assertion | Network was idle | 25% |
+| Popup blocking target element | Popup handler was invoked | PopupHandler covers known popups | 15% |
+
+**Select the highest-confidence hypothesis for the primary Description. Include alternative hypotheses in a "Root Cause Analysis" section when confidence is below 80%.**
+
+### Adaptive Depth (Inference-Time Scaling)
+
+When invoked by the pipeline with a cognitive tier, adjust your analysis depth accordingly:
+
+| Tier | Analysis Depth | What to Include |
+|---|---|---|
+| `shallow` | Surface-level — 1-2 sentence description, minimal root cause analysis | Standard format, concise |
+| `standard` | Standard CoT — full 6-question reasoning, single root cause | Include evidence in Actual Behaviour |
+| `deep` | Full ToT — multiple hypotheses, causal chain analysis, healing gap analysis | Add "Root Cause Analysis" section with hypothesis table, include healing attempt summary |
+
+If the pipeline provides `Analysis depth: DEEP`, you MUST include a Root Cause Analysis section in the bug ticket with the hypothesis table and healing gap analysis.
+
 ## ⚠️ CRITICAL WORKFLOW RULE ⚠️
 
 ### TWO-STEP BUG TICKET CREATION PROCESS

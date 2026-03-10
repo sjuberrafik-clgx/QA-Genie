@@ -944,6 +944,165 @@
                     }
                 }
             }
+        },
+        "cognitiveLoop": {
+            "type": "object",
+            "description": "Cognitive QA Loop configuration. Controls the 5-phase (Analyst→Explorer→Coder→Reviewer→DryRun) script generation pipeline with CoT/ToT reasoning and inference-time scaling.",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable/disable the cognitive multi-phase loop. When false, falls back to legacy single-shot ScriptGenerator."
+                },
+                "fallbackToLegacy": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "If cognitive loop fails, fall back to legacy single-shot generation."
+                },
+                "phases": {
+                    "type": "object",
+                    "description": "Per-phase configuration for the 5-phase cognitive loop.",
+                    "properties": {
+                        "analyst": {
+                            "$ref": "#/definitions/cognitivePhaseConfig",
+                            "description": "Phase 1: Analyst — CoT requirement decomposition + ToT strategy selection"
+                        },
+                        "explorer": {
+                            "$ref": "#/definitions/cognitivePhaseConfig",
+                            "description": "Phase 2: Explorer — MCP tool execution with ReAct reasoning"
+                        },
+                        "coder": {
+                            "$ref": "#/definitions/cognitivePhaseConfig",
+                            "description": "Phase 3: Coder — Script generation with self-reflection"
+                        },
+                        "reviewer": {
+                            "$ref": "#/definitions/cognitivePhaseConfig",
+                            "description": "Phase 4: Reviewer — Quality gate with assertion validation"
+                        },
+                        "dryRun": {
+                            "$ref": "#/definitions/cognitivePhaseConfig",
+                            "description": "Phase 5: DryRun — Execution and error analysis"
+                        }
+                    }
+                },
+                "retryLimits": {
+                    "type": "object",
+                    "description": "Maximum retry counts for iterative phases.",
+                    "properties": {
+                        "maxCoderRetries": {
+                            "type": "integer",
+                            "default": 2,
+                            "minimum": 0,
+                            "maximum": 5,
+                            "description": "Max times Coder phase can retry after Reviewer rejection"
+                        },
+                        "maxDryRunRetries": {
+                            "type": "integer",
+                            "default": 1,
+                            "minimum": 0,
+                            "maximum": 3,
+                            "description": "Max times DryRun can loop back to Coder on test failures"
+                        }
+                    }
+                },
+                "qualityThresholds": {
+                    "type": "object",
+                    "description": "Quality gate thresholds for phase transitions.",
+                    "properties": {
+                        "minReviewerScore": {
+                            "type": "number",
+                            "default": 70,
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "Minimum Reviewer quality score to proceed to DryRun"
+                        },
+                        "minConfidence": {
+                            "type": "number",
+                            "default": 60,
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "Minimum overall confidence to accept the generated script"
+                        }
+                    }
+                },
+                "adaptiveScaling": {
+                    "type": "object",
+                    "description": "Inference-time scaling configuration. Maps complexity tiers to resource allocation for the entire pipeline.",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Enable adaptive scaling based on complexity tier"
+                        },
+                        "tiers": {
+                            "type": "object",
+                            "description": "Complexity tier definitions with resource multipliers.",
+                            "properties": {
+                                "simple": {
+                                    "$ref": "#/definitions/cognitiveScalingTier",
+                                    "description": "Simple tickets: single-page, few interactions, clear selectors"
+                                },
+                                "moderate": {
+                                    "$ref": "#/definitions/cognitiveScalingTier",
+                                    "description": "Moderate tickets: multi-page flows, conditional logic, some complex selectors"
+                                },
+                                "complex": {
+                                    "$ref": "#/definitions/cognitiveScalingTier",
+                                    "description": "Complex tickets: multi-page with auth, dynamic content, iframes, modals"
+                                }
+                            }
+                        },
+                        "riskMultiplier": {
+                            "type": "number",
+                            "default": 1.5,
+                            "minimum": 1.0,
+                            "maximum": 3.0,
+                            "description": "Multiplier applied to complex tier timeouts and iterations for high-risk features"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "cognitivePhaseConfig": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable/disable this phase"
+                },
+                "timeoutMs": {
+                    "type": "number",
+                    "minimum": 5000,
+                    "description": "Maximum time in milliseconds for this phase"
+                },
+                "maxTokens": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "description": "Maximum response token budget for this phase"
+                }
+            }
+        },
+        "cognitiveScalingTier": {
+            "type": "object",
+            "properties": {
+                "explorerMaxSteps": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum MCP tool calls in Explorer phase for this tier"
+                },
+                "coderMaxTokens": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "description": "Token budget for Coder phase for this tier"
+                },
+                "enableSupervisor": {
+                    "type": "boolean",
+                    "description": "Whether to activate the Supervisor pipeline for this tier"
+                }
+            }
         }
     }
 }
