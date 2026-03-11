@@ -29,6 +29,8 @@ export const LIMITS = {
     MAX_IMAGE_SIZE_BYTES: 5 * 1024 * 1024, // 5 MB per image
     MAX_DOCS_PER_MESSAGE: 5,
     MAX_DOC_SIZE_BYTES: 50 * 1024 * 1024, // 50 MB per document
+    MAX_VIDEOS_PER_MESSAGE: 2,
+    MAX_VIDEO_SIZE_BYTES: 200 * 1024 * 1024, // 200 MB per video
 };
 
 // ─── Allowed Document Types ─────────────────────────────────────────────────
@@ -36,17 +38,43 @@ export const LIMITS = {
 export const ALLOWED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 
 export const ALLOWED_DOC_TYPES = {
-    'application/pdf':                                                      { ext: '.pdf',  label: 'PDF' },
+    'application/pdf': { ext: '.pdf', label: 'PDF' },
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document': { ext: '.docx', label: 'Word' },
-    'application/msword':                                                   { ext: '.doc',  label: 'Word' },
+    'application/msword': { ext: '.doc', label: 'Word' },
     'application/vnd.openxmlformats-officedocument.presentationml.presentation': { ext: '.pptx', label: 'PowerPoint' },
-    'application/vnd.ms-powerpoint':                                        { ext: '.ppt',  label: 'PowerPoint' },
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':     { ext: '.xlsx', label: 'Excel' },
-    'application/vnd.ms-excel':                                             { ext: '.xls',  label: 'Excel' },
-    'text/csv':                                                             { ext: '.csv',  label: 'CSV' },
-    'text/plain':                                                           { ext: '.txt',  label: 'Text' },
-    'text/markdown':                                                        { ext: '.md',   label: 'Markdown' },
-    'application/json':                                                     { ext: '.json', label: 'JSON' },
+    'application/vnd.ms-powerpoint': { ext: '.ppt', label: 'PowerPoint' },
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': { ext: '.xlsx', label: 'Excel' },
+    'application/vnd.ms-excel': { ext: '.xls', label: 'Excel' },
+    'text/csv': { ext: '.csv', label: 'CSV' },
+    'text/plain': { ext: '.txt', label: 'Text' },
+    'text/markdown': { ext: '.md', label: 'Markdown' },
+    'application/json': { ext: '.json', label: 'JSON' },
+};
+
+// ─── Allowed Video Types ────────────────────────────────────────────────────
+
+export const ALLOWED_VIDEO_TYPES = [
+    'video/mp4',
+    'video/webm',
+    'video/quicktime',
+    'video/x-msvideo',
+    'video/x-matroska',
+];
+
+export const ALLOWED_VIDEO_EXTENSIONS = {
+    'video/mp4': { ext: '.mp4', label: 'MP4' },
+    'video/webm': { ext: '.webm', label: 'WebM' },
+    'video/quicktime': { ext: '.mov', label: 'MOV' },
+    'video/x-msvideo': { ext: '.avi', label: 'AVI' },
+    'video/x-matroska': { ext: '.mkv', label: 'MKV' },
+};
+
+export const VIDEO_EXT_TO_MIME = {
+    '.mp4': 'video/mp4',
+    '.webm': 'video/webm',
+    '.mov': 'video/quicktime',
+    '.avi': 'video/x-msvideo',
+    '.mkv': 'video/x-matroska',
 };
 
 /** File extensions → MIME type lookup (for files where browser reports empty/generic MIME) */
@@ -68,8 +96,10 @@ export const DOC_EXT_TO_MIME = {
 export const FILE_ACCEPT_STRING = [
     'image/png', 'image/jpeg', 'image/gif', 'image/webp',
     ...Object.keys(ALLOWED_DOC_TYPES),
+    ...ALLOWED_VIDEO_TYPES,
     // Also include extensions for browsers that don't match MIME
     '.pdf', '.docx', '.doc', '.pptx', '.ppt', '.xlsx', '.xls', '.csv', '.txt', '.md', '.json',
+    '.mp4', '.webm', '.mov', '.avi', '.mkv',
 ].join(',');
 
 // ─── SSE Event Types ────────────────────────────────────────────────────────

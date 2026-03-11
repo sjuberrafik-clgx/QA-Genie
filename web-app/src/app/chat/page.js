@@ -361,14 +361,15 @@ export default function ChatPage() {
         }
     };
 
-    const sendMessage = async (content, imageAttachments = [], docAttachments = []) => {
-        if (!activeSessionId || (!content.trim() && imageAttachments.length === 0 && docAttachments.length === 0)) return;
+    const sendMessage = async (content, imageAttachments = [], docAttachments = [], videoAttachments = []) => {
+        if (!activeSessionId || (!content.trim() && imageAttachments.length === 0 && docAttachments.length === 0 && videoAttachments.length === 0)) return;
 
         // Build user message with optional attachments for local display
         const userMessage = { role: 'user', content, timestamp: new Date().toISOString() };
         const allLocalAttachments = [
             ...imageAttachments, // { id, name, type, size, dataUrl, base64, kind:'image' }
             ...docAttachments.map(d => ({ ...d, kind: 'document' })),
+            ...videoAttachments.map(v => ({ ...v, kind: 'video' })),
         ];
         if (allLocalAttachments.length > 0) {
             userMessage.attachments = allLocalAttachments;
@@ -416,8 +417,18 @@ export default function ChatPage() {
                 });
             }
 
+            // Video attachments (path-based — already uploaded via streaming endpoint)
+            for (const att of videoAttachments) {
+                apiAttachments.push({
+                    type: 'video',
+                    media_type: att.mimeType, // e.g. 'video/mp4'
+                    tempPath: att.tempPath,
+                    filename: att.name,
+                });
+            }
+
             const finalAttachments = apiAttachments.length > 0 ? apiAttachments : undefined;
-            const defaultContent = imageAttachments.length > 0 ? '(image attached)' : (docAttachments.length > 0 ? '(document attached)' : '');
+            const defaultContent = imageAttachments.length > 0 ? '(image attached)' : (docAttachments.length > 0 ? '(document attached)' : (videoAttachments.length > 0 ? '(video attached)' : ''));
 
             await apiClient.sendChatMessage(activeSessionId, content || defaultContent, finalAttachments, model);
         } catch (err) {

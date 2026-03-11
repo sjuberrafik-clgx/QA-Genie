@@ -299,6 +299,53 @@ modern-blue (default), dark-professional, corporate-green, warm-minimal
 `.trim();
 }
 
+// ─── Video Analysis Layer ────────────────────────────────────────────────────
+
+/**
+ * VIDEO LAYER — For buggenie (video recording analysis)
+ * Injected when video attachments detected in session.
+ */
+function buildVideoLayer() {
+    return `
+## Video Recording Analysis
+
+When the user provides a screen recording (video attachment), you have powerful video analysis capabilities:
+
+### Video Processing Pipeline
+1. The system automatically extracts frames from the video at 1 frame/second
+2. Frames are selected using hybrid strategy: first frame + last frame + evenly-spaced frames in between (max 30)
+3. Each frame is provided as an image attachment for your vision analysis
+4. Video metadata (duration, resolution, codec) is provided in the context prompt
+
+### How to Analyze Video Recordings
+1. **Call \`analyze_video_recording\`** to get video metadata (duration, frame count, resolution)
+2. **Examine frames chronologically** — they are ordered by timestamp (0s, 1s, 2s, ...)
+3. **Identify the flow** — What pages/screens does the user navigate through?
+4. **Locate the defect** — At which timestamp does the issue first appear?
+5. **Determine before/after state** — What was the expected state (pre-defect frames) vs actual state (defect frames)?
+
+### Steps to Reproduce Generation
+When generating Steps to Reproduce from video:
+- Reference timestamps: "At 0:23, user clicks the Search button"
+- Be specific about UI elements visible in the frames
+- Note any error messages, broken layouts, or unexpected states captured in frames
+- Include the exact frame timestamp where the defect manifests
+
+### Review Copy Video Section
+When video is present, add this section to the review copy:
+\`\`\`
+**Video Timestamps :-** Defect visible at [MM:SS] (frame [N] of [total])
+**Recording Duration :-** [duration]s | Resolution: [WxH]
+\`\`\`
+
+### CoT Enhancement for Video
+Add to your Chain-of-Thought analysis:
+- **VIDEO TIMELINE** — what frames show the setup, action, and defect
+- **VISUAL EVIDENCE** — UI elements, error messages, layout breaks captured in frames
+- **REPRODUCTION PATH** — exact click/navigation sequence visible in the recording
+`.trim();
+}
+
 // ─── Layer Assembly ─────────────────────────────────────────────────────────
 
 /**
@@ -308,7 +355,7 @@ const AGENT_LAYERS = {
     orchestrator: ['base'],
     testgenie: ['base', 'jira', 'testCase'],
     scriptgenerator: ['base', 'automation', 'mcp'],
-    buggenie: ['base', 'jira'],
+    buggenie: ['base', 'jira', 'video'],
     taskgenie: ['base', 'jira'],
     codereviewer: ['base', 'automation'],
     docgenie: ['base', 'document'],
@@ -324,6 +371,7 @@ const LAYER_BUILDERS = {
     mcp: buildMcpLayer,
     testCase: buildTestCaseLayer,
     document: buildDocumentLayer,
+    video: buildVideoLayer,
 };
 
 /**
@@ -401,6 +449,7 @@ module.exports = {
     buildJiraLayer,
     buildMcpLayer,
     buildTestCaseLayer,
+    buildVideoLayer,
     getAgentLayers,
     getSharedLayerSize,
     getLayerStats,

@@ -30,6 +30,7 @@ export const API_CONFIG = {
         chatAbort: (id) => `/api/chat/sessions/${id}/abort`,
         chatUserInput: (id) => `/api/chat/sessions/${id}/user-input`,
         chatWorkspaceRoot: (id) => `/api/chat/sessions/${id}/workspace-root`,
+        chatUploadVideo: '/api/chat/upload-video',
 
         // Filesystem (FileGenie directory picker)
         filesystemBrowse: '/api/filesystem/browse',
