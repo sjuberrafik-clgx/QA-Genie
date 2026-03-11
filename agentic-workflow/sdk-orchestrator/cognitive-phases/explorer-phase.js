@@ -56,7 +56,11 @@ For EVERY MCP tool call, follow this pattern:
 ## Exploration Rules
 1. ALWAYS start by navigating to the application URL
 2. After EVERY navigation or interaction that changes the page:
-   a. Call unified_snapshot to capture the accessibility tree
+   a. Call unified_snapshot WITH a filter to reduce noise and speed up exploration:
+      - Use \`{ "filter": { "interactiveOnly": true } }\` for form/action pages
+      - Use \`{ "filter": { "roles": ["button", "link", "textbox", "combobox"] } }\` when looking for specific element types
+      - Use \`{ "filter": { "namePattern": "search|filter|apply" } }\` when looking for elements by name
+      - Use an UNFILTERED snapshot (no filter param) for the FIRST snapshot on a new page to get full context
    b. Check if the page is fully loaded (no loading spinners in snapshot)
    c. If spinners/loaders detected, call unified_wait_for_element for the actual content
 3. For EACH element in the plan's expectedElements:
@@ -73,6 +77,43 @@ For EVERY MCP tool call, follow this pattern:
    d. RE-SNAPSHOT the page to capture the new state
 6. Track every popup, modal, or overlay encountered
 7. Track every page URL change
+
+## Tree-of-Thought Selector Resolution (MANDATORY — Top-3 Candidates)
+For EVERY critical element (buttons, inputs, links, assertions), you MUST capture **multiple selector candidates** ranked by stability. This prevents expensive self-healing later.
+
+### Process for Each Element:
+1. **Primary selector** — Try the most stable selector type first:
+   - unified_get_by_test_id → stability: 10 (best)
+   - unified_get_by_role with name → stability: 9
+2. **Secondary selector** — Try the next-best type:
+   - unified_get_by_label → stability: 6
+   - unified_get_by_text → stability: 4
+3. **Tertiary selector** — Try a fallback:
+   - unified_get_by_placeholder → stability: 6
+   - CSS locator with aria-label → stability: 7
+
+### Record ALL found selectors in the selectorCandidates array:
+For each element, report:
+\`\`\`json
+{
+  "description": "Apply Filters button",
+  "found": true,
+  "selector": "getByRole('button', { name: 'Apply Filters' })",
+  "selectorType": "role",
+  "stabilityScore": 9,
+  "selectorCandidates": [
+    { "selector": "getByRole('button', { name: 'Apply Filters' })", "type": "role", "stability": 9, "verified": true },
+    { "selector": "getByText('Apply Filters')", "type": "text", "stability": 4, "verified": true },
+    { "selector": "locator('[data-qa=apply-filters]')", "type": "data-testid", "stability": 10, "verified": true }
+  ]
+}
+\`\`\`
+
+### Selection Logic:
+- The **primary selector** (highest stability score) goes into the "selector" field
+- ALL candidates go into "selectorCandidates" for the Coder to use as fallbacks
+- If an element has only 1 candidate, that's acceptable but flag it as "singleSelector: true"
+- This gives the Coder fallback options and reduces self-healing invocations by 30-50%
 
 ## What You Do NOT Do
 - Do NOT write any .spec.js files
@@ -100,14 +141,21 @@ After completing ALL exploration steps, report your findings as JSON:
         {
           "description": "what this element is",
           "found": true,
-          "selector": "the Playwright selector that works",
+          "selector": "the Playwright selector that works (highest stability)",
           "selectorType": "role|testid|label|text|css",
+          "stabilityScore": 9,
           "role": "button",
           "name": "accessible name from snapshot",
           "verified": true,
           "state": { "visible": true, "enabled": true },
           "textContent": "extracted text if relevant",
-          "attributes": { "key": "value" }
+          "attributes": { "key": "value" },
+          "selectorCandidates": [
+            { "selector": "primary selector", "type": "role", "stability": 9, "verified": true },
+            { "selector": "secondary selector", "type": "text", "stability": 4, "verified": true },
+            { "selector": "tertiary selector", "type": "css", "stability": 3, "verified": false }
+          ],
+          "singleSelector": false
         }
       ],
       "assertionValues": [
@@ -210,11 +258,40 @@ function buildExplorerUserPrompt(options) {
 
     sections.push(
         '',
+        '## Batch Exploration (Efficiency Optimization)',
+        'When you need to perform multiple tool calls in sequence (e.g., navigate + snapshot + extract),',
+        'use `unified_execute_exploration` to batch them in a SINGLE round-trip:',
+        '',
+        '### Using Templates (Preferred)',
+        '```json',
+        '{ "templateName": "explore_page", "templateArgs": { "url": "https://...", "filter": { "interactiveOnly": true } } }',
+        '```',
+        'Available templates:',
+        '- `explore_page` — Navigate + snapshot + URL/title (args: url, filter?, waitForSelector?)',
+        '- `verify_elements` — Check visibility/enabled/text for multiple selectors (args: selectors[])',
+        '- `login_and_navigate` — Auth URL + wait + snapshot (args: url, waitForSelector?, filter?)',
+        '- `extract_content` — Extract text/attributes from multiple elements (args: targets[])',
+        '- `interact_and_verify` — Click/type/select then verify page state (args: action, verifySelectors?, verifyUrl?)',
+        '',
+        '### Using Raw Scripts (Advanced)',
+        '```json',
+        '{ "script": "const snap = await tools.snapshot({ filter: { interactiveOnly: true } });\\nconst url = await tools.get_page_url();\\nreturn { snap, url };" }',
+        '```',
+        'Use templates for standard patterns. Use raw scripts only for custom exploration logic.',
+        '',
+        '### When to Batch vs Individual Calls',
+        '- **Batch**: Initial page exploration, multi-element verification, content extraction',
+        '- **Individual**: Complex interactions needing per-step reasoning, error recovery, dynamic decisions',
+    );
+
+    sections.push(
+        '',
         '## Instructions',
-        '1. Navigate to the starting URL',
+        '1. Navigate to the starting URL (use `explore_page` template for initial exploration)',
         '2. Follow the Exploration Plan step by step',
         '3. For each test step: find elements → verify states → extract content → interact if needed → re-snapshot',
-        '4. After completing ALL steps, output the JSON exploration report',
+        '4. Use `verify_elements` template when checking multiple selectors at once',
+        '5. After completing ALL steps, output the JSON exploration report',
         '',
         'THINK before each action. VERIFY after each action. RECORD everything.'
     );
@@ -331,13 +408,31 @@ function scoreExploration(exploration, plan) {
     const snapshotCount = stats.totalSnapshots || 0;
     breakdown.snapshotDepth = Math.min(100, snapshotCount * 15);
 
-    // Weighted total
+    // ToT: Selector candidate diversity — reward elements with multiple candidates
+    const elementsWithCandidates = allElements.filter(
+        e => e.selectorCandidates && e.selectorCandidates.length >= 2
+    ).length;
+    breakdown.selectorDiversity = allElements.length > 0
+        ? Math.round((elementsWithCandidates / allElements.length) * 100)
+        : 0;
+
+    // ToT: Average stability score across primary selectors
+    const stabilityScores = allElements
+        .filter(e => e.stabilityScore != null)
+        .map(e => e.stabilityScore);
+    breakdown.avgStabilityScore = stabilityScores.length > 0
+        ? Math.round((stabilityScores.reduce((a, b) => a + b, 0) / stabilityScores.length) * 10)
+        : 0;
+
+    // Weighted total (updated to include ToT metrics)
     const score = Math.round(
-        breakdown.elementCoverage * 0.30 +
-        breakdown.pageCoverage * 0.20 +
-        breakdown.selectorVerification * 0.25 +
-        breakdown.planAdherence * 0.15 +
-        breakdown.snapshotDepth * 0.10
+        breakdown.elementCoverage * 0.25 +
+        breakdown.pageCoverage * 0.15 +
+        breakdown.selectorVerification * 0.20 +
+        breakdown.planAdherence * 0.10 +
+        breakdown.snapshotDepth * 0.10 +
+        breakdown.selectorDiversity * 0.10 +   // ToT bonus
+        breakdown.avgStabilityScore * 0.10      // ToT bonus
     );
 
     return { score: Math.min(100, score), breakdown };
@@ -361,7 +456,11 @@ function toStandardExplorationData(exploration, ticketId) {
             name: e.name || e.description || '',
             dataQa: e.attributes?.['data-qa'] || e.attributes?.['data-testid'] || undefined,
             selectorType: e.selectorType,
+            stabilityScore: e.stabilityScore || null,
             verified: e.verified,
+            // ToT: carry selector candidates for fallback options
+            selectorCandidates: e.selectorCandidates || [],
+            singleSelector: e.singleSelector || (e.selectorCandidates?.length || 0) <= 1,
         }))
     );
 

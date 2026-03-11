@@ -29,6 +29,12 @@ export const API_CONFIG = {
         chatHistory: (id) => `/api/chat/sessions/${id}/history`,
         chatAbort: (id) => `/api/chat/sessions/${id}/abort`,
         chatUserInput: (id) => `/api/chat/sessions/${id}/user-input`,
+        chatWorkspaceRoot: (id) => `/api/chat/sessions/${id}/workspace-root`,
+
+        // Filesystem (FileGenie directory picker)
+        filesystemBrowse: '/api/filesystem/browse',
+        filesystemQuickAccess: '/api/filesystem/quick-access',
+        filesystemPickDirectory: '/api/filesystem/pick-directory',
 
         // Reports (per-execution Playwright test results)
         reports: '/api/reports',

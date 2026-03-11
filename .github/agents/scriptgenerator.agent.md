@@ -134,6 +134,8 @@ CALL 1: mcp_unified-autom_unified_navigate
 
 CALL 2: mcp_unified-autom_unified_snapshot
         → Captures the accessibility tree of the loaded page
+        → Use filter param to reduce noise: { "filter": { "interactiveOnly": true } }
+        → For first snapshot on a new page, omit filter to get full context
         → OUTPUT: Element refs, roles, names, aria-labels, text content
         → SAVE THIS OUTPUT — these are your REAL selectors
 
@@ -141,6 +143,29 @@ CALL 3: Navigate to each page being tested + snapshot each one
         → Use mcp_unified-autom_unified_click to navigate between pages
         → Call mcp_unified-autom_unified_snapshot on EVERY new page
         → Record ALL element refs from ALL snapshots
+```
+
+#### 🚀 Efficiency: Batch Exploration with `unified_execute_exploration`
+For multi-step exploration sequences, use `unified_execute_exploration` to batch calls:
+
+**Using templates (preferred for common patterns):**
+```json
+{ "templateName": "explore_page", "templateArgs": { "url": "https://...", "filter": { "interactiveOnly": true } } }
+{ "templateName": "verify_elements", "templateArgs": { "selectors": ["[data-qa='search']", ".property-card"] } }
+{ "templateName": "extract_content", "templateArgs": { "targets": [{ "selector": ".title", "attributes": ["href"] }] } }
+```
+
+**When to batch vs individual calls:**
+- **Batch**: Initial page exploration, verifying multiple selectors at once, extracting content from multiple elements
+- **Individual**: Complex interactions needing per-step reasoning, error recovery, dynamic decisions
+
+#### 📐 Snapshot Filtering (Dynamic Filtering)
+Use the `filter` parameter on `unified_snapshot` to get only what you need:
+```json
+{ "filter": { "interactiveOnly": true } }                    // Forms/buttons only (~70% fewer elements)
+{ "filter": { "roles": ["button", "link", "textbox"] } }     // Specific element types only
+{ "filter": { "namePattern": "search|filter|apply" } }       // Elements matching a name pattern
+{ "filter": { "maxElements": 50 } }                          // Cap results for huge pages
 ```
 
 **After the initial snapshot, perform DEEP EXPLORATION for each page:**

@@ -250,6 +250,11 @@ class AgentCoordinator extends EventEmitter {
                 return { action: ROUTE.CONTINUE, reason: 'Testing task handled' };
             }
 
+            // ── After DocGenie ────────────────────────────────────
+            case 'docgenie': {
+                return { action: ROUTE.CONTINUE, reason: 'Document generation handled' };
+            }
+
             default:
                 return { action: ROUTE.CONTINUE, reason: 'Default: continue to next stage' };
         }

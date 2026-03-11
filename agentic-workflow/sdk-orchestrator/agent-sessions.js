@@ -16,6 +16,8 @@ const fs = require('fs');
 const path = require('path');
 const { createCustomTools } = require('./custom-tools');
 const { createEnforcementHooks, createCognitiveEnforcementHooks, COGNITIVE_PHASE_RULES } = require('./enforcement-hooks');
+const { getContextEngine } = require('./context-engine');
+const { buildSharedLayers } = require('./prompt-layers');
 
 // Grounding system — provides local context to reduce LLM hallucinations
 let _groundingStoreModule;
@@ -305,7 +307,9 @@ class AgentSessionFactory {
         const mcpServers = {};
 
         // MCP server: attach for scriptgenerator AND cognitive phases that need MCP
-        const needsMCP = context.disableMCP !== true && (
+        // Respects MCP_EXPLORATION_ENABLED from .env — when 'false', no MCP server is attached.
+        const explorationEnabled = process.env.MCP_EXPLORATION_ENABLED !== 'false';
+        const needsMCP = explorationEnabled && context.disableMCP !== true && (
             (!isCognitive && ['scriptgenerator'].includes(agentName)) ||
             (isCognitive && COGNITIVE_PHASE_RULES[agentName]?.allowMCP)
         );
@@ -314,10 +318,11 @@ class AgentSessionFactory {
             // Without explicit env passthrough, the spawned process does NOT inherit
             // MCP_HEADLESS, MCP_TIMEOUT, etc. from .env — the browser always launches
             // with hardcoded defaults (headed mode), which hangs in headless/CI contexts.
-            const mcpHeadless = process.env.MCP_HEADLESS || 'false';
+            // Default to 'true' (headless) as safe server-side fallback; .env overrides this.
+            const mcpHeadless = process.env.MCP_HEADLESS || 'true';
             // Dynamic Tool Scoping: pass the agent's tool profile to the MCP server.
             // ScriptGenerator gets 'core' (~65 tools instead of 141), saving ~25K tokens.
-            const AGENT_PROFILES = { scriptgenerator: 'core', testgenie: 'core', buggenie: 'core', codereviewer: 'core' };
+            const AGENT_PROFILES = { scriptgenerator: 'core', testgenie: 'core', buggenie: 'core', codereviewer: 'core', docgenie: 'core' };
             const toolProfile = context.toolProfile || AGENT_PROFILES[effectiveRole] || 'full';
             this._log(`🖥️  Unified MCP: headless=${mcpHeadless}, browser=${process.env.MCP_BROWSER || 'chromium'}, toolProfile=${toolProfile}`);
             mcpServers['unified-automation'] = {
@@ -353,49 +358,69 @@ class AgentSessionFactory {
         }
 
         // 6. Build session config
-        // ── PROMPT SIZE GUARD ──────────────────────────────────────────
-        // LLM context windows are finite. If the assembled system message
-        // exceeds MAX_SYSTEM_PROMPT_CHARS, progressively truncate the
-        // least-critical dynamic sections to stay within budget.
-        const MAX_SYSTEM_PROMPT_CHARS = 120_000; // ~30K tokens (safe for most models)
-        let assembledPrompt = basePrompt + dynamicCtx + sharedCtx;
+        // ── CONTEXT ENGINE: PRIORITY-AWARE PACKING ─────────────────────
+        // Uses the ContextEngine to pack components by priority into the budget.
+        // High-priority components (grounding, ticket context) are preserved;
+        // low-priority components are compressed or dropped intelligently.
+        const contextEngine = getContextEngine(
+            this.config?.contextEngineering || this.config?.sdk?.contextEngineering || {}
+        );
+        const contextEngineEnabled = contextEngine.config.enabled;
 
-        if (assembledPrompt.length > MAX_SYSTEM_PROMPT_CHARS) {
-            this._log(`⚠️ System prompt too large (${assembledPrompt.length} chars > ${MAX_SYSTEM_PROMPT_CHARS}). Truncating dynamic context...`);
+        let assembledPrompt;
 
-            // Strategy: rebuild dynamic context with truncated sections
-            const truncatedSections = [];
+        if (contextEngineEnabled) {
+            // Inject shared prompt layers (deduplication)
+            const sharedLayers = buildSharedLayers(effectiveRole);
+            const enrichedBasePrompt = basePrompt + '\n\n---\n\n' + sharedLayers;
 
-            // Keep framework inventory but limit to paths only (drop content)
-            if (context.frameworkInventory) {
-                const lines = context.frameworkInventory.split('\n');
-                const pathsOnly = lines.filter(l => l.includes('/') || l.includes('\\')).slice(0, 50);
-                truncatedSections.push('<framework_inventory>', pathsOnly.join('\n'), '</framework_inventory>');
+            // Priority-aware packing replaces the blunt truncation guard
+            const packResult = contextEngine.packContext(effectiveRole, {
+                basePrompt: enrichedBasePrompt,
+                ticketContext: context.ticketContext || '',
+                groundingContext: groundingContext || '',
+                frameworkInventory: context.frameworkInventory || '',
+                assertionConfig: context.assertionConfig || '',
+                historicalFailures: context.historicalContext || '',
+                kbContext: context.kbContext || '',
+                sharedContext: sharedCtx || '',
+            });
+
+            assembledPrompt = packResult.assembledPrompt;
+            this._log(`📦 Context packed: ${packResult.metrics.utilization} used | ` +
+                `${packResult.included.length} included, ${packResult.compressed.length} compressed, ` +
+                `${packResult.dropped.length} dropped | saved ~${packResult.metrics.charsSaved} chars`);
+
+            if (packResult.dropped.length > 0) {
+                this._log(`⚠️ Dropped: ${packResult.dropped.map(d => d.key).join(', ')}`);
             }
-
-            // Keep last 5 historical failures only
-            if (context.historicalContext) {
-                const failures = context.historicalContext.split('\n---\n').slice(-5);
-                truncatedSections.push('<historical_failures>', failures.join('\n---\n'), '</historical_failures>');
-            }
-
-            // Keep ticket context (critical for task execution)
-            if (context.ticketContext) {
-                truncatedSections.push('<ticket_context>', context.ticketContext, '</ticket_context>');
-            }
-
-            // Drop grounding context from truncated build (lowest priority)
-            // Grounding is helpful but expendable when prompt budget is tight
-
-            dynamicCtx = truncatedSections.length > 0 ? '\n\n' + truncatedSections.join('\n') : '';
-
-            // Truncate shared context to last 10 entries if still too large
-            if (context.contextStore && (basePrompt + dynamicCtx + sharedCtx).length > MAX_SYSTEM_PROMPT_CHARS) {
-                sharedCtx = context.contextStore.buildContextSummary(agentName, { maxEntries: 10 });
-            }
-
+        } else {
+            // Legacy mode: simple concatenation with blunt truncation
+            const MAX_SYSTEM_PROMPT_CHARS = 120_000;
             assembledPrompt = basePrompt + dynamicCtx + sharedCtx;
-            this._log(`📏 Truncated prompt size: ${assembledPrompt.length} chars`);
+
+            if (assembledPrompt.length > MAX_SYSTEM_PROMPT_CHARS) {
+                this._log(`⚠️ System prompt too large (${assembledPrompt.length} chars). Using legacy truncation...`);
+                const truncatedSections = [];
+                if (context.frameworkInventory) {
+                    const lines = context.frameworkInventory.split('\n');
+                    const pathsOnly = lines.filter(l => l.includes('/') || l.includes('\\')).slice(0, 50);
+                    truncatedSections.push('<framework_inventory>', pathsOnly.join('\n'), '</framework_inventory>');
+                }
+                if (context.historicalContext) {
+                    const failures = context.historicalContext.split('\n---\n').slice(-5);
+                    truncatedSections.push('<historical_failures>', failures.join('\n---\n'), '</historical_failures>');
+                }
+                if (context.ticketContext) {
+                    truncatedSections.push('<ticket_context>', context.ticketContext, '</ticket_context>');
+                }
+                dynamicCtx = truncatedSections.length > 0 ? '\n\n' + truncatedSections.join('\n') : '';
+                if (context.contextStore && (basePrompt + dynamicCtx + sharedCtx).length > MAX_SYSTEM_PROMPT_CHARS) {
+                    sharedCtx = context.contextStore.buildContextSummary(agentName, { maxEntries: 10 });
+                }
+                assembledPrompt = basePrompt + dynamicCtx + sharedCtx;
+                this._log(`📏 Truncated prompt size: ${assembledPrompt.length} chars`);
+            }
         }
 
         const sessionConfig = {
@@ -443,6 +468,13 @@ class AgentSessionFactory {
             sessionConfig.provider = this.provider;
         }
 
+        // 7a. Inject model-level thinking parameters if configured for this agent/phase
+        const modelParams = this._resolveModelParameters(agentName);
+        if (modelParams.thinking) {
+            Object.assign(sessionConfig, modelParams.thinking);
+            this._log(`🧠 Thinking mode enabled for ${agentName}: ${JSON.stringify(modelParams.thinking)}`);
+        }
+
         // 7. Create the session
         const session = await this.client.createSession(sessionConfig);
         const sessionId = session.sessionId;
@@ -460,6 +492,102 @@ class AgentSessionFactory {
         this._log(`✅ ${agentName} session created [${sessionId}]`);
 
         return { session, sessionId, agentName };
+    }
+
+    /**
+     * Create a lightweight LLM session for simple prompt→response calls.
+     * No tools, no MCP, no streaming — just system prompt + user prompt → response.
+     *
+     * @param {string} agentName       - Descriptive agent name (e.g., 'cognitive-analysis')
+     * @param {string} systemPrompt    - System prompt for the session
+     * @param {Object} [options]        - Optional overrides
+     * @param {string} [options.model]  - Override default model
+     * @returns {{ sendAndWait: (userPrompt: string, timeout?: number) => Promise<string>, destroy: () => Promise<void> }}
+     */
+    async createLightweightSession(agentName, systemPrompt, options = {}) {
+        this._log(`Creating lightweight session: ${agentName}`);
+
+        // Read model parameter config for thinking-capable sessions
+        const modelParams = this._resolveModelParameters(agentName);
+
+        const sessionConfig = {
+            model: options.model || this.model,
+            tools: [],
+            systemMessage: { content: systemPrompt },
+            streaming: false,
+            onPermissionRequest: async () => ({ kind: 'approved' }),
+            onUserInputRequest: async () => ({ answer: 'Continue autonomously.', wasFreeform: true }),
+            workingDirectory: path.join(__dirname, '..', '..'),
+        };
+
+        // Inject model-level thinking parameters if configured
+        if (modelParams.thinking) {
+            Object.assign(sessionConfig, modelParams.thinking);
+        }
+
+        if (this.provider) {
+            sessionConfig.provider = this.provider;
+        }
+
+        const session = await this.client.createSession(sessionConfig);
+        const sessionId = session.sessionId;
+        this._activeSessions.set(sessionId, { agentName, session, createdAt: new Date() });
+
+        this._log(`✅ Lightweight ${agentName} session created [${sessionId}]`);
+
+        return {
+            sendAndWait: async (userPrompt, timeout = 120000) => {
+                return this.sendAndWait(session, userPrompt, { timeout });
+            },
+            destroy: async () => {
+                await this.destroySession(sessionId).catch(() => { });
+            },
+        };
+    }
+
+    /**
+     * Resolve model parameters (thinking, temperature, etc.) for a given agent/phase.
+     * Reads from workflow-config.json → sdk.modelParameters.
+     *
+     * @param {string} agentName - Agent or phase name
+     * @returns {{ thinking: Object|null }}
+     */
+    _resolveModelParameters(agentName) {
+        const mpConfig = this.config?.sdk?.modelParameters;
+        if (!mpConfig || !mpConfig.enabled) return { thinking: null };
+
+        // Map agent name to its parameter profile
+        const phaseMap = mpConfig.phases || {};
+        const profileName = phaseMap[agentName] || phaseMap[getCognitiveBaseRole(agentName)] || 'default';
+        const profile = mpConfig.profiles?.[profileName];
+
+        if (!profile || !profile.thinkingEnabled) return { thinking: null };
+
+        // Auto-detect model family for correct parameter format
+        const modelStr = (this.model || '').toLowerCase();
+        const thinkingParams = {};
+
+        if (modelStr.includes('claude') || modelStr.includes('anthropic')) {
+            // Anthropic: thinking parameter with budget
+            thinkingParams.thinking = {
+                type: 'enabled',
+                budget_tokens: profile.thinkingBudgetTokens || 8000,
+            };
+        } else if (modelStr.startsWith('o3') || modelStr.startsWith('o4') || modelStr.startsWith('o1')) {
+            // OpenAI reasoning models
+            thinkingParams.reasoning_effort = profile.reasoningEffort || 'high';
+        } else if (modelStr.includes('gpt-5') || modelStr.includes('gpt-4')) {
+            // GPT-5.x may support reasoning; GPT-4.x typically doesn't
+            if (profile.reasoningEffort) {
+                thinkingParams.reasoning = { effort: profile.reasoningEffort };
+            }
+        }
+        // Gemini and other providers: pass thinking budget as generic parameter
+        if (Object.keys(thinkingParams).length === 0 && profile.thinkingBudgetTokens) {
+            thinkingParams.thinking_budget = profile.thinkingBudgetTokens;
+        }
+
+        return { thinking: Object.keys(thinkingParams).length > 0 ? thinkingParams : null };
     }
 
     /**

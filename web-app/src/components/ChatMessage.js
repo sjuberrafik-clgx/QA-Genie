@@ -3,6 +3,11 @@
 import { memo, useState, lazy, Suspense } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
+import CodeBlock from '@/components/CodeBlock';
+import { FileAttachmentCard } from '@/components/FilePreview';
 import { SparkleIcon, UserIcon, ClipboardIcon, CheckIcon, XIcon } from '@/components/Icons';
 
 // Lazy-load MermaidBlock (only imported when a mermaid code fence is encountered)
@@ -34,7 +39,7 @@ function ChatMessage({ message, isStreaming = false }) {
     };
 
     return (
-        <div className={`group flex gap-3 ${isUser ? 'flex-row-reverse' : ''}`}>
+        <div className={`group flex gap-3 message-entrance ${isUser ? 'flex-row-reverse' : ''}`}>
             {/* Avatar — square with rounded corners */}
             <div className={`flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center mt-0.5 shadow-sm ${isUser ? 'bg-surface-200' : 'gradient-brand'
                 }`}>
@@ -66,7 +71,7 @@ function ChatMessage({ message, isStreaming = false }) {
                     {/* User image attachments */}
                     {isUser && attachments && attachments.length > 0 && (
                         <div className="flex flex-wrap gap-2 mb-2">
-                            {attachments.map((att, idx) => (
+                            {attachments.filter(att => att.kind !== 'document').map((att, idx) => (
                                 <button
                                     key={att.id || idx}
                                     type="button"
@@ -82,14 +87,28 @@ function ChatMessage({ message, isStreaming = false }) {
                             ))}
                         </div>
                     )}
+                    {/* User document attachments */}
+                    {isUser && attachments && attachments.some(a => a.kind === 'document') && (
+                        <div className="flex flex-wrap gap-1.5 mb-2">
+                            {attachments.filter(att => att.kind === 'document').map((att, idx) => (
+                                <FileAttachmentCard key={att.id || `doc-${idx}`} attachment={att} isUser />
+                            ))}
+                        </div>
+                    )}
                     {isUser ? (
                         <p className="text-sm whitespace-pre-wrap leading-relaxed break-words [overflow-wrap:anywhere]">{content}</p>
                     ) : (
-                        <div className="chat-markdown text-sm text-surface-800">
+                        <div className={`chat-markdown text-sm text-surface-800 ${isStreaming ? 'streaming-cursor' : ''}`}>
                             <ReactMarkdown
-                                remarkPlugins={[remarkGfm]}
+                                remarkPlugins={[remarkGfm, remarkMath]}
+                                rehypePlugins={[rehypeKatex]}
                                 components={{
+                                    // Strip react-markdown's <pre> wrapper — CodeBlock provides its own
+                                    pre({ children }) {
+                                        return <>{children}</>;
+                                    },
                                     code({ node, inline, className, children, ...props }) {
+                                        const content = String(children).replace(/\n$/, '');
                                         // Detect ```mermaid fenced blocks and render as diagrams
                                         const isMermaid = /language-mermaid/.test(className || '');
                                         if (!inline && isMermaid) {
@@ -99,12 +118,30 @@ function ChatMessage({ message, isStreaming = false }) {
                                                         <span className="text-xs text-surface-400">Loading diagram…</span>
                                                     </div>
                                                 }>
-                                                    <MermaidBlock>{String(children).replace(/\n$/, '')}</MermaidBlock>
+                                                    <MermaidBlock>{content}</MermaidBlock>
                                                 </Suspense>
                                             );
                                         }
-                                        // Default code rendering (inline or other languages)
+                                        // Block code: route ALL fenced blocks through CodeBlock
+                                        // (language-less blocks previously fell through with invisible text)
+                                        const isBlock = !inline && (className || content.includes('\n'));
+                                        if (isBlock) {
+                                            return <CodeBlock className={className}>{children}</CodeBlock>;
+                                        }
+                                        // Inline code
                                         return <code className={className} {...props}>{children}</code>;
+                                    },
+                                    // Render AI-generated markdown images
+                                    img({ src, alt, ...props }) {
+                                        return (
+                                            <img
+                                                src={src}
+                                                alt={alt || 'AI generated image'}
+                                                className="rounded-lg max-w-full my-2 shadow-sm border border-surface-200"
+                                                loading="lazy"
+                                                {...props}
+                                            />
+                                        );
                                     },
                                 }}
                             >{content || ''}</ReactMarkdown>

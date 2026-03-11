@@ -119,9 +119,14 @@ class PipelineRunner {
         });
 
         // Initialize supervisor session (persistent overseer across all stages)
-        const supervisorEnabled = (this.config.sdk?.coordinator?.enableSupervisor !== false);
+        // Modes: "always" (legacy), "never" (disabled), "adaptive" (only for complex tickets)
+        const supervisorSetting = this.config.sdk?.coordinator?.enableSupervisor;
+        const supervisorMode = (supervisorSetting === 'adaptive') ? 'adaptive'
+            : (supervisorSetting === false || supervisorSetting === 'never') ? 'never'
+                : 'always';
+
         let supervisor = null;
-        if (supervisorEnabled) {
+        if (supervisorMode === 'always') {
             supervisor = new SupervisorSession({
                 sessionFactory: this.sessionFactory,
                 contextStore,
@@ -141,6 +146,10 @@ class PipelineRunner {
             coordinator,
             // Supervisor session — persistent pipeline overseer
             supervisor,
+
+            // Cognitive scaling — propagated from ScriptGen to all downstream stages
+            cognitiveTier: null,         // 'simple' | 'moderate' | 'complex'
+            cognitiveScaling: null,      // Full scaling params for current tier
             // Artifacts produced by each stage
             testCasesPath: null,
             explorationPath: null,
@@ -263,6 +272,78 @@ class PipelineRunner {
                 const result = await this._executeStage(stage, context, onProgress);
                 context.stageResults[stage] = result;
                 lastCompletedStage = stage;
+
+                // Context compaction: shrink completed stage data to free budget
+                // for downstream agents (context engineering pattern)
+                try {
+                    const { getContextEngine } = require('./context-engine');
+                    const contextEngine = getContextEngine();
+                    if (contextEngine && contextEngine.config?.compaction?.enabled !== false) {
+                        const compactionResult = contextEngine.compactStageContext(contextStore, stage);
+                        if (compactionResult.compacted) {
+                            this._log(`📦 Context compacted after ${stage}: ${compactionResult.originalEntries} entries → ${compactionResult.summaryChars} char summary`);
+                        }
+                    }
+                } catch (compactErr) {
+                    this._log(`⚠️ Context compaction failed after ${stage}: ${compactErr.message}`);
+                }
+
+                // ── Adaptive Supervisor Activation ──────────────────
+                // In "adaptive" mode, activate supervisor only when the cognitive
+                // loop determines the ticket is complex enough to warrant it
+                if (supervisorMode === 'adaptive' && !supervisor && stage === STAGES.SCRIPTGEN) {
+                    const cogMetrics = result?.cognitiveMetrics || result?.metrics;
+                    const shouldEnable = cogMetrics?.adaptiveScaling?.enableSupervisor
+                        || cogMetrics?.adaptiveScaling?.tier === 'complex';
+
+                    if (shouldEnable) {
+                        this._log('🔄 Adaptive supervisor: ACTIVATING (complex ticket detected)');
+                        try {
+                            supervisor = new SupervisorSession({
+                                sessionFactory: this.sessionFactory,
+                                contextStore,
+                                config: this.config,
+                                verbose: this.verbose,
+                            });
+                            context.supervisor = supervisor;
+                            await supervisor.initialize(context.ticketId);
+                            this._log('✅ Adaptive supervisor session active');
+                        } catch (supErr) {
+                            this._log(`⚠️ Adaptive supervisor init failed (non-blocking): ${supErr.message}`);
+                            supervisor = null;
+                            context.supervisor = null;
+                        }
+                    } else {
+                        this._log(`  Adaptive supervisor: SKIPPED (tier=${cogMetrics?.adaptiveScaling?.tier || 'unknown'})`);
+                    }
+                }
+
+                // ── Cognitive Tier Propagation ───────────────────────
+                // After SCRIPTGEN, extract the complexity tier from cognitive
+                // metrics and propagate it to context so ALL downstream stages
+                // (Execute, Self-Heal, BugGenie) can adapt their behavior.
+                // This is the inference-time scaling mechanism at pipeline level.
+                if (stage === STAGES.SCRIPTGEN) {
+                    const cogMetrics = result?.cognitiveMetrics || result?.metrics;
+                    const tier = cogMetrics?.adaptiveScaling?.tier || 'moderate';
+                    context.cognitiveTier = tier;
+                    context.cognitiveScaling = this._getCognitiveScalingParams(tier);
+
+                    this._log(`🧠 Cognitive tier propagated: ${tier} → ${JSON.stringify(context.cognitiveScaling)}`);
+                    contextStore.addNote('cognitive',
+                        `Pipeline scaling: tier=${tier}, ` +
+                        `healingMaxIter=${context.cognitiveScaling.healingMaxIterations}, ` +
+                        `executionTimeout=${context.cognitiveScaling.executionTimeoutMs}ms, ` +
+                        `bugGenieDepth=${context.cognitiveScaling.bugGenieAnalysisDepth}`
+                    );
+
+                    // Emit cognitive scaling event for dashboard
+                    this._eventBridge.push('cognitive_scaling', context.runId, {
+                        tier,
+                        scaling: context.cognitiveScaling,
+                        source: 'scriptgen_metrics',
+                    });
+                }
 
                 // Supervisor post-stage review (non-blocking on failure)
                 if (supervisor && supervisor.isActive) {
@@ -1056,6 +1137,16 @@ class PipelineRunner {
             };
         }
 
+        // ── Cognitive Inference-Time Scaling ─────────────────────────
+        // Use cognitive tier to adapt execution timeout. Complex tests
+        // with multi-page flows need more time than simple ones.
+        const baseTimeout = getStageTimeout(this.config, 'execution', 180000);
+        const scaledTimeout = context.cognitiveScaling?.executionTimeoutMs || baseTimeout;
+        const executionTimeout = Math.max(baseTimeout, scaledTimeout);
+        if (context.cognitiveTier) {
+            this._log(`🧠 Execution timeout scaled for tier=${context.cognitiveTier}: ${executionTimeout}ms`);
+        }
+
         try {
             // Make path relative to project root to avoid regex issues with special chars
             const relativePath = path.relative(this.projectRoot, context.specPath).replace(/\\/g, '/');
@@ -1067,7 +1158,7 @@ class PipelineRunner {
                     encoding: 'utf-8',
                     stdio: 'pipe',
                     cwd: this.projectRoot,
-                    timeout: getStageTimeout(this.config, 'execution', 180000),
+                    timeout: executionTimeout,
                 }
             );
 
@@ -1169,7 +1260,19 @@ class PipelineRunner {
             };
         }
 
-        const healResult = await this.selfHealing.heal(context.ticketId, context.specPath);
+        // ── Cognitive Inference-Time Scaling ─────────────────────────
+        // Adapt healing intensity based on the cognitive complexity tier.
+        // Complex tickets get more healing iterations and longer timeouts.
+        const scaling = context.cognitiveScaling;
+        if (scaling) {
+            this._log(`🧠 Healing scaled for tier=${context.cognitiveTier}: maxIter=${scaling.healingMaxIterations}, timeout=${scaling.healingTimeoutMs}ms`);
+        }
+
+        const healResult = await this.selfHealing.heal(context.ticketId, context.specPath, {
+            maxIterations: scaling?.healingMaxIterations,
+            timeoutMs: scaling?.healingTimeoutMs,
+            cognitiveTier: context.cognitiveTier,
+        });
         context.healingResult = healResult;
 
         // If healing succeeded, save the final passing results as a report
@@ -1218,6 +1321,16 @@ class PipelineRunner {
             };
         }
 
+        // ── Cognitive Inference-Time Scaling ─────────────────────────
+        // Adapt BugGenie analysis depth based on complexity tier.
+        // Complex tickets get deeper root cause analysis in prompts.
+        const scaling = context.cognitiveScaling;
+        const analysisDepth = scaling?.bugGenieAnalysisDepth || 'standard';
+        const bugGenieTimeout = scaling?.bugGenieTimeoutMs || getStageTimeout(this.config, 'buggenie', 180000);
+        if (context.cognitiveTier) {
+            this._log(`🧠 BugGenie scaled for tier=${context.cognitiveTier}: depth=${analysisDepth}, timeout=${bugGenieTimeout}ms`);
+        }
+
         let session = null;
         let sessionId = null;
 
@@ -1231,22 +1344,41 @@ class PipelineRunner {
                     `Error: ${(context.testResults?.error || '').substring(0, 1000)}`,
                     `Healing attempted: ${context.healingResult?.iterations || 0} iterations`,
                     `Healing result: ${context.healingResult?.message || 'not attempted'}`,
-                ].join('\n'),
+                    context.cognitiveTier ? `Cognitive complexity tier: ${context.cognitiveTier}` : '',
+                ].filter(Boolean).join('\n'),
                 taskDescription: `Create bug ticket for test failures in ${context.ticketId}: ${context.testResults?.failedTests?.join(', ') || 'unknown failures'}`,
                 contextStore: context.contextStore,
             });
             session = sessionInfo.session;
             sessionId = sessionInfo.sessionId;
 
+            // Build depth-aware prompt based on cognitive scaling
+            const depthInstructions = {
+                shallow: 'Provide a concise bug report with the failure summary and basic steps to reproduce.',
+                standard: 'Provide a detailed bug report with root cause analysis, steps to reproduce, and environment context.',
+                deep: [
+                    'Provide a comprehensive bug report with DEEP root cause analysis.',
+                    'Use Chain-of-Thought reasoning to trace the failure:',
+                    '1. What is the immediate error? (surface symptom)',
+                    '2. What selector/element/action triggered it? (proximate cause)',
+                    '3. Why did the healing engine fail to fix it? (healing gap analysis)',
+                    '4. What is the likely APPLICATION root cause vs TEST root cause?',
+                    '5. Are there related failures suggesting a systemic issue?',
+                    'Include all findings in the bug description with clear evidence chain.',
+                ].join('\n'),
+            };
+
             const prompt =
                 `Create a bug ticket for test failures in ${context.ticketId}.\n\n` +
                 `Failed tests: ${context.testResults?.failedTests?.join(', ') || 'unknown'}\n` +
                 `Error details: ${(context.testResults?.error || '').substring(0, 2000)}\n\n` +
+                `Analysis depth: ${analysisDepth.toUpperCase()}\n` +
+                `${depthInstructions[analysisDepth] || depthInstructions.standard}\n\n` +
                 'Follow the bug ticket format from the project standards.';
 
-            onProgress(STAGES.BUGGENIE, 'Creating bug ticket...');
+            onProgress(STAGES.BUGGENIE, `Creating bug ticket (${analysisDepth} analysis)...`);
             const response = await this.sessionFactory.sendAndWait(session, prompt, {
-                timeout: getStageTimeout(this.config, 'buggenie', 180000),
+                timeout: bugGenieTimeout,
                 onDelta: (delta) => {
                     if (delta && this._eventBridge) {
                         this._eventBridge.push('ai_delta', context.runId, {
@@ -1404,6 +1536,52 @@ class PipelineRunner {
         } catch { /* ignore */ }
 
         return results;
+    }
+
+    // ─── Cognitive Inference-Time Scaling ──────────────────────────
+    // Maps the cognitive complexity tier (from ScriptGen's Analyst phase)
+    // into concrete parameters for all downstream pipeline stages.
+    // This is how "thinking time" is allocated proportionally across the
+    // entire pipeline — not just the script generation phase.
+
+    _getCognitiveScalingParams(tier) {
+        const scalingConfig = this.config.cognitiveLoop?.adaptiveScaling || {};
+        const riskMultiplier = scalingConfig.riskMultiplier || 1.5;
+
+        const tiers = {
+            simple: {
+                // Fast track — minimal resources, low risk
+                executionTimeoutMs: 120000,          // 2 min
+                healingMaxIterations: 2,
+                healingTimeoutMs: 180000,             // 3 min
+                bugGenieAnalysisDepth: 'shallow',     // Just failure summary
+                bugGenieTimeoutMs: 120000,            // 2 min
+                retryFullStageAllowed: false,
+                supervisorReviewDepth: 'brief',
+            },
+            moderate: {
+                // Standard track — balanced resources
+                executionTimeoutMs: 180000,          // 3 min
+                healingMaxIterations: 3,
+                healingTimeoutMs: 300000,             // 5 min
+                bugGenieAnalysisDepth: 'standard',    // Root cause + steps
+                bugGenieTimeoutMs: 180000,            // 3 min
+                retryFullStageAllowed: true,
+                supervisorReviewDepth: 'standard',
+            },
+            complex: {
+                // Deep track — maximum resources, high risk
+                executionTimeoutMs: Math.round(240000 * riskMultiplier), // 4 min × risk
+                healingMaxIterations: Math.round(4 * riskMultiplier),
+                healingTimeoutMs: Math.round(420000 * riskMultiplier),   // 7 min × risk
+                bugGenieAnalysisDepth: 'deep',        // Full ToT root cause analysis
+                bugGenieTimeoutMs: Math.round(300000 * riskMultiplier),  // 5 min × risk
+                retryFullStageAllowed: true,
+                supervisorReviewDepth: 'comprehensive',
+            },
+        };
+
+        return tiers[tier] || tiers.moderate;
     }
 
     _log(message) {

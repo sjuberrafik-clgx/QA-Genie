@@ -93,13 +93,45 @@ export const UNIFIED_TOOLS = [
     // ═══════════════════════════════════════════════════════════════════════════════
     {
         name: 'unified_snapshot',
-        description: 'Capture accessibility snapshot of the current page. Returns a structured tree with element refs that can be used for interactions. This is PREFERRED over screenshots for automation.',
+        description: 'Capture accessibility snapshot of the current page. Returns a structured tree with element refs that can be used for interactions. This is PREFERRED over screenshots for automation. Use the filter parameter to reduce result size and focus on relevant elements.',
         inputSchema: {
             type: 'object',
             properties: {
                 filename: {
                     type: 'string',
                     description: 'Optional filename to save snapshot as markdown'
+                },
+                filter: {
+                    type: 'object',
+                    description: 'Server-side filters to reduce snapshot size. Apply filters to get only the elements you need — dramatically reduces token usage.',
+                    properties: {
+                        roles: {
+                            type: 'array',
+                            items: { type: 'string' },
+                            description: 'Only return elements matching these ARIA roles. Example: ["button", "link", "textbox", "combobox", "heading"]'
+                        },
+                        interactiveOnly: {
+                            type: 'boolean',
+                            description: 'Only return interactive elements (buttons, inputs, links, selects, checkboxes). Excludes decorative/static elements.'
+                        },
+                        visibleOnly: {
+                            type: 'boolean',
+                            description: 'Exclude hidden and aria-hidden elements from results.'
+                        },
+                        excludeRoles: {
+                            type: 'array',
+                            items: { type: 'string' },
+                            description: 'Exclude elements with these roles. Default excludes: generic, presentation, separator, none'
+                        },
+                        namePattern: {
+                            type: 'string',
+                            description: 'Regex pattern to filter elements by accessible name or text content'
+                        },
+                        maxElements: {
+                            type: 'number',
+                            description: 'Maximum number of elements to return (default: unlimited)'
+                        }
+                    }
                 }
             }
         },
@@ -1078,6 +1110,69 @@ export const TOOL_MAPPING = {
  * This provides 150+ tools for comprehensive zero-limitation automation
  */
 export const ALL_TOOLS = [...UNIFIED_TOOLS, ...ENHANCED_TOOLS, ...ADVANCED_TOOLS];
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// DEFERRED LOADING — Anthropic Advanced Tool Calling (Technique 3: Tool Search)
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// With 141 tools at ~200-300 tokens each, full tool definitions consume ~30-40K tokens.
+// "Always-loaded" tools are the ~20 most essential tools every exploration needs.
+// All other tools are "deferred" — excluded from initial tools/list but discoverable
+// via the unified_tool_search meta-tool and always callable via tools/call.
+// Expected savings: ~85% reduction in tool definition tokens (30-40K → 4-6K).
+// ═══════════════════════════════════════════════════════════════════════════════════════
+
+export const ALWAYS_LOADED_TOOLS = new Set([
+    // Navigation (must-have)
+    'unified_navigate',
+    'unified_navigate_back',
+    // Snapshot (must-have for MCP-first exploration)
+    'unified_snapshot',
+    'unified_screenshot',
+    // Core interactions
+    'unified_click',
+    'unified_type',
+    'unified_fill_form',
+    'unified_select_option',
+    'unified_press_key',
+    // Semantic selectors (must-have for selector validation)
+    'unified_get_by_role',
+    'unified_get_by_text',
+    'unified_get_by_test_id',
+    'unified_get_by_label',
+    // Element state (must-have for pre-interaction checks)
+    'unified_is_visible',
+    'unified_is_enabled',
+    // Content extraction (must-have for assertion data)
+    'unified_get_text_content',
+    'unified_get_attribute',
+    // Page info
+    'unified_get_page_url',
+    'unified_get_page_title',
+    // Wait (must-have for page readiness)
+    'unified_wait_for',
+    'unified_wait_for_element',
+    // Browser lifecycle
+    'unified_browser_close',
+    // Programmatic execution (Phase 3)
+    'unified_execute_exploration',
+]);
+
+/**
+ * Check if a tool should be deferred (excluded from initial tools/list).
+ * @param {string} toolName
+ * @returns {boolean} true if the tool should be deferred
+ */
+export function isToolDeferred(toolName) {
+    return !ALWAYS_LOADED_TOOLS.has(toolName);
+}
+
+/**
+ * Get only the always-loaded (non-deferred) tools.
+ * @returns {object[]} Array of tool definitions that are always loaded
+ */
+export function getAlwaysLoadedTools() {
+    return ALL_TOOLS.filter(t => ALWAYS_LOADED_TOOLS.has(t.name));
+}
 
 /**
  * Get tool source from tool name (searches both core and enhanced)

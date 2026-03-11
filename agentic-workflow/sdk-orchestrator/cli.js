@@ -16,7 +16,6 @@
  *   --ticket, -t      Jira ticket ID (e.g., AOTF-16339)
  *   --tickets         Comma-separated ticket IDs for parallel execution
  *   --mode, -m        Pipeline mode: full | generate | heal | execute (default: full)
- *   --env, -e         Environment: UAT | INT | PROD (default: UAT)
  *   --parallel        Run multiple tickets in parallel batches
  *   --ci              CI mode: headless, JSON stdout, structured exit codes
  *   --server          Start HTTP pipeline server (Phase 1)

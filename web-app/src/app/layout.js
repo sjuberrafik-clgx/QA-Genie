@@ -1,6 +1,8 @@
 import './globals.css';
 import Sidebar from '@/components/Sidebar';
+import AppShell from '@/components/AppShell';
 import ErrorBoundary from '@/components/ErrorBoundary';
+import RouteLoadingBar from '@/components/RouteLoadingBar';
 
 export const metadata = {
     title: 'QA Automation Dashboard',
@@ -18,11 +20,14 @@ export default function RootLayout({ children }) {
             <body className="min-h-screen bg-surface-50">
                 <div className="flex min-h-screen">
                     <Sidebar />
-                    <main className="flex-1 ml-[260px] min-h-screen overflow-x-hidden">
+                    <div className="flex-1 ml-[260px] min-h-screen overflow-x-hidden">
+                        <RouteLoadingBar />
                         <ErrorBoundary>
-                            {children}
+                            <AppShell>
+                                {children}
+                            </AppShell>
                         </ErrorBoundary>
-                    </main>
+                    </div>
                 </div>
             </body>
         </html>

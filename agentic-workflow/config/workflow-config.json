@@ -1,4 +1,4 @@
-﻿{
+{
     "$schema": "./workflow-config.schema.json",
     "version": "2.0.0",
     "name": "Jira to Automation Pipeline",
@@ -84,6 +84,7 @@
     },
     "mcpExploration": {
         "mandatory": true,
+        "mandatoryNote": "Overridden by MCP_EXPLORATION_ENABLED=false in .env (single source of truth)",
         "enforceBeforeScriptGeneration": true,
         "blockScriptCreationWithoutExploration": true,
         "orchestratorMustNeverCreateSpecFiles": true,
@@ -266,6 +267,7 @@
             "create-fresh-tab"
         ],
         "headlessExploration": false,
+        "headlessExplorationNote": "This value is NOT used by code. Set MCP_HEADLESS in .env instead.",
         "headedExecution": true
     },
     "mcpStrategy": {
@@ -673,6 +675,21 @@
             "bugGenieInvocations"
         ]
     },
+    "documentDesign": {
+        "_comment": "DocGenie document generation configuration. Controls default theme, output directory, and branding for PPTX/DOCX/PDF/XLSX generation.",
+        "defaultTheme": "modern-blue",
+        "defaultFont": "Calibri",
+        "branding": {
+            "company": "Doremon Team",
+            "footerText": "Powered by Doremon Team"
+        },
+        "outputDir": "test-artifacts/documents",
+        "qualityGate": {
+            "minSections": 2,
+            "maxSections": 100,
+            "warnThreshold": 60
+        }
+    },
     "ooda": {
         "_comment": "OODA (Observe–Orient–Decide–Act) loop configuration. Controls pre-pipeline health checks and MCP exploration quality assessment. All OODA logic is deterministic JS — zero LLM calls, zero token cost.",
         "environmentHealth": {
@@ -740,6 +757,54 @@
             "reviewerConfidenceThreshold": 70,
             "dryRunPassRate": 80,
             "_comment": "Minimum scores for each phase to proceed. Below these thresholds, the loop retries or falls back to legacy."
+        },
+        "adaptiveScaling": {
+            "_comment": "Inference-time scaling — dynamically adjusts phase timeouts, retry budgets, and quality thresholds based on ticket complexity. Complexity is estimated from the Analyst's explorationDepth output.",
+            "enabled": true,
+            "complexityTiers": {
+                "simple": {
+                    "_comment": "≤5 test steps, ≤2 pages, ≤10 elements",
+                    "maxTestSteps": 5,
+                    "maxPages": 2,
+                    "maxElements": 10,
+                    "timeoutMultiplier": 0.6,
+                    "maxCoderRetries": 1,
+                    "maxDryRunRetries": 1,
+                    "reviewerConfidenceThreshold": 65,
+                    "dryRunPassRate": 75,
+                    "enableSupervisor": false
+                },
+                "moderate": {
+                    "_comment": "6-12 test steps, 3-5 pages, 11-25 elements",
+                    "maxTestSteps": 12,
+                    "maxPages": 5,
+                    "maxElements": 25,
+                    "timeoutMultiplier": 1.0,
+                    "maxCoderRetries": 2,
+                    "maxDryRunRetries": 1,
+                    "reviewerConfidenceThreshold": 70,
+                    "dryRunPassRate": 80,
+                    "enableSupervisor": false
+                },
+                "complex": {
+                    "_comment": ">12 test steps, >5 pages, >25 elements",
+                    "maxTestSteps": 999,
+                    "maxPages": 999,
+                    "maxElements": 999,
+                    "timeoutMultiplier": 1.5,
+                    "maxCoderRetries": 3,
+                    "maxDryRunRetries": 2,
+                    "reviewerConfidenceThreshold": 80,
+                    "dryRunPassRate": 85,
+                    "enableSupervisor": true
+                }
+            },
+            "riskMultiplier": {
+                "_comment": "Additional multiplier when Analyst flags high-risk areas (popups, auth, dynamic content)",
+                "highRiskThreshold": 3,
+                "additionalRetries": 1,
+                "timeoutBoost": 1.3
+            }
         }
     },
     "sdk": {
@@ -747,6 +812,40 @@
         "enabled": true,
         "model": "claude-sonnet-4",
         "maxHealingIterations": 3,
+        "modelParameters": {
+            "_comment": "Model-level thinking/reasoning configuration. Controls which agents use extended thinking for higher quality output at the cost of latency. Profiles are auto-adapted to the model family (Claude thinking, OpenAI reasoning_effort, etc.).",
+            "enabled": true,
+            "profiles": {
+                "default": {
+                    "_comment": "Standard fast inference — no extended thinking",
+                    "thinkingEnabled": false
+                },
+                "thinking": {
+                    "_comment": "Deep reasoning mode — enables chain-of-thought for accuracy-critical decisions",
+                    "thinkingEnabled": true,
+                    "thinkingBudgetTokens": 8000,
+                    "reasoningEffort": "high"
+                },
+                "thinking-light": {
+                    "_comment": "Light reasoning — shorter budget for moderate-complexity decisions",
+                    "thinkingEnabled": true,
+                    "thinkingBudgetTokens": 4000,
+                    "reasoningEffort": "medium"
+                }
+            },
+            "phases": {
+                "_comment": "Maps agent/phase names to parameter profiles. Phases not listed default to 'default'.",
+                "cognitive-analyst": "thinking",
+                "cognitive-coder": "thinking",
+                "cognitive-reviewer": "thinking",
+                "cognitive-explorer-nav": "default",
+                "cognitive-dryrun": "default",
+                "testgenie": "thinking-light",
+                "scriptgenerator": "default",
+                "buggenie": "thinking-light",
+                "codereviewer": "thinking"
+            }
+        },
         "parallelTickets": 1,
         "enableLearning": true,
         "learningStorePath": "agentic-workflow/learning-data/learning-store.json",
@@ -754,8 +853,8 @@
         "coordinator": {
             "_comment": "AI Orchestration Layer — smart routing, agent collaboration, and supervisor oversight",
             "enableSmartRouting": true,
-            "enableSupervisor": false,
-            "_supervisorNote": "Supervisor adds ~19 extra LLM calls per pipeline run (2 per stage + final summary). Enable only when debugging pipeline quality issues.",
+            "enableSupervisor": "adaptive",
+            "_supervisorNote": "Modes: true/'always' = every run, false/'never' = disabled, 'adaptive' = only for complex-tier tickets (determined by cognitive loop). Adaptive mode saves ~19 LLM calls on simple/moderate tickets.",
             "parallelCodeReview": true,
             "maxMiniSessions": 5,
             "supervisorTimeout": 90000,
@@ -802,6 +901,88 @@
                 "autoInitOnStart": true,
                 "fallbackToLocalOnly": true
             }
+        },
+        "contextEngineering": {
+            "_comment": "Context engineering system — priority-aware packing, compaction, tool trimming, agent notes (Anthropic patterns)",
+            "enabled": true,
+            "maxContextChars": 120000,
+            "priorities": {
+                "_comment": "Priority 0-100 for each context component. Higher = kept first when budget tight. Set 0 to omit entirely.",
+                "basePrompt": 100,
+                "ticketContext": 90,
+                "groundingContext": 85,
+                "sharedContext": 70,
+                "frameworkInventory": 60,
+                "kbContext": 50,
+                "learningContext": 40,
+                "explorationData": 75,
+                "agentNotes": 65
+            },
+            "compaction": {
+                "_comment": "Shrink completed stage data between pipeline stages to free context budget",
+                "enabled": true,
+                "strategy": "summarize",
+                "maxSummaryChars": 500,
+                "preserveArtifacts": true,
+                "preserveDecisions": true
+            },
+            "toolTrimming": {
+                "_comment": "Trim bloated MCP tool results (snapshots, network, console) before they enter conversation",
+                "enabled": true,
+                "snapshot": {
+                    "maxChars": 8000,
+                    "strategy": "extractSelectors"
+                },
+                "networkRequests": {
+                    "maxChars": 3000,
+                    "strategy": "topN",
+                    "topN": 20
+                },
+                "consoleMessages": {
+                    "maxChars": 2000,
+                    "keepErrors": true
+                }
+            },
+            "agentNotes": {
+                "_comment": "Structured note-taking — agents persist discoveries outside the context window",
+                "enabled": true,
+                "maxNotes": 50,
+                "maxNoteLength": 500,
+                "injectIntoContext": true,
+                "maxInjectedChars": 3000
+            },
+            "promptLayers": {
+                "_comment": "Eliminates prompt duplication via inheritance-based layers (base, automation, jira, mcp, testCase)",
+                "enabled": true
+            }
+        },
+        "cognitiveContextMesh": {
+            "_comment": "Cognitive Context Mesh (CCM) — multi-resolution context compilation, coverage-tracked injection, provenance verification, and cross-run learning. Zero LLM cost, 100% deterministic JS.",
+            "enabled": true,
+            "dna": {
+                "_comment": "Context DNA Compiler — compiles source files into L0/L1/L2/L3 multi-resolution representations. L3 is ~0.5% of original size while preserving all semantic relationships.",
+                "dataDir": "agentic-workflow/ccm-data",
+                "autoRecompile": true,
+                "staleThresholdMs": 300000
+            },
+            "navigator": {
+                "_comment": "Dynamic Context Navigator — replaces static budget percentages with demand-driven resolution allocation per-agent, per-task.",
+                "focusHalfLifeMs": 120000,
+                "learningEnabled": true
+            },
+            "provenance": {
+                "_comment": "Output Provenance Verification — traces every assertion back to source DNA region, tags with VERIFIED/INFERRED/UNGROUNDED confidence.",
+                "enableInlineAnnotations": false,
+                "riskThreshold": 0.3
+            },
+            "sourcePaths": [
+                "tests/pageobjects",
+                "tests/business-functions",
+                "tests/utils",
+                "tests/config",
+                "tests/test-data",
+                "tests/enums"
+            ]
         },
         "modes": {
             "full": [

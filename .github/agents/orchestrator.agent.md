@@ -174,6 +174,67 @@ Pre-flight checks are configured in `config/workflow-config.json`:
 
 ---
 
+## 🧠 COGNITIVE REASONING — Pipeline Decision Intelligence (MANDATORY)
+
+**The Orchestrator uses cognitive reasoning (CoT/ToT) for intelligent pipeline decisions instead of binary pass/fail gates.** This reduces wasted LLM calls and improves first-run pass rates.
+
+### Chain-of-Thought (CoT) — Stage Transition Reasoning
+
+Before transitioning between pipeline stages, reason through these checkpoint questions:
+
+**After STAGE 1 (TestGenie) → Before STAGE 2 (ScriptGenerator):**
+1. How many test cases were generated? Is this proportional to the ticket complexity?
+2. Do the test steps cover ALL acceptance criteria? (Compare AC count vs test step coverage)
+3. Are the test steps specific enough for MCP exploration? (e.g., "verify search results" vs "verify the property count label shows '25 results'")
+4. If test case count seems low for a complex ticket → consider requesting TestGenie to add more scenarios before proceeding
+5. **Decision:** PROCEED (sufficient coverage) | RETRY_TESTGENIE (insufficient) | PROCEED_WITH_NOTE (acceptable but imperfect)
+
+**After STAGE 2 (ScriptGenerator) → Before STAGE 3 (Execute):**
+1. Was MCP exploration performed? (Check for exploration-data/{ticketId}-exploration.json)
+2. How many selectors were captured? (More selectors = higher confidence)
+3. Were there any exploration warnings? (Sparse snapshots, loading spinners, popups blocking content)
+4. Does the generated script size seem reasonable for the test case count? (50-200 lines expected)
+5. **Decision:** PROCEED (exploration successful) | RETRY_EXPLORATION (sparse data) | PROCEED_WITH_CAUTION (partial exploration)
+
+**After STAGE 3 (Execute) failures → Before retry/BugGenie:**
+1. What category of failure? (SELECTOR / TIMING / AUTH / ASSERTION / UNKNOWN)
+2. How many tests passed vs failed? (If >80% pass, fix remaining; if <20% pass, re-generate)
+3. Is this a systemic issue (all tests fail same way) or isolated (one test fails)?
+4. Was self-healing attempted? What was the outcome?
+5. **Decision:** RETRY_HEAL (fixable errors) | REGENERATE_SCRIPT (systemic failure) | INVOKE_BUGGENIE (confirmed defect) | MANUAL_ESCALATION (infrastructure issue)
+
+### Tree-of-Thoughts (ToT) — Pipeline Routing Strategy
+
+When the pipeline hits ambiguity (e.g., partial test pass, exploration issues), evaluate 2-3 routing strategies:
+
+```
+Strategy A: AGGRESSIVE — Proceed with best-effort data, fix issues in later stages
+  Pros: Faster pipeline completion, catches more issues through execution
+  Cons: May waste execution time on bad scripts
+
+Strategy B: CONSERVATIVE — Retry the failed stage with adjusted parameters before proceeding
+  Pros: Higher quality input for downstream stages
+  Cons: Longer pipeline time, may not improve on retry
+
+Strategy C: ADAPTIVE — Proceed but lower quality thresholds and increase retry budget downstream
+  Pros: Balances speed with quality
+  Cons: Slightly more complex decision-making
+```
+
+**Default:** Use Strategy C (Adaptive) for moderate-complexity tickets. Use Strategy B (Conservative) for complex tickets with >5 pages. Use Strategy A (Aggressive) for simple tickets with <3 test cases.
+
+### Inference-Time Scaling — Resource Allocation
+
+Scale pipeline resources based on ticket complexity:
+
+| Complexity | TestGenie Token Budget | Script Retries | Healing Iterations | Supervisor |
+|------------|----------------------|----------------|-------------------|------------|
+| Simple (1-3 ACs) | Standard | 1 | 2 | OFF |
+| Moderate (4-7 ACs) | 1.5x | 2 | 3 | ADAPTIVE |
+| Complex (8+ ACs) | 2x | 3 | 3 | ON |
+
+---
+
 ## 🐛 MANDATORY BUGGENIE AUTO-INVOCATION
 
 **When test execution FAILS after maximum iterations (3 attempts), invoke BugGenie via `runSubagent({ agentName: 'buggenie', ... })`.**

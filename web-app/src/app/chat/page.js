@@ -11,10 +11,13 @@ import SessionList from '@/components/SessionList';
 import ModelSelect from '@/components/ModelSelect';
 import AgentSelect from '@/components/AgentSelect';
 import { getAgentConfig } from '@/lib/agent-options';
-import { DocumentIcon, CodeIcon, GlobeIcon, PlayIcon, SparkleIcon, MenuIcon, ChatBubbleIcon, WrenchIcon, CheckIcon, XIcon } from '@/components/Icons';
+import { DocumentIcon, CodeIcon, GlobeIcon, PlayIcon, SparkleIcon, MenuIcon, ChatBubbleIcon, WrenchIcon, CheckIcon, XIcon, FileIcon } from '@/components/Icons';
+import DirectoryPicker from '@/components/DirectoryPicker';
 import ErrorBanner from '@/components/ErrorBanner';
 import FollowupChips from '@/components/FollowupChips';
 import UserInputPrompt from '@/components/UserInputPrompt';
+import ReasoningPanel from '@/components/ReasoningPanel';
+import ToolCallCard from '@/components/ToolCallCard';
 
 const CAPABILITY_CARDS = [
     { icon: <DocumentIcon />, title: 'Generate Test Cases', desc: 'From Jira tickets to structured test steps with Excel export' },
@@ -33,14 +36,16 @@ export default function ChatPage() {
     const [isProcessing, setIsProcessing] = useState(false);
     const [error, setError] = useState(null);
     const [model, setModel] = useState(DEFAULT_MODEL);
-    const [agentMode, setAgentMode] = useState(null);       // null = default, 'testgenie', 'scriptgenerator', 'buggenie'
+    const [agentMode, setAgentMode] = useState(null);       // null = TPM (all agent capabilities), 'testgenie', 'scriptgenerator', 'buggenie', 'taskgenie'
     const [sidebarOpen, setSidebarOpen] = useState(true);
     const [followups, setFollowups] = useState([]);         // [{ label, prompt, category, icon, prefill? }]
     const [prefillText, setPrefillText] = useState('');      // text to pre-fill into the chat input
     const [userInputRequests, setUserInputRequests] = useState([]); // [{ requestId, question, options, timestamp, resolved, resolvedAnswer, auto }]
+    const [filegenieRoot, setFilegenieRoot] = useState(null); // current workspace root for FileGenie
 
     const messagesEndRef = useRef(null);
     const streamingContentRef = useRef('');
+    const streamingReasoningRef = useRef('');
     const currentToolGroupRef = useRef(null);               // tracks the active tool group ID
 
     // SSE connection for active chat session
@@ -58,15 +63,20 @@ export default function ChatPage() {
 
             case 'chat_message': {
                 const finalContent = data.content || streamingContentRef.current;
+                // Capture reasoning: prefer persisted reasoning from server, fall back to streamed
+                const messageReasoning = data.reasoning || streamingReasoningRef.current || null;
                 if (finalContent && finalContent.trim()) {
                     setMessages(prev => {
                         if (prev.some(m => m.content === finalContent && m.role === 'assistant')) return prev;
-                        return [...prev, { role: 'assistant', content: finalContent, timestamp: ts }];
+                        const msg = { role: 'assistant', content: finalContent, timestamp: ts };
+                        if (messageReasoning) msg.reasoning = messageReasoning;
+                        return [...prev, msg];
                     });
                 }
                 // Close current tool group so the next tool call starts a new one
                 currentToolGroupRef.current = null;
                 streamingContentRef.current = '';
+                streamingReasoningRef.current = '';
                 setStreamingContent('');
                 setStreamingReasoning('');
                 break;
@@ -103,21 +113,46 @@ export default function ChatPage() {
                 );
                 break;
 
+            case 'chat_tool_progress':
+                // Update the matching running tool with live progress info
+                setToolGroups(prev =>
+                    prev.map(g => ({
+                        ...g,
+                        tools: g.tools.map(t =>
+                            t.name === data.toolName && t.status === 'running'
+                                ? {
+                                    ...t,
+                                    progressPhase: data.phase,
+                                    progressMessage: data.message,
+                                    progressStep: data.step,
+                                    ...(data.featureResult ? { featureResult: data.featureResult } : {}),
+                                    ...(data.stepNum ? { stepNum: data.stepNum, totalSteps: data.totalSteps, stepDescription: data.stepDescription, stepStatus: data.stepStatus } : {}),
+                                }
+                                : t
+                        ),
+                    }))
+                );
+                break;
+
             case 'chat_reasoning':
-                setStreamingReasoning(prev => prev + (data.deltaContent || ''));
+                streamingReasoningRef.current += (data.deltaContent || '');
+                setStreamingReasoning(streamingReasoningRef.current);
                 break;
 
             case 'chat_idle':
                 setIsProcessing(false);
                 if (streamingContentRef.current) {
-                    setMessages(prev => [
-                        ...prev,
-                        { role: 'assistant', content: streamingContentRef.current, timestamp: ts },
-                    ]);
+                    const idleReasoning = streamingReasoningRef.current || null;
+                    setMessages(prev => {
+                        const msg = { role: 'assistant', content: streamingContentRef.current, timestamp: ts };
+                        if (idleReasoning) msg.reasoning = idleReasoning;
+                        return [...prev, msg];
+                    });
                     streamingContentRef.current = '';
                     setStreamingContent('');
                 }
                 currentToolGroupRef.current = null;
+                streamingReasoningRef.current = '';
                 setStreamingReasoning('');
                 // Keep toolGroups — don't clear them so completed tools remain visible
                 break;
@@ -150,6 +185,7 @@ export default function ChatPage() {
                         requestId: data.requestId,
                         question: data.question,
                         options: data.options || [],
+                        type: data.type || 'default',
                         timestamp: ts,
                         resolved: data.resolved || false,
                         resolvedAnswer: null,
@@ -173,7 +209,9 @@ export default function ChatPage() {
                 if (data.role === 'assistant') {
                     setMessages(prev => {
                         if (prev.some(m => m.content === data.content && m.role === 'assistant')) return prev;
-                        return [...prev, { role: 'assistant', content: data.content, timestamp: ts }];
+                        const msg = { role: 'assistant', content: data.content, timestamp: ts };
+                        if (data.reasoning) msg.reasoning = data.reasoning;
+                        return [...prev, msg];
                     });
                 }
                 break;
@@ -222,6 +260,7 @@ export default function ChatPage() {
             setUserInputRequests([]);
             currentToolGroupRef.current = null;
             streamingContentRef.current = '';
+            streamingReasoningRef.current = '';
             setStreamingContent('');
             setStreamingReasoning('');
             if (agentForSession !== agentMode) setAgentMode(agentForSession);
@@ -267,7 +306,9 @@ export default function ChatPage() {
         setActiveSessionId(sessionId);
         setMessages([]);
         setStreamingContent('');
+        setStreamingReasoning('');
         streamingContentRef.current = '';
+        streamingReasoningRef.current = '';
         setToolGroups([]);
         setFollowups([]);
         setUserInputRequests([]);
@@ -278,6 +319,14 @@ export default function ChatPage() {
         const sessionMeta = sessions.find(s => s.sessionId === sessionId);
         if (sessionMeta) {
             setAgentMode(sessionMeta.agentMode || null);
+            // Restore FileGenie root if switching to a filegenie session
+            if (sessionMeta.agentMode === 'filegenie') {
+                apiClient.getWorkspaceRoot(sessionId).then(data => {
+                    setFilegenieRoot(data?.root || null);
+                }).catch(() => setFilegenieRoot(null));
+            } else {
+                setFilegenieRoot(null);
+            }
         }
 
         try {
@@ -312,13 +361,17 @@ export default function ChatPage() {
         }
     };
 
-    const sendMessage = async (content, imageAttachments = []) => {
-        if (!activeSessionId || (!content.trim() && imageAttachments.length === 0)) return;
+    const sendMessage = async (content, imageAttachments = [], docAttachments = []) => {
+        if (!activeSessionId || (!content.trim() && imageAttachments.length === 0 && docAttachments.length === 0)) return;
 
         // Build user message with optional attachments for local display
         const userMessage = { role: 'user', content, timestamp: new Date().toISOString() };
-        if (imageAttachments.length > 0) {
-            userMessage.attachments = imageAttachments; // { id, name, type, size, dataUrl, base64 }
+        const allLocalAttachments = [
+            ...imageAttachments, // { id, name, type, size, dataUrl, base64, kind:'image' }
+            ...docAttachments.map(d => ({ ...d, kind: 'document' })),
+        ];
+        if (allLocalAttachments.length > 0) {
+            userMessage.attachments = allLocalAttachments;
         }
 
         setMessages(prev => [...prev, userMessage]);
@@ -327,6 +380,7 @@ export default function ChatPage() {
         setFollowups([]);  // Clear followups when user sends a new message
         setPrefillText(''); // Clear any prefill text
         streamingContentRef.current = '';
+        streamingReasoningRef.current = '';
         setStreamingContent('');
         setStreamingReasoning('');
         setToolGroups([]);
@@ -336,20 +390,36 @@ export default function ChatPage() {
         setSessions(prev => prev.map(s => {
             if (s.sessionId !== activeSessionId) return s;
             if (s.title) return s; // already has title
-            return { ...s, title: truncateTitle(content || 'Image attachment') };
+            return { ...s, title: truncateTitle(content || 'File attachment') };
         }));
 
         try {
-            // Transform attachments to the format expected by the Copilot SDK
-            const apiAttachments = imageAttachments.length > 0
-                ? imageAttachments.map(att => ({
+            // Transform attachments to the format expected by the backend API
+            const apiAttachments = [];
+
+            // Image attachments
+            for (const att of imageAttachments) {
+                apiAttachments.push({
                     type: 'image',
                     media_type: att.type,    // e.g. 'image/png'
                     data: att.base64,         // raw base64 string
-                }))
-                : undefined;
+                });
+            }
 
-            await apiClient.sendChatMessage(activeSessionId, content || '(image attached)', apiAttachments, model);
+            // Document attachments
+            for (const att of docAttachments) {
+                apiAttachments.push({
+                    type: 'document',
+                    media_type: att.mimeType, // e.g. 'application/pdf'
+                    data: att.base64,
+                    filename: att.name,
+                });
+            }
+
+            const finalAttachments = apiAttachments.length > 0 ? apiAttachments : undefined;
+            const defaultContent = imageAttachments.length > 0 ? '(image attached)' : (docAttachments.length > 0 ? '(document attached)' : '');
+
+            await apiClient.sendChatMessage(activeSessionId, content || defaultContent, finalAttachments, model);
         } catch (err) {
             setError(`Failed to send: ${err.message}`);
             setIsProcessing(false);
@@ -372,6 +442,7 @@ export default function ChatPage() {
     const handleAgentChange = async (newAgent) => {
         if (newAgent === agentMode) return;
         setAgentMode(newAgent);
+        setFilegenieRoot(null);
 
         // Clear stale UI state from previous session
         setToolGroups([]);
@@ -380,6 +451,7 @@ export default function ChatPage() {
         currentToolGroupRef.current = null;
         setStreamingContent('');
         streamingContentRef.current = '';
+        streamingReasoningRef.current = '';
         setStreamingReasoning('');
         setError(null);
 
@@ -488,9 +560,9 @@ export default function ChatPage() {
                             </p>
                         </div>
                     </div>
-                    <div className="flex items-center gap-3 flex-shrink-0">
+                    <div className="flex items-center gap-3 min-w-0 overflow-visible">
                         <AgentSelect value={agentMode} onChange={handleAgentChange} disabled={isProcessing} />
-                        <ModelSelect value={model} onChange={setModel} className="min-w-[170px]" />
+                        <ModelSelect value={model} onChange={setModel} className="w-[170px] flex-shrink-0" />
                         <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100/80 border border-surface-200/50 flex-shrink-0 whitespace-nowrap">
                             <span className={`w-2 h-2 rounded-full transition-colors flex-shrink-0 ${sseStatus === 'connected' ? 'bg-accent-400 shadow-sm shadow-accent-400/40' :
                                 sseStatus === 'reconnecting' ? 'bg-amber-400 animate-pulse' :
@@ -548,11 +620,41 @@ export default function ChatPage() {
                         {activeSessionId && messages.length === 0 && !streamingContent && !isProcessing && (
                             <div className="flex items-center justify-center min-h-[40vh]">
                                 <div className="text-center">
-                                    <div className="w-10 h-10 mx-auto mb-3 rounded-xl bg-surface-100 flex items-center justify-center">
-                                        <ChatBubbleIcon className="w-5 h-5 text-surface-400" />
-                                    </div>
-                                    <p className="text-sm text-surface-500 font-medium">Start the conversation</p>
-                                    <p className="text-xs text-surface-400 mt-0.5">Type a message below to begin</p>
+                                    {agentMode === 'filegenie' ? (
+                                        <>
+                                            <div className="w-10 h-10 mx-auto mb-3 rounded-xl bg-cyan-50 flex items-center justify-center">
+                                                <FileIcon className="w-5 h-5 text-cyan-600" />
+                                            </div>
+                                            <p className="text-sm text-surface-700 font-semibold">FileGenie is ready</p>
+                                            <p className="text-xs text-surface-500 mt-1 max-w-xs mx-auto leading-relaxed">
+                                                {filegenieRoot
+                                                    ? <>Working with <span className="font-mono text-cyan-600 text-[11px]">{filegenieRoot}</span></>
+                                                    : 'Select a folder below to get started'
+                                                }
+                                            </p>
+                                            <div className="mt-4 flex flex-wrap justify-center gap-2">
+                                                {['Organize my files', 'Summarize a PDF', 'Search for documents', 'List folder contents'].map(q => (
+                                                    <button key={q}
+                                                        onClick={() => sendMessage(q)}
+                                                        disabled={!filegenieRoot}
+                                                        className={`px-3 py-1.5 rounded-lg text-[11px] font-medium transition-colors border border-cyan-200/60 ${filegenieRoot
+                                                            ? 'bg-cyan-50 text-cyan-700 hover:bg-cyan-100 cursor-pointer'
+                                                            : 'bg-surface-50 text-surface-400 cursor-not-allowed'
+                                                            }`}>
+                                                        {q}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <div className="w-10 h-10 mx-auto mb-3 rounded-xl bg-surface-100 flex items-center justify-center">
+                                                <ChatBubbleIcon className="w-5 h-5 text-surface-400" />
+                                            </div>
+                                            <p className="text-sm text-surface-500 font-medium">Start the conversation</p>
+                                            <p className="text-xs text-surface-400 mt-0.5">Type a message below to begin</p>
+                                        </>
+                                    )}
                                 </div>
                             </div>
                         )}
@@ -560,7 +662,18 @@ export default function ChatPage() {
                         {/* Interleaved timeline: messages + tool groups + user-input prompts in chronological order */}
                         {timeline.map((item) => {
                             if (item.type === 'message') {
-                                return <ChatMessage key={item.key} message={item.data} />;
+                                return (
+                                    <div key={item.key}>
+                                        {/* Per-message reasoning (persisted from history) */}
+                                        {item.data.reasoning && (
+                                            <ReasoningPanel
+                                                reasoning={item.data.reasoning}
+                                                compact
+                                            />
+                                        )}
+                                        <ChatMessage message={item.data} />
+                                    </div>
+                                );
                             }
                             if (item.type === 'user_input') {
                                 const req = item.data;
@@ -570,6 +683,7 @@ export default function ChatPage() {
                                         requestId={req.requestId}
                                         question={req.question}
                                         options={req.options}
+                                        type={req.type || 'default'}
                                         resolved={req.resolved}
                                         resolvedAnswer={req.resolvedAnswer}
                                         auto={req.auto}
@@ -578,69 +692,20 @@ export default function ChatPage() {
                                     />
                                 );
                             }
-                            // Tool group
+                            // Tool group — delegated to ToolCallCard component
                             const group = item.data;
-                            const groupRunning = group.tools.filter(t => t.status === 'running').length;
                             return (
-                                <div key={item.key} className="space-y-1.5">
-                                    <div className="flex items-center gap-2 text-[11px] font-semibold text-surface-500 uppercase tracking-wider px-1">
-                                        <WrenchIcon />
-                                        Tool Calls
-                                        {groupRunning > 0 && (
-                                            <span className="ml-1 px-1.5 py-0.5 rounded-full bg-brand-100 text-brand-600 text-[10px] font-bold normal-case">
-                                                {groupRunning} active
-                                            </span>
-                                        )}
-                                    </div>
-                                    {group.tools.map((tool) => (
-                                        <div key={tool.id}
-                                            className={`rounded-xl px-4 py-2.5 text-xs border flex items-center gap-2.5 transition-all ${tool.status === 'running'
-                                                ? 'border-brand-200/80 bg-brand-50/40'
-                                                : tool.success === false
-                                                    ? 'border-red-200/80 bg-red-50/30'
-                                                    : 'border-accent-200/80 bg-accent-50/30'
-                                                }`}
-                                        >
-                                            {tool.status === 'running' ? (
-                                                <div className="w-4 h-4 flex-shrink-0">
-                                                    <div className="w-4 h-4 rounded-full border-2 border-brand-400 border-t-transparent animate-spin" />
-                                                </div>
-                                            ) : (
-                                                tool.success === false
-                                                    ? <XIcon className="w-4 h-4 flex-shrink-0 text-red-400" />
-                                                    : <CheckIcon className="w-4 h-4 flex-shrink-0 text-accent-500" />
-                                            )}
-                                            <span className="font-mono font-medium text-surface-700 truncate">{tool.name}</span>
-                                            {tool.status === 'running' && (
-                                                <span className="ml-auto text-brand-500 text-[10px] font-semibold flex items-center gap-1 flex-shrink-0">
-                                                    running
-                                                    <span className="inline-flex gap-[2px]">
-                                                        <span className="typing-dot" />
-                                                        <span className="typing-dot" style={{ animationDelay: '0.15s' }} />
-                                                        <span className="typing-dot" style={{ animationDelay: '0.3s' }} />
-                                                    </span>
-                                                </span>
-                                            )}
-                                            {tool.status === 'complete' && (
-                                                <span className={`ml-auto text-[10px] font-semibold flex-shrink-0 ${tool.success === false ? 'text-red-500' : 'text-accent-600'}`}>
-                                                    {tool.success === false ? 'failed' : 'done'}
-                                                </span>
-                                            )}
-                                        </div>
-                                    ))}
-                                </div>
+                                <ToolCallCard key={item.key} group={group} />
                             );
                         })}
 
-                        {/* Reasoning indicator */}
+                        {/* Streaming reasoning — live thinking display */}
                         {streamingReasoning && (
-                            <div className="border border-violet-200/80 bg-violet-50/60 rounded-xl px-4 py-3 text-xs text-violet-700">
-                                <div className="font-semibold mb-1.5 flex items-center gap-1.5 text-violet-600">
-                                    <SparkleIcon className="w-4 h-4 animate-spin-slow" />
-                                    Thinking...
-                                </div>
-                                <p className="whitespace-pre-wrap text-violet-600/80 leading-relaxed">{streamingReasoning}</p>
-                            </div>
+                            <ReasoningPanel
+                                reasoning={streamingReasoning}
+                                isStreaming
+                                defaultExpanded
+                            />
                         )}
 
                         {/* Streaming content */}
@@ -663,6 +728,15 @@ export default function ChatPage() {
                             />
                         </div>
                     </div>
+                )}
+
+                {/* FileGenie directory picker */}
+                {agentMode === 'filegenie' && activeSessionId && (
+                    <DirectoryPicker
+                        sessionId={activeSessionId}
+                        currentRoot={filegenieRoot}
+                        onRootChange={setFilegenieRoot}
+                    />
                 )}
 
                 {/* Input */}

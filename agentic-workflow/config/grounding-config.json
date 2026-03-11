@@ -14,6 +14,9 @@
         {
             "name": "Property Search",
             "description": "Search and filter properties by city, price, beds, baths, property type. Map-based and grid view.",
+            "authLevel": "authenticated",
+            "authStrategy": "token-entry",
+            "tokenKey": "registered",
             "pages": [
                 "/en-US/properties/map"
             ],
@@ -40,6 +43,9 @@
         {
             "name": "Property Details",
             "description": "Detailed property information page — photos, facts, features, schools, EMC calculator, Reimagine Space CTA, Ads Services Widget.",
+            "authLevel": "authenticated",
+            "authStrategy": "session",
+            "tokenKey": "registered",
             "pages": [
                 "/en-US/properties/detail"
             ],
@@ -65,6 +71,7 @@
         {
             "name": "Authentication",
             "description": "Login, logout, account activation, and user authentication flows.",
+            "authLevel": "public",
             "pages": [
                 "/login",
                 "/logout",
@@ -94,6 +101,9 @@
         {
             "name": "Favorites",
             "description": "Save, remove, and manage favorite properties. List and compare favorites.",
+            "authLevel": "authenticated",
+            "authStrategy": "session",
+            "tokenKey": "registered",
             "pages": [
                 "/en-US/properties/favorites"
             ],
@@ -116,6 +126,9 @@
         {
             "name": "Notes",
             "description": "Add, edit, delete personal notes on properties.",
+            "authLevel": "authenticated",
+            "authStrategy": "session",
+            "tokenKey": "registered",
             "pages": [],
             "pageObjects": [
                 "addNotesWindow.js"
@@ -134,6 +147,9 @@
         {
             "name": "User Profile",
             "description": "View and edit user profile settings, notification preferences, switch groups.",
+            "authLevel": "authenticated",
+            "authStrategy": "session",
+            "tokenKey": "editProfile",
             "pages": [
                 "/en-US/profile"
             ],
@@ -156,6 +172,8 @@
         {
             "name": "Agent Branding",
             "description": "Agent branding popups and customization for branded property views.",
+            "authLevel": "agent",
+            "tokenKey": "agentForRegistered",
             "pages": [],
             "pageObjects": [
                 "agentBranding.js",
@@ -173,6 +191,9 @@
         {
             "name": "Marketplace",
             "description": "Home services marketplace — mortgage, insurance, home professionals, broker insurance.",
+            "authLevel": "authenticated",
+            "authStrategy": "session",
+            "tokenKey": "registered",
             "pages": [
                 "/en-US/marketplace"
             ],
@@ -195,6 +216,9 @@
         {
             "name": "Planner",
             "description": "Homebuying planner and timeline management.",
+            "authLevel": "authenticated",
+            "authStrategy": "session",
+            "tokenKey": "registered",
             "pages": [
                 "/en-US/planner"
             ],
@@ -212,6 +236,9 @@
         {
             "name": "OneHomeOwner (OHO)",
             "description": "OneHome Owner section for property ownership features.",
+            "authLevel": "authenticated",
+            "authStrategy": "session",
+            "tokenKey": "registered",
             "pages": [
                 "/en-US/owner"
             ],
@@ -230,6 +257,9 @@
         {
             "name": "Notifications",
             "description": "Notification center and alerts management.",
+            "authLevel": "authenticated",
+            "authStrategy": "session",
+            "tokenKey": "registered",
             "pages": [],
             "pageObjects": [
                 "notificationsMenuDropDown.js"
@@ -245,6 +275,7 @@
         {
             "name": "Welcome & Popups",
             "description": "Welcome modal, tour overlay, and various popup handlers.",
+            "authLevel": "public",
             "pages": [],
             "pageObjects": [
                 "welcomePopUp.js",
@@ -535,5 +566,12 @@
             "syncSpaceKeys": [],
             "_comment": "Pre-indexing configuration. Set autoSyncOnStart=true to prefetch key pages at pipeline startup. syncPageIds/syncSpaceKeys override provider defaults for sync scope."
         }
+    },
+    "contextDNA": {
+        "_comment": "Context DNA integration with grounding. When enabled, grounding queries prefer DNA-compiled L2/L1 representations over raw BM25 chunks — preserving cross-file relationships and reducing information loss.",
+        "preferDNAOverBM25": true,
+        "dnaFallbackToBM25": true,
+        "l2CardMaxChars": 800,
+        "l1SkeletonMaxChars": 5000
     }
 }

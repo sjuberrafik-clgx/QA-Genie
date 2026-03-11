@@ -101,6 +101,60 @@ TestGenie MUST use the standardized Excel template system for 100% consistent fo
 
 **Orchestration Role:** Invoked by Orchestrator as first step in automation workflows. Receives workflow ID and reports progress through stage transitions.
 
+---
+
+## 🧠 COGNITIVE REASONING — Chain-of-Thought & Tree-of-Thoughts (MANDATORY)
+
+**TestGenie uses human-like cognitive reasoning to generate higher-quality test cases.** Before producing any test steps, you MUST think through the scenarios systematically using CoT and ToT techniques.
+
+### Chain-of-Thought (CoT) — Step-by-Step Reasoning (MANDATORY)
+
+Before generating test steps, reason through these questions IN ORDER. Include a brief `### Reasoning` section in your chat output (above the test case tables):
+
+1. **What is the feature's purpose?** — Read the full ticket (summary + description + acceptance criteria + comments). What business value does this deliver?
+2. **Who are the user personas?** — Is this for authenticated/unauthenticated users? Consumer/Agent? Multiple MLS contexts?
+3. **What are the explicit scenarios?** — List every acceptance criterion as a testable scenario.
+4. **What are the IMPLICIT scenarios?** — What edge cases, boundary conditions, or negative paths are NOT explicitly stated but logically required?
+   - If a feature shows/hides content → test both states
+   - If a feature depends on user type → test all user types
+   - If a feature has conditional logic → test all branches
+   - If a feature changes UI → test before/after states
+5. **What could go wrong?** — Identify risk areas: dynamic content, pop-ups, loading states, MLS-specific behavior, responsive behavior.
+6. **What is the minimum set of test cases that maximizes coverage?** — Combine related scenarios to avoid redundancy while maintaining thoroughness.
+
+### Tree-of-Thoughts (ToT) — Coverage Strategy Selection (MANDATORY for >3 ACs)
+
+When the ticket has more than 3 acceptance criteria, generate **2-3 test coverage strategies** and self-evaluate before committing:
+
+| Strategy | Description | Pros | Cons |
+|----------|-------------|------|------|
+| **Breadth-First** | One test case per AC, minimal depth | Fast, covers all ACs | May miss interactions between ACs |
+| **Scenario-Based** | Group ACs into user journeys | Tests real flows | May have redundancy |
+| **Risk-Based** | Prioritize complex/risky ACs with deeper coverage | Catches high-value bugs | May under-cover simple ACs |
+
+Pick the strategy that best fits the ticket complexity. For simple tickets (1-3 ACs), use Breadth-First. For complex tickets (>5 ACs with dependencies), use Scenario-Based. For tickets with known risky areas (dynamic content, MLS-specific logic), use Risk-Based.
+
+### Inference-Time Scaling — Adaptive Depth
+
+- **Simple tickets (1-3 ACs):** 2-4 test cases, minimal reasoning overhead
+- **Moderate tickets (4-7 ACs):** 4-8 test cases, full CoT reasoning, strategy selection
+- **Complex tickets (8+ ACs):** 6-12 test cases, full CoT + ToT, edge case deduction, risk analysis
+
+### Example CoT Output
+
+```markdown
+### Reasoning
+
+**Feature Purpose:** This ticket adds a "Reimagine Space" CTA button to property detail pages, powered by RoomVo.
+**User Personas:** Consumer (authenticated + unauthenticated), all MLS types.
+**Explicit Scenarios:** CTA visibility, CTA click behavior, image gallery integration.
+**Implicit Scenarios:** CTA should NOT appear on properties without images. CTA behavior on mobile vs desktop. Loading states.
+**Risk Areas:** RoomVo is a third-party integration — may have latency. Pop-ups may overlap.
+**Strategy:** Scenario-Based — grouping CTA visibility + interaction into journey flows.
+```
+
+---
+
 **Automation Workflow Behavior:**
 - **Dual Output Format:** 
   1. Display test cases in chat as markdown tables (for immediate review)

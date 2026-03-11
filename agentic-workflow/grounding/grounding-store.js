@@ -899,6 +899,55 @@ class GroundingStore {
             console.log(`[GroundingStore] ${message}`);
         }
     }
+
+    // ─── CCM Integration ────────────────────────────────────────────
+
+    /**
+     * DNA-enhanced grounding context builder. Uses Context DNA L2/L1
+     * instead of raw BM25 chunks for Section 4 (RELEVANT CODE CONTEXT).
+     * Preserves all other sections (domain, rules, terminology, features, KB).
+     *
+     * Falls back to standard buildGroundingContext() if CCM is not available.
+     *
+     * @param {string} agentName
+     * @param {Object} options - Same as buildGroundingContext() plus:
+     * @param {Object} [options.ccm] - CognitiveContextMesh instance
+     * @returns {string}
+     */
+    buildGroundingContextWithDNA(agentName, options = {}) {
+        const ccm = options.ccm;
+        const dnaConfig = this.config.contextDNA || {};
+
+        // If no CCM or DNA not preferred, fall back to standard
+        if (!ccm || !dnaConfig.preferDNAOverBM25) {
+            return this.buildGroundingContext(agentName, options);
+        }
+
+        try {
+            // Build standard grounding (domain, rules, terminology, features, freshness, KB)
+            const standardContext = this.buildGroundingContext(agentName, {
+                ...options,
+                // Suppress BM25 code chunks (Section 4) — we'll replace with DNA
+                taskDescription: null,
+            });
+
+            // Generate DNA-optimized code context instead of BM25 chunks
+            const dnaGrounding = ccm.generateGroundingContext(options.taskDescription);
+            if (dnaGrounding) {
+                return standardContext + '\n\nRELEVANT CODE CONTEXT (DNA-compiled):\n' + dnaGrounding;
+            }
+
+            // DNA unavailable — fall back to BM25 chunks
+            if (dnaConfig.dnaFallbackToBM25) {
+                return this.buildGroundingContext(agentName, options);
+            }
+
+            return standardContext;
+        } catch (err) {
+            this._log(`DNA grounding failed, falling back to BM25: ${err.message}`);
+            return this.buildGroundingContext(agentName, options);
+        }
+    }
 }
 
 // ─── Singleton Manager ──────────────────────────────────────────────────────

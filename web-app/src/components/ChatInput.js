@@ -3,15 +3,18 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { PaperclipIcon } from '@/components/Icons';
 import ImagePreview from '@/components/ImagePreview';
-import { LIMITS } from '@/lib/constants';
+import FilePreview from '@/components/FilePreview';
+import { LIMITS, ALLOWED_IMAGE_TYPES, ALLOWED_DOC_TYPES, DOC_EXT_TO_MIME, FILE_ACCEPT_STRING } from '@/lib/constants';
 
 const MAX_IMAGES = LIMITS.MAX_IMAGES_PER_MESSAGE;
 const MAX_IMAGE_SIZE = LIMITS.MAX_IMAGE_SIZE_BYTES;
-const ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const MAX_DOCS = LIMITS.MAX_DOCS_PER_MESSAGE;
+const MAX_DOC_SIZE = LIMITS.MAX_DOC_SIZE_BYTES;
 
 export default function ChatInput({ onSend, onAbort, isProcessing, disabled, placeholder: customPlaceholder, prefillText, supportsImages = true }) {
     const [input, setInput] = useState('');
-    const [attachments, setAttachments] = useState([]); // [{ id, name, type, size, dataUrl, base64 }]
+    const [attachments, setAttachments] = useState([]); // images: [{ id, name, type, size, dataUrl, base64, kind:'image' }]
+    const [docAttachments, setDocAttachments] = useState([]); // [{ id, name, mimeType, size, base64, extension, kind:'document' }]
     const [imageError, setImageError] = useState(null);
     const [isDragging, setIsDragging] = useState(false);
     const textareaRef = useRef(null);
@@ -106,23 +109,106 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
         setAttachments(prev => prev.filter((_, i) => i !== index));
     }, []);
 
-    // ── Paste handler: intercept Ctrl+V with images ──
+    const removeDocAttachment = useCallback((index) => {
+        setDocAttachments(prev => prev.filter((_, i) => i !== index));
+    }, []);
+
+    /**
+     * Resolve MIME type — browsers sometimes report empty or generic MIME for Office files.
+     * Falls back to extension-based lookup.
+     */
+    const resolveMime = (file) => {
+        if (file.type && file.type !== 'application/octet-stream') return file.type;
+        const ext = '.' + (file.name || '').split('.').pop().toLowerCase();
+        return DOC_EXT_TO_MIME[ext] || file.type || 'application/octet-stream';
+    };
+
+    /**
+     * Process document files (non-image) into document attachment state entries.
+     */
+    const processDocumentFiles = useCallback((files) => {
+        const remaining = MAX_DOCS - docAttachments.length;
+        if (remaining <= 0) {
+            setImageError(`Maximum ${MAX_DOCS} documents allowed per message.`);
+            return;
+        }
+
+        const toProcess = Array.from(files).slice(0, remaining);
+        let rejected = 0;
+
+        toProcess.forEach((file) => {
+            const mime = resolveMime(file);
+            if (!ALLOWED_DOC_TYPES[mime]) {
+                rejected++;
+                return;
+            }
+            if (file.size > MAX_DOC_SIZE) {
+                setImageError(`File "${file.name}" exceeds 50 MB limit.`);
+                rejected++;
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = () => {
+                const base64 = reader.result.split(',')[1];
+                const ext = ALLOWED_DOC_TYPES[mime]?.ext || '.' + file.name.split('.').pop().toLowerCase();
+                setDocAttachments(prev => {
+                    if (prev.length >= MAX_DOCS) return prev;
+                    return [...prev, {
+                        id: `doc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                        name: file.name || `document${ext}`,
+                        mimeType: mime,
+                        size: file.size,
+                        base64,
+                        extension: ext,
+                        kind: 'document',
+                    }];
+                });
+            };
+            reader.readAsDataURL(file);
+        });
+
+        if (rejected > 0 && !imageError) {
+            setImageError('Some files were skipped (unsupported type or too large).');
+        }
+    }, [docAttachments.length, imageError]);
+
+    /**
+     * Route a list of files into image or document processors based on MIME type.
+     */
+    const routeFiles = useCallback((files) => {
+        const images = [];
+        const docs = [];
+        for (const file of Array.from(files)) {
+            const mime = resolveMime(file);
+            if (ALLOWED_IMAGE_TYPES.includes(mime)) {
+                images.push(file);
+            } else if (ALLOWED_DOC_TYPES[mime]) {
+                docs.push(file);
+            }
+        }
+        if (images.length > 0) processImageFiles(images);
+        if (docs.length > 0) processDocumentFiles(docs);
+        return images.length + docs.length;
+    }, [processImageFiles, processDocumentFiles]);
+
+    // ── Paste handler: intercept Ctrl+V with files ──
     const handlePaste = useCallback((e) => {
         const items = e.clipboardData?.items;
         if (!items) return;
 
-        const imageFiles = [];
+        const pastedFiles = [];
         for (const item of items) {
-            if (item.kind === 'file' && item.type.startsWith('image/')) {
+            if (item.kind === 'file') {
                 const file = item.getAsFile();
-                if (file) imageFiles.push(file);
+                if (file) pastedFiles.push(file);
             }
         }
-        if (imageFiles.length > 0) {
-            e.preventDefault(); // prevent pasting [object Object] as text
-            processImageFiles(imageFiles);
+        if (pastedFiles.length > 0) {
+            e.preventDefault();
+            routeFiles(pastedFiles);
         }
-    }, [processImageFiles]);
+    }, [routeFiles]);
 
     // ── Drag-and-drop handlers ──
     const handleDragEnter = useCallback((e) => {
@@ -157,28 +243,31 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
 
         const files = e.dataTransfer?.files;
         if (files && files.length > 0) {
-            const images = Array.from(files).filter(f => f.type.startsWith('image/'));
-            if (images.length > 0) processImageFiles(images);
+            const handled = routeFiles(files);
+            if (handled === 0) {
+                setImageError('Unsupported file type. Supported: images, PDF, Word, Excel, PowerPoint, CSV, TXT, Markdown, JSON.');
+            }
         }
-    }, [processImageFiles]);
+    }, [routeFiles]);
 
     // ── File picker ──
     const handleFileSelect = useCallback((e) => {
         const files = e.target.files;
         if (files && files.length > 0) {
-            processImageFiles(files);
+            routeFiles(files);
         }
         // Reset so the same file can be re-selected
         e.target.value = '';
-    }, [processImageFiles]);
+    }, [routeFiles]);
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        const hasContent = input.trim() || attachments.length > 0;
+        const hasContent = input.trim() || attachments.length > 0 || docAttachments.length > 0;
         if (!hasContent || disabled || isProcessing) return;
-        onSend(input.trim(), attachments);
+        onSend(input.trim(), attachments, docAttachments);
         setInput('');
         setAttachments([]);
+        setDocAttachments([]);
         setImageError(null);
     };
 
@@ -189,124 +278,148 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
         }
     };
 
-    const canSend = (input.trim() || attachments.length > 0) && !disabled && !isProcessing;
+    const canSend = (input.trim() || attachments.length > 0 || docAttachments.length > 0) && !disabled && !isProcessing;
+    const totalAttachments = attachments.length + docAttachments.length;
 
     return (
         <div className="border-t border-surface-200/60 bg-white/80 backdrop-blur-sm px-5 py-3">
             <div className="max-w-3xl mx-auto">
-                <div
-                    className={`relative flex flex-col rounded-2xl border bg-white shadow-sm transition-all ${isDragging
-                        ? 'border-brand-400 ring-2 ring-brand-200 bg-brand-50/30'
-                        : isProcessing
-                            ? 'border-brand-300 ring-2 ring-brand-100'
-                            : 'border-surface-200 focus-within:border-brand-400 focus-within:ring-2 focus-within:ring-brand-100'
-                        }`}
-                    onDragEnter={handleDragEnter}
-                    onDragLeave={handleDragLeave}
-                    onDragOver={handleDragOver}
-                    onDrop={handleDrop}
-                >
-                    {/* Drag overlay */}
-                    {isDragging && (
-                        <div className="absolute inset-0 z-10 rounded-2xl bg-brand-50/80 border-2 border-dashed border-brand-400 flex items-center justify-center pointer-events-none">
-                            <div className="text-sm font-medium text-brand-600 flex items-center gap-2">
-                                <PaperclipIcon className="w-5 h-5" strokeWidth={1.5} />
-                                Drop images here
+                {/* Glowing input wrapper — creates stacking context */}
+                <div className="glow-input-wrap">
+                    {/* 4 animated conic-gradient glow layers (z-index: 0) */}
+                    <div className="gi-layer gi-glow" />
+                    <div className="gi-layer gi-dark" />
+                    <div className="gi-layer gi-border" />
+                    <div className="gi-layer gi-white" />
+
+                    {/* Inner card — sits above glow layers (z-index: 1) */}
+                    <div
+                        className={`glow-input-inner flex flex-col shadow-sm transition-all ${isDragging
+                            ? 'ring-2 ring-brand-200 bg-brand-50/30'
+                            : ''
+                            }`}
+                        onDragEnter={handleDragEnter}
+                        onDragLeave={handleDragLeave}
+                        onDragOver={handleDragOver}
+                        onDrop={handleDrop}
+                    >
+                        {/* Drag overlay */}
+                        {isDragging && (
+                            <div className="absolute inset-0 z-10 rounded-2xl bg-brand-50/80 border-2 border-dashed border-brand-400 flex items-center justify-center pointer-events-none">
+                                <div className="text-sm font-medium text-brand-600 flex items-center gap-2">
+                                    <PaperclipIcon className="w-5 h-5" strokeWidth={1.5} />
+                                    Drop files here
+                                </div>
                             </div>
-                        </div>
-                    )}
+                        )}
 
-                    {/* Image previews (above the textarea) */}
-                    {attachments.length > 0 && (
-                        <ImagePreview attachments={attachments} onRemove={removeAttachment} />
-                    )}
+                        {/* Image previews (above the textarea) */}
+                        {attachments.length > 0 && (
+                            <ImagePreview attachments={attachments} onRemove={removeAttachment} />
+                        )}
 
-                    {/* Image error toast */}
-                    {imageError && (
-                        <div className="px-3 py-1.5">
-                            <div className="text-[11px] text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-1.5">
-                                {imageError}
+                        {/* Document previews (above the textarea) */}
+                        {docAttachments.length > 0 && (
+                            <FilePreview attachments={docAttachments} onRemove={removeDocAttachment} />
+                        )}
+
+                        {/* Image error toast */}
+                        {imageError && (
+                            <div className="px-3 py-1.5">
+                                <div className="text-[11px] text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-1.5">
+                                    {imageError}
+                                </div>
                             </div>
-                        </div>
-                    )}
+                        )}
 
-                    <div className="flex items-end">
-                        <textarea
-                            ref={textareaRef}
-                            value={input}
-                            onChange={(e) => setInput(e.target.value)}
-                            onKeyDown={handleKeyDown}
-                            onPaste={handlePaste}
-                            placeholder={isProcessing ? 'AI is thinking...' : (customPlaceholder || 'Message AI Assistant...')}
-                            disabled={disabled || isProcessing}
-                            rows={1}
-                            className="flex-1 resize-none bg-transparent px-4 py-3 text-sm text-surface-800 placeholder:text-surface-400 focus:outline-none disabled:opacity-50"
-                        />
-                        <div className="flex items-center gap-1 flex-shrink-0 p-1.5">
-                            {/* Attachment button */}
-                            {!isProcessing && supportsImages && (
-                                <button
-                                    type="button"
-                                    onClick={() => fileInputRef.current?.click()}
-                                    disabled={disabled || attachments.length >= MAX_IMAGES}
-                                    className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors ${attachments.length >= MAX_IMAGES
-                                        ? 'text-surface-300 cursor-not-allowed'
-                                        : 'text-surface-400 hover:text-surface-600 hover:bg-surface-100'
-                                        }`}
-                                    title={attachments.length >= MAX_IMAGES ? `Max ${MAX_IMAGES} images` : 'Attach image'}
-                                >
-                                    <PaperclipIcon className="w-4 h-4" strokeWidth={2} />
-                                    {attachments.length > 0 && (
-                                        <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-brand-500 text-white text-[8px] font-bold flex items-center justify-center">
-                                            {attachments.length}
-                                        </span>
-                                    )}
-                                </button>
-                            )}
-                            {/* Hidden file input */}
-                            <input
-                                ref={fileInputRef}
-                                type="file"
-                                accept="image/png,image/jpeg,image/gif,image/webp"
-                                multiple
-                                onChange={handleFileSelect}
-                                className="hidden"
+                        <div className="flex items-end">
+                            <textarea
+                                ref={textareaRef}
+                                value={input}
+                                onChange={(e) => setInput(e.target.value)}
+                                onKeyDown={handleKeyDown}
+                                onPaste={handlePaste}
+                                placeholder={isProcessing ? 'AI is thinking...' : (customPlaceholder || 'Message AI Assistant...')}
+                                disabled={disabled || isProcessing}
+                                rows={1}
+                                className="flex-1 resize-none bg-transparent px-4 py-3 text-sm text-surface-800 placeholder:text-surface-400 focus:outline-none disabled:opacity-50"
                             />
+                            <div className="flex items-center gap-1.5 flex-shrink-0 p-1.5">
+                                {/* Attachment button */}
+                                {!isProcessing && (
+                                    <button
+                                        type="button"
+                                        onClick={() => fileInputRef.current?.click()}
+                                        disabled={disabled}
+                                        className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors ${
+                                            disabled
+                                                ? 'text-surface-300 cursor-not-allowed'
+                                                : 'text-surface-400 hover:text-surface-600 hover:bg-surface-100'
+                                            }`}
+                                        title="Attach file"
+                                    >
+                                        <PaperclipIcon className="w-4 h-4" strokeWidth={2} />
+                                        {totalAttachments > 0 && (
+                                            <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-brand-500 text-white text-[8px] font-bold flex items-center justify-center">
+                                                {totalAttachments}
+                                            </span>
+                                        )}
+                                    </button>
+                                )}
+                                {/* Hidden file input — accepts images + documents */}
+                                <input
+                                    ref={fileInputRef}
+                                    type="file"
+                                    accept={FILE_ACCEPT_STRING}
+                                    multiple
+                                    onChange={handleFileSelect}
+                                    className="hidden"
+                                />
 
-                            {/* Send / Abort button */}
-                            {isProcessing ? (
-                                <button
-                                    type="button"
-                                    onClick={onAbort}
-                                    className="w-8 h-8 flex items-center justify-center rounded-lg bg-red-500 hover:bg-red-600 transition-colors relative shadow-sm shadow-red-500/30"
-                                    title="Stop generating"
-                                >
-                                    <div className="absolute inset-[-2px] rounded-[10px] border-2 border-red-300 border-t-transparent animate-spin" />
-                                    <div className="w-3 h-3 rounded-sm bg-white" />
-                                </button>
-                            ) : (
-                                <button
-                                    type="button"
-                                    onClick={handleSubmit}
-                                    disabled={!canSend}
-                                    className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all ${canSend
-                                        ? 'gradient-brand text-white shadow-sm hover:shadow-md'
-                                        : 'bg-surface-100 text-surface-400 cursor-not-allowed'
-                                        }`}
-                                    title="Send message"
-                                >
-                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 10.5 12 3m0 0 7.5 7.5M12 3v18" />
-                                    </svg>
-                                </button>
-                            )}
+                                {/* Send / Abort button */}
+                                {isProcessing ? (
+                                    <button
+                                        type="button"
+                                        onClick={onAbort}
+                                        className="w-8 h-8 flex items-center justify-center rounded-lg bg-red-500 hover:bg-red-600 transition-colors relative shadow-sm shadow-red-500/30"
+                                        title="Stop generating"
+                                    >
+                                        <div className="absolute inset-[-2px] rounded-[10px] border-2 border-red-300 border-t-transparent animate-spin" />
+                                        <div className="w-3 h-3 rounded-sm bg-white" />
+                                    </button>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={handleSubmit}
+                                        disabled={!canSend}
+                                        className="send-btn"
+                                        title="Send message"
+                                    >
+                                        <div className="send-btn-svg-wrapper" style={{ display: 'flex', alignItems: 'center' }}>
+                                            <svg
+                                                xmlns="http://www.w3.org/2000/svg"
+                                                viewBox="0 0 24 24"
+                                                width="18"
+                                                height="18"
+                                            >
+                                                <path fill="none" d="M0 0h24v24H0z" />
+                                                <path
+                                                    fill="currentColor"
+                                                    d="M1.946 9.315c-.522-.174-.527-.455.01-.634l19.087-6.362c.529-.176.832.12.684.638l-5.454 19.086c-.15.529-.455.547-.679.045L12 14l6-8-8 6-8.054-2.685z"
+                                                />
+                                            </svg>
+                                        </div>
+                                        <span>Send</span>
+                                    </button>
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>
                 <p className="text-[10px] text-surface-400 mt-1.5 text-center">
-                    {attachments.length > 0
-                        ? `${attachments.length} image${attachments.length > 1 ? 's' : ''} attached · Press Enter to send`
-                        : 'Press Enter to send · Shift+Enter for new line · Paste or drop images'
+                    {totalAttachments > 0
+                        ? `${totalAttachments} file${totalAttachments > 1 ? 's' : ''} attached · Press Enter to send`
+                        : 'Press Enter to send · Shift+Enter for new line · Paste or drop files'
                     }
                 </p>
             </div>

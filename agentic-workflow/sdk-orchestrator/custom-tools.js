@@ -179,6 +179,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
             },
             handler: async ({ scriptPath }) => {
                 try {
+                    // Broadcast progress: starting validation
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('validate_generated_script', {
+                            phase: 'validation', message: `Validating ${path.basename(scriptPath || '')}...`, step: 1,
+                        });
+                    }
                     const { validateGeneratedScript } = require('../scripts/validate-script');
                     const resolvedPath = path.isAbsolute(scriptPath)
                         ? scriptPath
@@ -477,6 +483,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
         },
         handler: async ({ gate, artifactPath, ticketId }) => {
             try {
+                // Broadcast progress: running gate
+                if (deps?.chatManager?.broadcastToolProgress) {
+                    deps.chatManager.broadcastToolProgress('run_quality_gate', {
+                        phase: 'quality_gate', message: `Running ${gate} quality gate...`, step: 1,
+                    });
+                }
                 const { QualityGates } = require('../../.github/agents/lib/quality-gates');
                 const qg = new QualityGates();
 
@@ -645,6 +657,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
             },
             handler: async ({ ticketId }) => {
                 try {
+                    // Broadcast progress: starting
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('fetch_jira_ticket', {
+                            phase: 'jira', message: `Fetching ticket ${ticketId} from Jira API...`, step: 1,
+                        });
+                    }
                     loadEnvVars();
                     const baseUrl = process.env.JIRA_BASE_URL;
                     if (!baseUrl && !process.env.JIRA_CLOUD_ID) {
@@ -691,6 +709,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     }
 
                     const data = await response.json();
+                    // Broadcast progress: parsing complete
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('fetch_jira_ticket', {
+                            phase: 'jira', message: `Ticket ${ticketId} fetched — parsing fields...`, step: 2,
+                        });
+                    }
                     return JSON.stringify(formatJiraTicket(data, ticketId), null, 2);
                 } catch (error) {
                     return JSON.stringify({
@@ -837,6 +861,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
             },
             handler: async ({ projectKey, summary, description, issueType, priority, labels, environment, jiraBaseUrl, linkedIssueKey, linkType, assigneeAccountId }) => {
                 try {
+                    // Broadcast progress: starting
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('create_jira_ticket', {
+                            phase: 'jira', message: 'Preparing Jira ticket payload...', step: 1,
+                        });
+                    }
                     loadEnvVars();
                     const cloudId = (process.env.JIRA_CLOUD_ID || '').replace(/"/g, '');
                     const baseUrl = process.env.JIRA_BASE_URL;
@@ -896,6 +926,13 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         'Authorization': 'Basic ' + Buffer.from(`${email}:${apiToken}`).toString('base64'),
                     };
 
+                    // Broadcast progress: creating
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('create_jira_ticket', {
+                            phase: 'jira', message: `Creating ${issueType || 'Bug'} ticket in Jira...`, step: 2,
+                        });
+                    }
+
                     const response = await fetch(url, {
                         method: 'POST',
                         headers,
@@ -921,6 +958,13 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     const ticketUrl = resolvedBaseUrl
                         ? `${resolvedBaseUrl}/browse/${ticketKey}`
                         : `https://${process.env.JIRA_SITE_NAME || 'jira'}.atlassian.net/browse/${ticketKey}`;
+
+                    // Broadcast progress: ticket created
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('create_jira_ticket', {
+                            phase: 'jira', message: `Ticket ${ticketKey} created${linkedIssueKey ? ' — linking issues...' : ''}`, step: 3,
+                        });
+                    }
 
                     // ── Issue Linking: Link new ticket to a parent/related ticket ──
                     let linkResult = null;
@@ -1146,6 +1190,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
             },
             handler: async ({ ticketId, summary, description, comment, priority, labels, addLabels, jiraBaseUrl }) => {
                 try {
+                    // Broadcast progress: starting
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('update_jira_ticket', {
+                            phase: 'jira', message: `Updating ticket ${ticketId}...`, step: 1,
+                        });
+                    }
                     loadEnvVars();
                     const cloudId = (process.env.JIRA_CLOUD_ID || '').replace(/"/g, '');
                     const baseUrl = process.env.JIRA_BASE_URL;
@@ -1303,11 +1353,24 @@ function createCustomTools(defineTool, agentName, deps = {}) {
             },
             handler: async ({ ticketId, testSuiteName, preConditions, testSteps }) => {
                 try {
+                    // Broadcast progress: parsing
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('generate_test_case_excel', {
+                            phase: 'excel', message: `Parsing test case data for ${ticketId}...`, step: 1,
+                        });
+                    }
                     let steps;
                     try {
                         steps = JSON.parse(testSteps);
                     } catch (e) {
                         return JSON.stringify({ success: false, error: `Invalid testSteps JSON: ${e.message}` });
+                    }
+
+                    // Broadcast progress: generating
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('generate_test_case_excel', {
+                            phase: 'excel', message: `Generating Excel workbook (${steps.length} steps)...`, step: 2,
+                        });
                     }
 
                     // Try using the excel-template-generator script
@@ -1550,6 +1613,13 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                 const { execSync } = require('child_process');
                 const projectRoot = path.join(__dirname, '..', '..');
 
+                // Broadcast progress: resolving spec
+                if (deps?.chatManager?.broadcastToolProgress) {
+                    deps.chatManager.broadcastToolProgress('execute_test', {
+                        phase: 'test', message: `Resolving test spec: ${specPath}...`, step: 1,
+                    });
+                }
+
                 // Resolve spec path
                 let resolvedSpec = path.isAbsolute(specPath)
                     ? specPath
@@ -1660,6 +1730,16 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         ? relativePath
                         : relativePath.replace(/[+.*?^${}()|[\]\\]/g, '\\$&');
 
+                    // Broadcast progress: running
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('execute_test', {
+                            phase: 'test', message: isDirectory
+                                ? `Running all specs in ${path.basename(resolvedSpec)}/...`
+                                : `Running ${path.basename(resolvedSpec)}...`,
+                            step: 2,
+                        });
+                    }
+
                     let output;
                     try {
                         output = execSync(
@@ -1722,6 +1802,17 @@ function createCustomTools(defineTool, agentName, deps = {}) {
 
                     // Save raw report for dashboard
                     _saveTestReport(derivedTicketId, runId, resolvedSpec, playwrightResult);
+
+                    // Broadcast progress: results
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('execute_test', {
+                            phase: 'test',
+                            message: totalSpecs > 0
+                                ? `${passed}/${totalSpecs} passed, ${failed} failed`
+                                : 'No tests found in output',
+                            step: 3,
+                        });
+                    }
 
                     return JSON.stringify({
                         success: failed === 0 && totalSpecs > 0,
@@ -2191,6 +2282,13 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     const cached = toolCache.get(cacheKey);
                     if (cached) return cached;
 
+                    // Broadcast progress: searching KB
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('search_knowledge_base', {
+                            phase: 'kb', message: `Searching knowledge base for "${query.substring(0, 60)}"...`, step: 1,
+                        });
+                    }
+
                     try {
                         let result = await gStore.queryKnowledgeBase(query, {
                             agentName,
@@ -2337,8 +2435,683 @@ function createCustomTools(defineTool, agentName, deps = {}) {
         }
     }
 
+    // ─── CONTEXT ENGINEERING TOOLS ──────────────────────────────────────
+    // Tools for dynamic context management: mid-session grounding refresh,
+    // structured note-taking, and context budget diagnostics.
+    // These implement the "just-in-time" retrieval and "structured note-taking"
+    // patterns from Anthropic's context engineering research.
+
+    // TOOL CE-1: refresh_grounding_context
+    // Enables agents to pull fresh grounding data mid-session when they
+    // discover new features/pages not in the initial context injection.
+    if (groundingStore && ['scriptgenerator', 'codereviewer'].includes(agentName)) {
+        const { getContextEngine } = require('./context-engine');
+        const contextEngine = getContextEngine();
+
+        tools.push(defineTool('refresh_grounding_context', {
+            description:
+                'Refresh grounding context mid-session. Call this when you discover the test involves ' +
+                'features or pages not present in your initial context. Returns updated code chunks, ' +
+                'selectors, and feature map data for the specified feature or query.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    feature: {
+                        type: 'string',
+                        description: 'Feature name to query grounding for (e.g., "Property Search", "Map View", "Favorites")',
+                    },
+                    query: {
+                        type: 'string',
+                        description: 'Free-form search query for code context (e.g., "login flow popup handler")',
+                    },
+                    ticketId: {
+                        type: 'string',
+                        description: 'Ticket ID for exploration freshness check',
+                    },
+                },
+            },
+            handler: async ({ feature, query, ticketId }) => {
+                try {
+                    const refreshed = contextEngine.refreshGroundingContext(
+                        groundingStore, agentName, { feature, query, ticketId }
+                    );
+                    if (refreshed && refreshed.length > 0) {
+                        return `Grounding context refreshed (${refreshed.length} chars):\n\n${refreshed}`;
+                    }
+                    return 'No additional grounding context found for this query.';
+                } catch (error) {
+                    return `Grounding refresh failed: ${error.message}`;
+                }
+            },
+        }));
+    }
+
+    // TOOL CE-2: write_agent_note
+    // Structured note-taking: agents persist discoveries outside the context window.
+    // Notes are available to the same or other agents in later sessions.
+    {
+        const { getContextEngine } = require('./context-engine');
+        const contextEngine = getContextEngine();
+
+        tools.push(defineTool('write_agent_note', {
+            description:
+                'Persist a discovery or observation outside the context window. ' +
+                'Notes survive across sessions and are injected into later agent contexts. ' +
+                'Use for: selector patterns, page behavior quirks, popup patterns, load timing issues, ' +
+                'or any insight that future agents should know.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    category: {
+                        type: 'string',
+                        description: 'Note category: "discovery", "pattern", "warning", "selector", "fix"',
+                        enum: ['discovery', 'pattern', 'warning', 'selector', 'fix'],
+                    },
+                    content: {
+                        type: 'string',
+                        description: 'The note content — be specific and actionable',
+                    },
+                    page: {
+                        type: 'string',
+                        description: 'Optional: which page this applies to (e.g., "/search", "/property-detail")',
+                    },
+                },
+                required: ['category', 'content'],
+            },
+            handler: async ({ category, content, page }) => {
+                const note = contextEngine.recordAgentNote(agentName, category, content, { page });
+
+                // Also record in SharedContextStore if available
+                if (contextStore) {
+                    contextStore.addNote(agentName, `[${category}] ${content}`, { page, noteId: note.id });
+                }
+
+                return `Note recorded: [${category}] ${content.slice(0, 80)}...`;
+            },
+        }));
+    }
+
+    // TOOL CE-3: get_agent_notes
+    // Retrieve notes from current and previous agents.
+    {
+        const { getContextEngine } = require('./context-engine');
+        const contextEngine = getContextEngine();
+
+        tools.push(defineTool('get_agent_notes', {
+            description:
+                'Retrieve notes written by agents during this pipeline run. ' +
+                'Useful for checking what previous agents discovered about pages, selectors, or issues.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    category: {
+                        type: 'string',
+                        description: 'Filter by category: "discovery", "pattern", "warning", "selector", "fix"',
+                    },
+                    limit: {
+                        type: 'number',
+                        description: 'Max notes to return (default: 10)',
+                    },
+                },
+            },
+            handler: async ({ category, limit }) => {
+                const notes = contextEngine.getAgentNotes({ category, limit: limit || 10 });
+                if (notes.length === 0) {
+                    return 'No agent notes found for this query.';
+                }
+                return notes.map(n =>
+                    `[${n.category}] ${n.agent} (${n.timestamp}): ${n.content}` +
+                    (n.metadata?.page ? ` | page: ${n.metadata.page}` : '')
+                ).join('\n');
+            },
+        }));
+    }
+
+    // TOOL CE-4: get_context_budget
+    // Diagnostics tool: shows agents how much context budget they're using.
+    {
+        const { getContextEngine } = require('./context-engine');
+        const contextEngine = getContextEngine();
+
+        tools.push(defineTool('get_context_budget', {
+            description:
+                'Check context budget utilization and metrics. Shows how much of the context window ' +
+                'is being used, which components were included/compressed/dropped, and estimated token savings.',
+            parameters: { type: 'object', properties: {} },
+            handler: async () => {
+                const metrics = contextEngine.getMetrics();
+                return JSON.stringify({
+                    totalPackCalls: metrics.totalPackCalls,
+                    totalCompactions: metrics.totalCompactions,
+                    estimatedTokensSaved: metrics.totalTokensSaved,
+                    averageBudgetUtilization: metrics.averageBudgetUtilization + '%',
+                    noteCount: metrics.noteCount,
+                    componentStats: metrics.componentStats,
+                }, null, 2);
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 24: generate_pptx
+    // Available to: docgenie (also buggenie for report attachments)
+    // ───────────────────────────────────────────────────────────────────
+    if (['docgenie', 'buggenie'].includes(agentName)) {
+        tools.push(defineTool('generate_pptx', {
+            description:
+                'Generates a professional PowerPoint (.pptx) file from a flexible slides array. ' +
+                '28 slide types: title, content, bullets, two-column, table, chart, image, quote, ' +
+                'section-break, comparison, summary, timeline, process-flow, stats-dashboard, icon-grid, ' +
+                'pyramid, matrix-quadrant, agenda, team-profiles, before-after, funnel, roadmap, swot, ' +
+                'hero-image, closing, diagram, data-story, infographic. Supports transitions (fade/push/wipe) ' +
+                'and brand kits. Returns the file path to the generated .pptx.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    title: { type: 'string', description: 'Presentation title (shown on title slide)' },
+                    author: { type: 'string', description: 'Author name' },
+                    theme: { type: 'string', description: 'Theme name: modern-blue, dark-professional, corporate-green, warm-minimal (default: modern-blue)' },
+                    slides: { type: 'string', description: 'JSON array string of slide objects. Each slide: { type, title?, content?, bullets?, headers?, rows?, ... }' },
+                },
+                required: ['title', 'slides'],
+            },
+            handler: async ({ title, author, theme, slides }) => {
+                try {
+                    let parsedSlides;
+                    try { parsedSlides = JSON.parse(slides); } catch (e) {
+                        return JSON.stringify({ success: false, error: `Invalid slides JSON: ${e.message}` });
+                    }
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('generate_pptx', {
+                            phase: 'document', message: `Generating PPTX (${parsedSlides.length} slides)...`, step: 1,
+                        });
+                    }
+                    const { generatePptx } = require(path.join(__dirname, '..', 'scripts', 'pptx-generator.js'));
+                    const result = await generatePptx({ title, author, theme, slides: parsedSlides });
+                    return JSON.stringify(result);
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `PPTX generation failed: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 25: generate_docx
+    // Available to: docgenie (also buggenie for report attachments)
+    // ───────────────────────────────────────────────────────────────────
+    if (['docgenie', 'buggenie'].includes(agentName)) {
+        tools.push(defineTool('generate_docx', {
+            description:
+                'Generates a professional Word (.docx) file from a flexible sections array. ' +
+                '18 section types: heading, paragraph, bullets, numbered-list, table, code-block, callout, ' +
+                'image, page-break, two-column, cover, pull-quote, sidebar, metric-strip, info-card-grid, ' +
+                'diagram, chart, infographic. Supports TOC, running headers/footers. Returns the file path ' +
+                'to the generated .docx.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    title: { type: 'string', description: 'Document title' },
+                    author: { type: 'string', description: 'Author name' },
+                    theme: { type: 'string', description: 'Theme name: modern-blue, dark-professional, corporate-green, warm-minimal' },
+                    includeTableOfContents: { type: 'boolean', description: 'Whether to include a Table of Contents page (default: false)' },
+                    headerText: { type: 'string', description: 'Running header text (top-right of each page)' },
+                    footerText: { type: 'string', description: 'Running footer text (centered at bottom)' },
+                    sections: { type: 'string', description: 'JSON array string of section objects. Each section: { type, text?, content?, items?, headers?, rows?, ... }' },
+                },
+                required: ['title', 'sections'],
+            },
+            handler: async ({ title, author, theme, includeTableOfContents, headerText, footerText, sections }) => {
+                try {
+                    let parsedSections;
+                    try { parsedSections = JSON.parse(sections); } catch (e) {
+                        return JSON.stringify({ success: false, error: `Invalid sections JSON: ${e.message}` });
+                    }
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('generate_docx', {
+                            phase: 'document', message: `Generating DOCX (${parsedSections.length} sections)...`, step: 1,
+                        });
+                    }
+                    const { generateDocx } = require(path.join(__dirname, '..', 'scripts', 'docx-generator.js'));
+                    const result = await generateDocx({ title, author, theme, includeTableOfContents, headerText, footerText, sections: parsedSections });
+                    return JSON.stringify(result);
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `DOCX generation failed: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 26: generate_pdf
+    // Available to: docgenie (also buggenie for report attachments)
+    // ───────────────────────────────────────────────────────────────────
+    if (['docgenie', 'buggenie'].includes(agentName)) {
+        tools.push(defineTool('generate_pdf', {
+            description:
+                'Generates a professional PDF file from a flexible sections array. ' +
+                '18 section types: heading, paragraph, bullets, numbered-list, table, code-block, callout, ' +
+                'page-break, two-column, cover, pull-quote, sidebar, metric-strip, info-card-grid, ' +
+                'diagram, chart, infographic. Supports watermark, TOC, and page borders. Returns the file ' +
+                'path to the generated .pdf.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    title: { type: 'string', description: 'Document title' },
+                    author: { type: 'string', description: 'Author name' },
+                    theme: { type: 'string', description: 'Theme name: modern-blue, dark-professional, corporate-green, warm-minimal' },
+                    watermark: { type: 'string', description: 'Optional watermark text displayed diagonally on all pages (e.g. DRAFT, CONFIDENTIAL)' },
+                    includeTableOfContents: { type: 'boolean', description: 'Whether to include a Table of Contents page (default: false)' },
+                    pageBorders: { type: 'boolean', description: 'Whether to add subtle accent borders to content pages (default: false)' },
+                    sections: { type: 'string', description: 'JSON array string of section objects. Each section: { type, text?, content?, items?, headers?, rows?, ... }' },
+                },
+                required: ['title', 'sections'],
+            },
+            handler: async ({ title, author, theme, watermark, includeTableOfContents, pageBorders, sections }) => {
+                try {
+                    let parsedSections;
+                    try { parsedSections = JSON.parse(sections); } catch (e) {
+                        return JSON.stringify({ success: false, error: `Invalid sections JSON: ${e.message}` });
+                    }
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('generate_pdf', {
+                            phase: 'document', message: `Generating PDF (${parsedSections.length} sections)...`, step: 1,
+                        });
+                    }
+                    const { generatePdf } = require(path.join(__dirname, '..', 'scripts', 'pdf-generator.js'));
+                    const result = await generatePdf({ title, author, theme, watermark, includeTableOfContents, pageBorders, sections: parsedSections });
+                    return JSON.stringify(result);
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `PDF generation failed: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 27: generate_excel_report
+    // Available to: docgenie (also buggenie for report attachments)
+    // NOTE: This is SEPARATE from TestGenie's generate_test_case_excel
+    // ───────────────────────────────────────────────────────────────────
+    if (['docgenie', 'buggenie'].includes(agentName)) {
+        tools.push(defineTool('generate_excel_report', {
+            description:
+                'Generates a professional Excel (.xlsx) workbook from a flexible sheets array. ' +
+                'NOT the same as generate_test_case_excel (which is TestGenie-only). ' +
+                'Each sheet can be: data-table, summary-card, key-value, matrix, or chart-data. ' +
+                'Returns the file path to the generated .xlsx.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    title: { type: 'string', description: 'Workbook title (used for metadata + filename)' },
+                    author: { type: 'string', description: 'Author name' },
+                    theme: { type: 'string', description: 'Theme name: modern-blue, dark-professional, corporate-green, warm-minimal' },
+                    sheets: { type: 'string', description: 'JSON array string of sheet objects. Each: { name, contentType, content: { headers?, rows?, metrics?, pairs?, ... } }' },
+                },
+                required: ['title', 'sheets'],
+            },
+            handler: async ({ title, author, theme, sheets }) => {
+                try {
+                    let parsedSheets;
+                    try { parsedSheets = JSON.parse(sheets); } catch (e) {
+                        return JSON.stringify({ success: false, error: `Invalid sheets JSON: ${e.message}` });
+                    }
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('generate_excel_report', {
+                            phase: 'document', message: `Generating Excel report (${parsedSheets.length} sheets)...`, step: 1,
+                        });
+                    }
+                    const { generateExcelReport } = require(path.join(__dirname, '..', 'scripts', 'excel-report-generator.js'));
+                    const result = await generateExcelReport({ title, author, theme, sheets: parsedSheets });
+                    return JSON.stringify(result);
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `Excel report generation failed: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 28: generate_diagram
+    // Available to: docgenie, buggenie, scriptgenerator
+    // ───────────────────────────────────────────────────────────────────
+    if (['docgenie', 'buggenie', 'scriptgenerator'].includes(agentName)) {
+        tools.push(defineTool('generate_diagram', {
+            description:
+                'Renders a Mermaid diagram as SVG and/or PNG. Supports flowchart, sequence, class, state, ' +
+                'ER, pie, gantt, and other Mermaid diagram types. Theme-aware rendering with high-quality output. ' +
+                'Returns file paths to the generated SVG and PNG files.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    mermaidCode: { type: 'string', description: 'Mermaid DSL code (e.g., "graph TD\\nA-->B")' },
+                    theme: { type: 'string', description: 'Theme: modern-blue, dark-professional, corporate-green, warm-minimal (default: modern-blue)' },
+                    outputName: { type: 'string', description: 'Base filename without extension (optional)' },
+                    svg: { type: 'boolean', description: 'Generate SVG output (default: true)' },
+                    png: { type: 'boolean', description: 'Generate PNG output (default: true)' },
+                },
+                required: ['mermaidCode'],
+            },
+            handler: async ({ mermaidCode, theme, outputName, svg, png }) => {
+                try {
+                    const { renderDiagram, cleanupBrowser } = require(path.join(__dirname, '..', 'scripts', 'shared', 'diagram-engine.js'));
+                    const result = await renderDiagram({
+                        mermaidCode, theme: theme || 'modern-blue', outputName,
+                        svg: svg !== false, png: png !== false,
+                    });
+                    await cleanupBrowser();
+                    return JSON.stringify(result);
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `Diagram generation failed: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 29: generate_chart_image
+    // Available to: docgenie, buggenie
+    // ───────────────────────────────────────────────────────────────────
+    if (['docgenie', 'buggenie'].includes(agentName)) {
+        tools.push(defineTool('generate_chart_image', {
+            description:
+                'Renders a high-quality chart as a PNG image using Chart.js. Supports: bar, line, pie, doughnut, ' +
+                'radar, polarArea, scatter, bubble, gauge, waterfall. Theme-aware with professional styling. ' +
+                'Returns the file path to the generated PNG.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    type: { type: 'string', description: 'Chart type: bar, line, pie, doughnut, radar, polarArea, scatter, bubble, gauge, waterfall' },
+                    chartTitle: { type: 'string', description: 'Chart title (displayed above chart)' },
+                    theme: { type: 'string', description: 'Theme: modern-blue, dark-professional, corporate-green, warm-minimal (default: modern-blue)' },
+                    data: { type: 'string', description: 'JSON string: { labels: [...], datasets: [{ label, data: [...] }] }. For gauge: { value, max, label }. For waterfall: { labels: [...], values: [...] }.' },
+                    outputName: { type: 'string', description: 'Base filename without extension (optional)' },
+                },
+                required: ['type', 'data'],
+            },
+            handler: async ({ type, chartTitle, theme, data, outputName }) => {
+                try {
+                    let parsedData;
+                    try { parsedData = JSON.parse(data); } catch (e) {
+                        return JSON.stringify({ success: false, error: `Invalid data JSON: ${e.message}` });
+                    }
+                    const { renderChart, cleanupBrowser } = require(path.join(__dirname, '..', 'scripts', 'shared', 'chart-renderer.js'));
+                    const result = await renderChart({
+                        type, chartTitle, theme: theme || 'modern-blue', outputName,
+                        ...parsedData,
+                    });
+                    await cleanupBrowser();
+                    return JSON.stringify(result);
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `Chart generation failed: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 30: generate_infographic
+    // Available to: docgenie, buggenie
+    // ───────────────────────────────────────────────────────────────────
+    if (['docgenie', 'buggenie'].includes(agentName)) {
+        tools.push(defineTool('generate_infographic', {
+            description:
+                'Renders a pre-built infographic component as a high-quality PNG image. ' +
+                'Component types: stat-poster (big number + trend), comparison (side-by-side A vs B), ' +
+                'process-flow (numbered steps), kpi-dashboard (metric cards grid), ' +
+                'status-board (test results table with pass/fail/skip). Theme-aware.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    type: { type: 'string', description: 'Component type: stat-poster, comparison, process-flow, kpi-dashboard, status-board' },
+                    theme: { type: 'string', description: 'Theme: modern-blue, dark-professional, corporate-green, warm-minimal (default: modern-blue)' },
+                    data: { type: 'string', description: 'JSON string with component-specific data. stat-poster: { value, label, trend, icon }. comparison: { left: {title, metrics}, right: {title, metrics} }. process-flow: { steps: [{title, description}] }. kpi-dashboard: { title, metrics: [{label, value, status}] }. status-board: { title, items: [{name, status, detail}] }.' },
+                    outputName: { type: 'string', description: 'Base filename without extension (optional)' },
+                },
+                required: ['type', 'data'],
+            },
+            handler: async ({ type, theme, data, outputName }) => {
+                try {
+                    let parsedData;
+                    try { parsedData = JSON.parse(data); } catch (e) {
+                        return JSON.stringify({ success: false, error: `Invalid data JSON: ${e.message}` });
+                    }
+                    const { renderInfographic, cleanupBrowser } = require(path.join(__dirname, '..', 'scripts', 'shared', 'infographic-components.js'));
+                    const result = await renderInfographic({
+                        type, theme: theme || 'modern-blue', outputName, data: parsedData,
+                    });
+                    await cleanupBrowser();
+                    return JSON.stringify(result);
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `Infographic generation failed: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 31: generate_html_report
+    // Available to: docgenie, buggenie
+    // ───────────────────────────────────────────────────────────────────
+    if (['docgenie', 'buggenie'].includes(agentName)) {
+        tools.push(defineTool('generate_html_report', {
+            description:
+                'Generates a self-contained interactive HTML report. Features: dark mode toggle, ' +
+                'sidebar navigation, live search with highlighting, collapsible sections, print CSS, ' +
+                'Chart.js charts, and Mermaid diagrams. 18 section types: heading, paragraph, bullets, ' +
+                'numbered-list, table, code-block, callout, page-break, two-column, cover, pull-quote, ' +
+                'sidebar, metric-strip, info-card-grid, diagram, chart, infographic, image. ' +
+                'Returns the file path to the generated .html.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    title: { type: 'string', description: 'Report title' },
+                    author: { type: 'string', description: 'Author name' },
+                    theme: { type: 'string', description: 'Theme name: modern-blue, dark-professional, corporate-green, warm-minimal' },
+                    darkMode: { type: 'boolean', description: 'Start in dark mode (default: false)' },
+                    collapsible: { type: 'boolean', description: 'Make h1 sections collapsible (default: false)' },
+                    sections: { type: 'string', description: 'JSON array string of section objects. Same format as DOCX/PDF sections.' },
+                },
+                required: ['title', 'sections'],
+            },
+            handler: async ({ title, author, theme, darkMode, collapsible, sections }) => {
+                try {
+                    let parsedSections;
+                    try { parsedSections = JSON.parse(sections); } catch (e) {
+                        return JSON.stringify({ success: false, error: `Invalid sections JSON: ${e.message}` });
+                    }
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('generate_html_report', {
+                            phase: 'document', message: `Generating HTML report (${parsedSections.length} sections)...`, step: 1,
+                        });
+                    }
+                    const { generateHtmlReport } = require(path.join(__dirname, '..', 'scripts', 'html-report-generator.js'));
+                    const result = await generateHtmlReport({ title, author, theme, darkMode, collapsible, sections: parsedSections });
+                    return JSON.stringify(result);
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `HTML report generation failed: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 32: generate_infographic_poster
+    // Available to: docgenie, buggenie
+    // ───────────────────────────────────────────────────────────────────
+    if (['docgenie', 'buggenie'].includes(agentName)) {
+        tools.push(defineTool('generate_infographic_poster', {
+            description:
+                'Generates a full-page infographic poster as a high-resolution PNG image (retina 2×). ' +
+                'Uses headless Chromium to render beautiful poster templates. ' +
+                '5 templates: executive-summary (metrics + highlights + conclusion), ' +
+                'data-story (2-column card grid with icons), comparison (side-by-side table), ' +
+                'process-flow (numbered steps with connecting lines), timeline (alternating events). ' +
+                'Output is 3840px wide (retina). Different from generate_infographic which renders components.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    template: { type: 'string', description: 'Template: executive-summary, data-story, comparison, process-flow, timeline' },
+                    theme: { type: 'string', description: 'Theme: modern-blue, dark-professional, corporate-green, warm-minimal (default: modern-blue)' },
+                    data: { type: 'string', description: 'JSON string with template-specific data. executive-summary: { title, subtitle, metrics: [{label, value}], highlights: [str], conclusion }. data-story: { title, cards: [{icon, title, value, description}] }. comparison: { title, headers: [str], rows: [[str]] }. process-flow: { title, steps: [{title, description}] }. timeline: { title, events: [{date, title, description}] }.' },
+                    width: { type: 'number', description: 'Canvas width in pixels (default: 1920, rendered at 2× = 3840px output)' },
+                    outputPath: { type: 'string', description: 'Custom output path (auto-generated if omitted)' },
+                },
+                required: ['template', 'data'],
+            },
+            handler: async ({ template, theme, data, width, outputPath }) => {
+                try {
+                    let parsedData;
+                    try { parsedData = JSON.parse(data); } catch (e) {
+                        return JSON.stringify({ success: false, error: `Invalid data JSON: ${e.message}` });
+                    }
+                    const { generateInfographic, cleanupBrowser } = require(path.join(__dirname, '..', 'scripts', 'infographic-generator.js'));
+                    const result = await generateInfographic({
+                        template, theme: theme || 'modern-blue', width: width || 1920, outputPath, data: parsedData,
+                    });
+                    await cleanupBrowser();
+                    return JSON.stringify(result);
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `Infographic poster generation failed: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 35: generate_video
+    // Available to: docgenie
+    // ───────────────────────────────────────────────────────────────────
+    if (['docgenie'].includes(agentName)) {
+        tools.push(defineTool('generate_video', {
+            description:
+                'EXPERIMENTAL: Generates a WebM video from document sections. Each section becomes a ' +
+                'full-screen 1920×1080 animated slide with CSS transitions. Uses Playwright video recording. ' +
+                'Transitions: fade, slide-left, slide-up, zoom, none. ' +
+                'Optionally exports a PNG storyboard of individual slides. ' +
+                'Supports same section types as PPTX/DOCX (title, bullets, table, metric-strip, quote, etc.).',
+            parameters: {
+                type: 'object',
+                properties: {
+                    title: { type: 'string', description: 'Video title (used for filename)' },
+                    theme: { type: 'string', description: 'Theme: modern-blue, dark-professional, corporate-green, warm-minimal' },
+                    transition: { type: 'string', description: 'Transition type: fade, slide-left, slide-up, zoom, none (default: fade)' },
+                    durationPerSlide: { type: 'number', description: 'Seconds per slide (default: 4)' },
+                    storyboard: { type: 'boolean', description: 'Also export individual slide PNGs (default: false)' },
+                    sections: { type: 'string', description: 'JSON array string of section objects. Same format as PPTX/DOCX.' },
+                },
+                required: ['title', 'sections'],
+            },
+            handler: async ({ title, theme, transition, durationPerSlide, storyboard, sections }) => {
+                try {
+                    let parsedSections;
+                    try { parsedSections = JSON.parse(sections); } catch (e) {
+                        return JSON.stringify({ success: false, error: `Invalid sections JSON: ${e.message}` });
+                    }
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('generate_video', {
+                            phase: 'document', message: `Generating video (${parsedSections.length} slides, ${transition || 'fade'} transition)...`, step: 1,
+                        });
+                    }
+                    const { generateVideo, cleanupBrowser } = require(path.join(__dirname, '..', 'scripts', 'video-generator.js'));
+                    const result = await generateVideo({ title, theme, transition, durationPerSlide, storyboard, sections: parsedSections });
+                    await cleanupBrowser();
+                    return JSON.stringify(result);
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `Video generation failed: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 34: get_design_score
+    // Available to: docgenie, buggenie
+    // ───────────────────────────────────────────────────────────────────
+    if (['docgenie', 'buggenie'].includes(agentName)) {
+        tools.push(defineTool('get_design_score', {
+            description:
+                'Scores a document\'s design quality 0-100 based on 7 criteria: color contrast (WCAG), ' +
+                'text density, visual variety, typography hierarchy, brand compliance, layout balance, ' +
+                'and section count. Returns a letter grade (A+ to F), detailed breakdown per category, ' +
+                'and actionable recommendations. Use BEFORE finalizing a document to catch quality issues.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    theme: { type: 'string', description: 'Theme name used for the document' },
+                    format: { type: 'string', description: 'Output format: pptx, docx, pdf, html, markdown' },
+                    title: { type: 'string', description: 'Document title' },
+                    author: { type: 'string', description: 'Author name' },
+                    sections: { type: 'string', description: 'JSON array string of sections/slides that will be or have been generated' },
+                },
+                required: ['sections'],
+            },
+            handler: async ({ theme, format, title, author, sections }) => {
+                try {
+                    let parsedSections;
+                    try { parsedSections = JSON.parse(sections); } catch (e) {
+                        return JSON.stringify({ success: false, error: `Invalid sections JSON: ${e.message}` });
+                    }
+                    const { scoreDesignQuality } = require(path.join(__dirname, '..', 'scripts', 'shared', 'design-quality-scorer.js'));
+                    const result = scoreDesignQuality({ sections: parsedSections, theme, format, title, author });
+                    return JSON.stringify({ success: true, ...result });
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `Design scoring failed: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 33: generate_markdown
+    // Available to: docgenie, buggenie, scriptgenerator
+    // ───────────────────────────────────────────────────────────────────
+    if (['docgenie', 'buggenie', 'scriptgenerator'].includes(agentName)) {
+        tools.push(defineTool('generate_markdown', {
+            description:
+                'Generates a styled GitHub-flavored Markdown (.md) file. Features: YAML front matter, ' +
+                'auto-generated Table of Contents, GFM tables, Mermaid diagram blocks, ' +
+                'admonitions ([!NOTE], [!TIP], [!WARNING], [!CAUTION]), shields.io badges, ' +
+                'collapsible details sections. 16 section types: heading, paragraph, bullets, ' +
+                'numbered-list, table, code-block, callout, page-break, two-column, cover, pull-quote, ' +
+                'sidebar, metric-strip, info-card-grid, diagram, badge. Returns the file path to the generated .md.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    title: { type: 'string', description: 'Document title (used in front matter and heading)' },
+                    author: { type: 'string', description: 'Author name (front matter)' },
+                    tags: { type: 'string', description: 'Comma-separated tags for YAML front matter (e.g. "qa,testing,report")' },
+                    includeFrontMatter: { type: 'boolean', description: 'Include YAML front matter header (default: true)' },
+                    includeTableOfContents: { type: 'boolean', description: 'Auto-generate Table of Contents (default: true)' },
+                    sections: { type: 'string', description: 'JSON array string of section objects. Same format as DOCX/PDF sections.' },
+                },
+                required: ['title', 'sections'],
+            },
+            handler: async ({ title, author, tags, includeFrontMatter, includeTableOfContents, sections }) => {
+                try {
+                    let parsedSections;
+                    try { parsedSections = JSON.parse(sections); } catch (e) {
+                        return JSON.stringify({ success: false, error: `Invalid sections JSON: ${e.message}` });
+                    }
+                    const parsedTags = tags ? tags.split(',').map(t => t.trim()) : undefined;
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('generate_markdown', {
+                            phase: 'document', message: `Generating Markdown (${parsedSections.length} sections)...`, step: 1,
+                        });
+                    }
+                    const { generateMarkdown } = require(path.join(__dirname, '..', 'scripts', 'markdown-generator.js'));
+                    const result = await generateMarkdown({ title, author, tags: parsedTags, includeFrontMatter, includeTableOfContents, sections: parsedSections });
+                    return JSON.stringify(result);
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `Markdown generation failed: ${error.message}` });
+                }
+            },
+        }));
+    }
+
     return tools;
 }
+
 
 function formatJiraTicket(data, ticketId) {
     const fields = data.fields || {};

@@ -104,6 +104,17 @@
                             "type": "string"
                         },
                         "description": "Search keywords that identify this feature in queries"
+                    },
+                    "authLevel": {
+                        "type": "string",
+                        "enum": ["public", "authenticated", "agent"],
+                        "default": "authenticated",
+                        "description": "Authentication level required to access this feature's pages. public=no token needed, authenticated=consumer token required, agent=agent portal token required."
+                    },
+                    "tokenKey": {
+                        "type": "string",
+                        "default": "registered",
+                        "description": "Key in the userTokens map from testData.js to use for this feature (e.g., registered, editProfile, agentForRegistered). Defaults to the defaultTokenKey from workflow-config."
                     }
                 }
             }

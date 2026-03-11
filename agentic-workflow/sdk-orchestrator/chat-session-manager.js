@@ -114,6 +114,7 @@ const CHAT_EVENTS = {
     MESSAGE: 'chat_message',
     TOOL_START: 'chat_tool_start',
     TOOL_COMPLETE: 'chat_tool_complete',
+    TOOL_PROGRESS: 'chat_tool_progress',
     REASONING: 'chat_reasoning',
     IDLE: 'chat_idle',
     ERROR: 'chat_error',
@@ -183,7 +184,7 @@ class ChatSessionManager extends EventEmitter {
     }
 
     // ─── Valid agent modes ──────────────────────────────────────────────────
-    static VALID_AGENTS = ['testgenie', 'scriptgenerator', 'buggenie', 'taskgenie'];
+    static VALID_AGENTS = ['testgenie', 'scriptgenerator', 'buggenie', 'taskgenie', 'filegenie', 'docgenie'];
 
     // ─── Temp file management for image attachments ─────────────────────────
     // The Copilot SDK only accepts { type: 'file', path: '/path/to/file' }
@@ -198,48 +199,134 @@ class ChatSessionManager extends EventEmitter {
         'image/webp': '.webp',
     };
 
+    /** MIME type → file extension mapping for document attachments. */
+    static _DOC_EXTENSIONS = {
+        'application/pdf': '.pdf',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+        'application/msword': '.doc',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+        'application/vnd.ms-powerpoint': '.ppt',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+        'application/vnd.ms-excel': '.xls',
+        'text/csv': '.csv',
+        'text/plain': '.txt',
+        'text/markdown': '.md',
+        'application/json': '.json',
+    };
+
     /**
-     * Convert base64 image attachments to temp files for the Copilot SDK.
+     * Convert base64 image/document attachments to temp files for the Copilot SDK.
      * Returns SDK-compatible attachment objects with file paths.
      *
-     * @param {Object[]} attachments - Frontend attachments: [{ type: 'image', media_type, data }]
-     * @returns {{ sdkAttachments: Object[], tempFiles: string[] }}
+     * @param {Object[]} attachments - Frontend attachments: [{ type: 'image'|'document', media_type, data, filename? }]
+     * @returns {{ sdkAttachments: Object[], tempFiles: string[], docTempFiles: { path: string, filename: string }[] }}
      */
     _convertAttachmentsToTempFiles(attachments) {
         const sdkAttachments = [];
         const tempFiles = [];
+        const docTempFiles = []; // { path, filename } for document text extraction
         const tempDir = os.tmpdir();
 
         for (let i = 0; i < attachments.length; i++) {
             const att = attachments[i];
-            if (att.type !== 'image' || !att.data) continue;
+            if (!att.data) continue;
 
-            const ext = ChatSessionManager._IMAGE_EXTENSIONS[att.media_type] || '.png';
-            const fileName = `copilot-img-${Date.now()}-${i}${ext}`;
-            const filePath = path.join(tempDir, fileName);
+            if (att.type === 'image') {
+                const ext = ChatSessionManager._IMAGE_EXTENSIONS[att.media_type] || '.png';
+                const fileName = `copilot-img-${Date.now()}-${i}${ext}`;
+                const filePath = path.join(tempDir, fileName);
 
-            try {
-                const buffer = Buffer.from(att.data, 'base64');
-                fs.writeFileSync(filePath, buffer);
-                tempFiles.push(filePath);
+                try {
+                    const buffer = Buffer.from(att.data, 'base64');
+                    fs.writeFileSync(filePath, buffer);
+                    tempFiles.push(filePath);
 
-                sdkAttachments.push({
-                    type: 'file',
-                    path: filePath,
-                    displayName: `attachment-${i + 1}${ext}`,
-                });
+                    sdkAttachments.push({
+                        type: 'file',
+                        path: filePath,
+                        displayName: `attachment-${i + 1}${ext}`,
+                    });
 
-                console.log(`[ChatManager] \u{1F5BC}\uFE0F  Wrote temp image: ${fileName} (${(buffer.length / 1024).toFixed(1)} KB)`);
-            } catch (err) {
-                console.error(`[ChatManager] \u274C Failed to write temp image ${i}:`, err.message);
+                    console.log(`[ChatManager] \u{1F5BC}\uFE0F  Wrote temp image: ${fileName} (${(buffer.length / 1024).toFixed(1)} KB)`);
+                } catch (err) {
+                    console.error(`[ChatManager] \u274C Failed to write temp image ${i}:`, err.message);
+                }
+            } else if (att.type === 'document') {
+                const ext = ChatSessionManager._DOC_EXTENSIONS[att.media_type] || '.bin';
+                // Sanitize filename — keep only safe chars
+                const safeName = (att.filename || `document-${i}`).replace(/[^a-zA-Z0-9._\- ]/g, '_');
+                // Ensure temp filename ends with the correct extension so parseDocument can detect the type
+                const hasExt = /\.\w{1,5}$/.test(safeName);
+                const fileName = `copilot-doc-${Date.now()}-${i}-${safeName}${hasExt ? '' : ext}`;
+                const filePath = path.join(tempDir, fileName);
+
+                try {
+                    const buffer = Buffer.from(att.data, 'base64');
+                    fs.writeFileSync(filePath, buffer);
+                    tempFiles.push(filePath);
+                    docTempFiles.push({ path: filePath, filename: att.filename || `document${ext}` });
+
+                    console.log(`[ChatManager] \u{1F4C4} Wrote temp document: ${fileName} (${(buffer.length / 1024).toFixed(1)} KB)`);
+                } catch (err) {
+                    console.error(`[ChatManager] \u274C Failed to write temp document ${i}:`, err.message);
+                }
             }
         }
 
-        return { sdkAttachments, tempFiles };
+        return { sdkAttachments, tempFiles, docTempFiles };
     }
 
     /**
-     * Clean up temp image files after a delay (gives SDK time to read them).
+     * Extract text from document temp files using the existing parseDocument engine.
+     * Returns a combined string to prepend to the user's prompt.
+     *
+     * @param {{ path: string, filename: string }[]} docTempFiles
+     * @returns {Promise<string>} Extracted text block to inject into the prompt
+     */
+    async _extractDocumentText(docTempFiles) {
+        if (!docTempFiles || docTempFiles.length === 0) return '';
+
+        // Lazy-load parseDocument from filesystem-tools
+        let parseDocument;
+        try {
+            parseDocument = require('./filesystem-tools').parseDocument;
+        } catch (err) {
+            console.error('[ChatManager] \u274C Could not load parseDocument:', err.message);
+            return '\n[Document processing unavailable — filesystem-tools module not found]\n';
+        }
+
+        const MAX_TOTAL_CHARS = 100_000;
+        const perDocBudget = Math.floor(MAX_TOTAL_CHARS / docTempFiles.length);
+        const sections = [];
+
+        for (const doc of docTempFiles) {
+            try {
+                const result = await parseDocument(doc.path, { maxChars: perDocBudget });
+                const text = result.text || '';
+                const meta = [];
+                if (result.pageCount) meta.push(`${result.pageCount} pages`);
+                if (result.slideCount) meta.push(`${result.slideCount} slides`);
+                if (result.sheetCount) meta.push(`${result.sheetCount} sheets`);
+                if (result.charCount) meta.push(`${result.charCount.toLocaleString()} characters`);
+
+                sections.push(
+                    `[Uploaded Document: ${doc.filename}${meta.length ? ` (${meta.join(', ')})` : ''}]\n` +
+                    `---\n${text}\n---`
+                );
+                console.log(`[ChatManager] \u{1F4D6} Extracted text from ${doc.filename}: ${text.length} chars`);
+            } catch (err) {
+                sections.push(
+                    `[Uploaded Document: ${doc.filename} — extraction failed: ${err.message}]`
+                );
+                console.error(`[ChatManager] \u274C Failed to extract text from ${doc.filename}:`, err.message);
+            }
+        }
+
+        return sections.join('\n\n');
+    }
+
+    /**
+     * Clean up temp files after a delay (gives SDK time to read them).
      *
      * @param {string[]} tempFiles - Paths to delete
      * @param {number} [delayMs=60000] - Delay before cleanup (default: 60s)
@@ -356,24 +443,49 @@ class ChatSessionManager extends EventEmitter {
             }
         }
 
-        // ── Default: general all-capabilities prompt ──
+        // ── TPM: unified all-capabilities prompt with agent-specific expertise ──
         const parts = [
-            'You are a QA Automation Assistant powered by the Copilot SDK.',
-            'You help the team with test automation using Playwright and JavaScript.',
+            'You are TPM (Test Project Manager) — a unified QA Automation powerhouse powered by the Copilot SDK.',
+            'You combine the full capabilities of TestGenie, ScriptGenie, BugGenie, and TaskGenie into a single session.',
+            'You are running inside a web app chat session (not VS Code).',
+            'Use the custom tools available to you to complete tasks.',
             '',
-            'You have access to custom tools that let you:',
-            '- Query the test framework inventory (page objects, business functions, utilities)',
-            '- Retrieve historical test failures and their resolutions',
-            '- Query assertion patterns and quality gate rules',
-            '- Get popup handler information',
-            '- Validate generated test scripts',
-            '- Analyze test execution results',
+            '## Your Unified Capabilities',
+            '| Capability | When to Activate | Key Tools |',
+            '|---|---|---|',
+            '| **TestGenie** — Test case generation | User asks to generate test cases, create test scenarios, or references a Jira ticket for testing | `fetch_jira_ticket`, `generate_test_case_excel`, Atlassian MCP |',
+            '| **ScriptGenie** — Playwright script generation | User asks to automate, create scripts, explore pages via browser, or generate .spec.js | MCP browser tools (`navigate`, `snapshot`, `click`, etc.), `get_framework_inventory`, `validate_generated_script` |',
+            '| **BugGenie** — Bug ticket creation | User asks to create bug/defect tickets, report issues, or review test failures | `create_jira_ticket`, `get_test_results`, `analyze_test_failure`, Atlassian MCP |',
+            '| **TaskGenie** — Jira task creation | User asks to create Testing tasks, link tasks to tickets, or assign work | `create_jira_ticket`, `fetch_jira_ticket`, `get_jira_current_user`, Atlassian MCP |',
+            '| **FileGenie** — File & document interaction | User asks to open/view files, browse folders, parse documents, organize files, or reveal files in Explorer/Finder | `open_file_native`, `open_containing_folder`, `search_files`, `parse_document`, `list_directory` |',
             '',
-            'When answering questions:',
-            '- Be concise and actionable',
-            '- Reference specific file paths and function names from the framework',
-            '- Use the custom tools to provide accurate, data-driven answers',
-            '- If asked to explore a page, use the MCP browser tools',
+            '## Intent Detection & Agent Activation',
+            'Detect the user\'s intent from their message and activate the appropriate expertise:',
+            '- **Test case keywords**: "generate test cases", "test scenarios", "test steps", "excel", "test case" → Activate TestGenie expertise',
+            '- **Script generation keywords**: "automate", "script", "spec.js", "explore page", "MCP", "playwright", "browser" → Activate ScriptGenie expertise',
+            '- **Bug report keywords**: "bug", "defect", "issue", "failure", "broken", "not working", "create bug" → Activate BugGenie expertise',
+            '- **Task creation keywords**: "task", "testing task", "assign", "link task", "create task" → Activate TaskGenie expertise',
+            '- **File open/view keywords**: "open file", "open the", "launch", "view in app", "show in explorer", "reveal in finder", "open excel", "open word", "open report", "open video", "open folder", "open ppt", "open pdf" → Activate FileGenie file-opening tools',
+            '- **Document/video generation keywords**: "generate video", "animation", "animated", "video walkthrough", "multimedia", "create document", "generate presentation", "create slides", "generate report", "infographic", "poster", "html report", "generate markdown", "create pdf", "generate pptx", "generate docx", "storyboard" → Activate DocGenie document generation expertise',
+            '- **General QA queries**: Framework questions, test execution, code review → Use general QA knowledge',
+            '- If intent is ambiguous, ask the user which capability they need.',
+            '',
+            'CRITICAL — Jira Ticket Access:',
+            '- To READ existing Jira tickets, use the `fetch_jira_ticket` custom tool or Atlassian MCP tools (atl_getJiraIssue, atl_searchJiraIssuesUsingJql).',
+            '- To CREATE new Jira tickets, use the `create_jira_ticket` custom tool or Atlassian MCP tools (atl_createJiraIssue).',
+            '- To UPDATE/EDIT existing Jira tickets (change summary, description, labels, priority, or add comments), use the `update_jira_ticket` custom tool.',
+            '- NEVER use web/fetch, fetch_webpage, or HTTP scraping to access Jira URLs — Jira is a client-rendered SPA and HTML scraping returns no useful content.',
+            '- When creating Testing tasks for Bug-type tickets, FIRST use `fetch_jira_ticket` to read the parent ticket details, THEN create the Testing task with proper context.',
+            '',
+            'CRITICAL — Jira URL Handling:',
+            '- When the user provides a Jira ticket URL (e.g., https://corelogic.atlassian.net/browse/AOTF-16514), extract the base URL (everything before "/browse/") and pass it as the `jiraBaseUrl` parameter when calling `create_jira_ticket`.',
+            '',
+            'CRITICAL — Testing Task Description Formatting:',
+            '- When creating Testing tasks for Bug-type parent tickets, format test cases as MARKDOWN TABLES in the description.',
+            '- Use this exact table format:',
+            '  | Test Step ID | Specific Activity or Action | Expected Results | Actual Results |',
+            '  |---|---|---|---|',
+            '  | 1.1 | Step description | Expected result | Actual result |',
             '',
             'CRITICAL — Test execution:',
             '- When asked to RUN or EXECUTE a test script or folder, you MUST use the `execute_test` custom tool.',
@@ -385,27 +497,10 @@ class ChatSessionManager extends EventEmitter {
             '- Examples: execute_test({ specPath: "planner" }), execute_test({ specPath: "tests/specs/planner" }), execute_test({ specPath: "AOTF-16461.spec.js" })',
             '',
             'CRITICAL — Test file discovery:',
-            '- When a user asks to run a test by NAME (e.g., "run planner tests", "run AOTF-16337", "execute notes module") WITHOUT providing a full path,',
+            '- When a user asks to run a test by NAME without providing a full path,',
             '  you MUST FIRST call `find_test_files` with the name/keyword to locate matching spec files or folders.',
             '- THEN use `execute_test` with the resolved path from the search results.',
-            '- If `find_test_files` returns multiple matches, present them to the user and ask which one to run.',
-            '- The `execute_test` tool also has auto-discovery: if a path is not found, it will search automatically before failing.',
             '- NEVER guess or hardcode spec file paths — always verify they exist first.',
-            '',
-            'CRITICAL — Test Case Generation (TestGenie):',
-            '- When asked to generate test cases, you have the `fetch_jira_ticket` tool to read Jira ticket details.',
-            '- You also have the `generate_test_case_excel` tool that creates a styled .xlsx file in the test-cases directory.',
-            '- ALWAYS call `fetch_jira_ticket` first to get the full ticket info, THEN generate test cases using the format from copilot-instructions.',
-            '- ALWAYS call `generate_test_case_excel` to save the test cases as an Excel file — do NOT just output markdown.',
-            '- The Excel file is saved to: agentic-workflow/test-cases/{ticketId}-test-cases.xlsx',
-            '- You have access to the Atlassian MCP server for deeper Jira integration (search, comments, issue types).',
-            '',
-            'CRITICAL — Bug Ticket Creation (BugGenie):',
-            '- When asked to create a bug ticket or defect, you have the `create_jira_ticket` tool.',
-            '- When asked for a "bug review copy" or to review test failures, use `get_test_results` to retrieve failure data.',
-            '- Use the Atlassian MCP tools (atl_createJiraIssue, atl_searchJiraIssuesUsingJql, etc.) for advanced Jira operations.',
-            '- Format bug tickets with: Description, Steps to Reproduce, Expected Behaviour, Actual Behaviour, Environment.',
-            '- ALWAYS present the bug review copy to the user BEFORE creating the ticket in Jira.',
             '',
             'Framework context:',
             '- Language: JavaScript (CommonJS)',
@@ -418,14 +513,55 @@ class ChatSessionManager extends EventEmitter {
             'RESPONSE FORMATTING — Rich Markdown:',
             '- Use ## and ### headings to structure long responses into clear sections.',
             '- For flowcharts, process diagrams, decision trees, or architecture overviews, use mermaid fenced code blocks (```mermaid). The chat UI renders these as interactive SVG diagrams.',
-            '- IMPORTANT: In mermaid diagrams, always wrap node labels and edge labels in double quotes if they contain parentheses, slashes, commas, colons, or special characters. Example: A["Check config (v2)"] -->|"Already seen"| B["Skip"].',
-            '- Use markdown tables (|col1|col2|) for structured comparisons, feature matrices, or data.',
+            '- IMPORTANT: In mermaid diagrams, always wrap node labels and edge labels in double quotes if they contain parentheses, slashes, commas, colons, or special characters.',
+            '- Use markdown tables for structured comparisons, feature matrices, or data.',
             '- When citing Knowledge Base sources, use blockquote format: > **Source:** [Page Title](url)',
             '- Use **bold** for key terms and `inline code` for technical identifiers.',
             '- For long supplementary content, use collapsible sections: <details><summary>Section Title</summary>Content here</details>',
             '- Keep the main answer concise; put detailed breakdowns in collapsible sections.',
             '- When explaining multi-step processes, prefer a mermaid flowchart over numbered text lists.',
         ];
+
+        // ── Inject agent-specific expertise from .agent.md files ──
+        const agentExpertise = [
+            { name: 'testgenie', tag: 'testgenie_capabilities', label: 'TestGenie (Test Case Generation)' },
+            { name: 'scriptgenerator', tag: 'scriptgenie_capabilities', label: 'ScriptGenie (Playwright Script Generation)' },
+            { name: 'buggenie', tag: 'buggenie_capabilities', label: 'BugGenie (Bug Ticket Creation)' },
+            { name: 'taskgenie', tag: 'taskgenie_capabilities', label: 'TaskGenie (Jira Task Creation)' },
+        ];
+
+        for (const agent of agentExpertise) {
+            try {
+                const agentMdPath = path.join(__dirname, '..', '..', '.github', 'agents', `${agent.name}.agent.md`);
+                if (fs.existsSync(agentMdPath)) {
+                    let agentPrompt = fs.readFileSync(agentMdPath, 'utf-8');
+
+                    // Strip chatagent frontmatter
+                    const fmMatch = agentPrompt.match(/^[`]{3,}chatagent\s*\n---[\s\S]*?---\s*\n/);
+                    if (fmMatch) agentPrompt = agentPrompt.slice(fmMatch[0].length);
+                    agentPrompt = agentPrompt.replace(/\n[`]{3,}\s*$/, '').trim();
+
+                    // Cap each agent section to prevent excessive prompt bloat
+                    const MAX_AGENT_CHARS = 8000;
+                    if (agentPrompt.length > MAX_AGENT_CHARS) {
+                        agentPrompt = agentPrompt.substring(0, MAX_AGENT_CHARS) + '\n… (expertise truncated for context budget)';
+                    }
+
+                    parts.push(
+                        '',
+                        `<${agent.tag}>`,
+                        `## ${agent.label} Expertise`,
+                        'Activate this expertise when user intent matches this agent\'s domain.',
+                        '',
+                        agentPrompt,
+                        `</${agent.tag}>`,
+                    );
+                    console.log(`[ChatManager] 🧩 Injected ${agent.name} expertise (${agentPrompt.length} chars) into TPM prompt`);
+                }
+            } catch (err) {
+                console.warn(`[ChatManager] ⚠️ Failed to load ${agent.name}.agent.md for TPM: ${err.message}`);
+            }
+        }
 
         // Add copilot-instructions if available (extract critical sections, not blind truncation)
         try {
@@ -437,7 +573,24 @@ class ChatSessionManager extends EventEmitter {
             }
         } catch { /* ignore */ }
 
-        return parts.join('\n');
+        // Inject grounding context for TPM (uses null/general mode)
+        if (this._groundingStore) {
+            try {
+                const groundingCtx = this._groundingStore.buildGroundingContext('default', {
+                    taskDescription: '',
+                    ticketId: null,
+                });
+                if (groundingCtx && groundingCtx.length > 0) {
+                    parts.push('', '<grounding_context>', groundingCtx, '</grounding_context>');
+                    console.log(`[ChatManager] 📚 Injected grounding context for TPM (${groundingCtx.length} chars)`);
+                }
+            } catch (err) {
+                console.warn(`[ChatManager] ⚠️ Grounding context failed for TPM: ${err.message}`);
+            }
+        }
+
+        // Strip VS Code MCP tool prefix so LLM uses raw names
+        return stripVSCodeToolPrefix(parts.join('\n'));
     }
 
     /**
@@ -459,11 +612,17 @@ class ChatSessionManager extends EventEmitter {
 
             let tools;
             if (agentMode && ChatSessionManager.VALID_AGENTS.includes(agentMode)) {
-                // Focused: only the selected agent's tools
-                tools = [...createCustomTools(this.defineTool, agentMode, toolOpts)];
-                // ScriptGenerator also gets codereviewer tools (they share)
-                if (agentMode === 'scriptgenerator') {
-                    tools.push(...createCustomTools(this.defineTool, 'codereviewer', toolOpts));
+                // FileGenie: load filesystem tools (full access)
+                if (agentMode === 'filegenie') {
+                    const { createFilesystemTools } = require('./filesystem-tools');
+                    tools = [...createFilesystemTools(this.defineTool, toolOpts, { readOnly: false })];
+                } else {
+                    // Focused: only the selected agent's tools
+                    tools = [...createCustomTools(this.defineTool, agentMode, toolOpts)];
+                    // ScriptGenerator also gets codereviewer tools (they share)
+                    if (agentMode === 'scriptgenerator') {
+                        tools.push(...createCustomTools(this.defineTool, 'codereviewer', toolOpts));
+                    }
                 }
                 console.log(`[ChatManager] Loaded tools for agent: ${agentMode}`);
             } else {
@@ -475,6 +634,13 @@ class ChatSessionManager extends EventEmitter {
                     ...createCustomTools(this.defineTool, 'buggenie', toolOpts),
                     ...createCustomTools(this.defineTool, 'taskgenie', toolOpts),
                 ];
+                // Default (TPM) also gets read-only filesystem tools
+                try {
+                    const { createFilesystemTools } = require('./filesystem-tools');
+                    tools.push(...createFilesystemTools(this.defineTool, toolOpts, { readOnly: true }));
+                } catch (fsErr) {
+                    console.warn(`[ChatManager] Filesystem tools not available for TPM: ${fsErr.message}`);
+                }
             }
             // Deduplicate by tool name
             const seen = new Set();
@@ -510,7 +676,7 @@ class ChatSessionManager extends EventEmitter {
         const tools = this._buildChatTools(agentMode);
         const systemPrompt = agentMode ? this._buildSystemPrompt(agentMode) : this._defaultSystemPrompt;
 
-        console.log(`[ChatManager] Creating session — model: ${model}, agentMode: ${agentMode || 'default'}, tools: ${tools.length}`);
+        console.log(`[ChatManager] Creating session — model: ${model}, agentMode: ${agentMode || 'TPM'}, tools: ${tools.length}`);
 
         const sessionConfig = {
             model,
@@ -563,20 +729,25 @@ class ChatSessionManager extends EventEmitter {
                     // Store the pending request
                     entry.pendingInputRequests.set(requestId, { resolve, question, options, timer });
 
+                    // Determine input type from SDK request metadata (if present)
+                    const inputType = request?.type || request?.meta?.type || 'default';
+
                     // Record in message history so it replays on reconnect
                     entry.messages.push({
                         role: 'user_input_request',
                         content: question,
                         requestId,
                         options,
+                        type: inputType,
                         timestamp: new Date().toISOString(),
                     });
 
-                    // Broadcast SSE event to the dashboard
+                    // Broadcast SSE event to the dashboard — include type for credential UI
                     this._broadcastToSSE(sid, CHAT_EVENTS.USER_INPUT_REQUEST, {
                         requestId,
                         question,
                         options,
+                        type: inputType,
                     });
 
                     this._persistHistory();
@@ -599,8 +770,14 @@ class ChatSessionManager extends EventEmitter {
             } catch { /* non-critical */ }
 
             const mcpServers = {};
-            const needsBrowser = !agentMode || agentMode === 'scriptgenerator';
+            const explorationEnabled = process.env.MCP_EXPLORATION_ENABLED !== 'false';
+            const needsBrowser = explorationEnabled && (!agentMode || agentMode === 'scriptgenerator');
             const needsJira = !agentMode || agentMode === 'testgenie' || agentMode === 'buggenie' || agentMode === 'taskgenie';
+
+            // FileGenie doesn't need browser or Jira MCP — only filesystem tools
+            if (agentMode === 'filegenie') {
+                console.log(`[ChatManager] FileGenie mode — skipping MCP servers (filesystem tools only)`);
+            }
 
             // 1. Unified Automation MCP — live browser exploration
             if (needsBrowser) {
@@ -618,6 +795,11 @@ class ChatSessionManager extends EventEmitter {
                         args: [mcpServerPath],
                         tools: ['*'],
                         env: {
+                            MCP_HEADLESS: process.env.MCP_HEADLESS || 'true',
+                            MCP_TIMEOUT: process.env.MCP_TIMEOUT || '60000',
+                            MCP_BROWSER: process.env.MCP_BROWSER || 'chromium',
+                            MCP_TOOL_TIMEOUT: process.env.MCP_TOOL_TIMEOUT || '120000',
+                            MCP_LOG_LEVEL: process.env.MCP_LOG_LEVEL || 'info',
                             MCP_TOOL_PROFILE: toolProfile,
                         },
                     };
@@ -701,6 +883,10 @@ class ChatSessionManager extends EventEmitter {
 
         const unsubscribers = [];
 
+        // Reasoning accumulator — collects thinking deltas and attaches to the next assistant message
+        let reasoningBuffer = '';
+        let currentReasoningId = '';
+
         // Assistant message deltas (streaming text)
         if (typeof session.on === 'function') {
             const u1 = session.on('assistant.message_delta', (event) => {
@@ -714,10 +900,22 @@ class ChatSessionManager extends EventEmitter {
             // Complete assistant message
             const u2 = session.on('assistant.message', (event) => {
                 const content = event?.data?.content || '';
-                entry.messages.push({ role: 'assistant', content, timestamp: new Date().toISOString() });
+                const msg = { role: 'assistant', content, timestamp: new Date().toISOString() };
+
+                // Attach accumulated reasoning to the message (if any)
+                if (reasoningBuffer.trim()) {
+                    msg.reasoning = reasoningBuffer.trim();
+                    msg.reasoningId = currentReasoningId;
+                }
+                // Reset buffer for next message
+                reasoningBuffer = '';
+                currentReasoningId = '';
+
+                entry.messages.push(msg);
                 this._broadcastToSSE(sessionId, CHAT_EVENTS.MESSAGE, {
                     content,
                     messageId: event?.data?.messageId || '',
+                    reasoning: msg.reasoning || null,
                 });
                 // Persist after assistant message
                 this._persistHistory();
@@ -738,12 +936,26 @@ class ChatSessionManager extends EventEmitter {
             });
             if (u2) unsubscribers.push(u2);
 
-            // Tool execution start
+            // Tool execution start — with automatic progress hints for MCP tools
             const u3 = session.on('tool.execution_start', (event) => {
+                const toolName = event?.data?.toolName || 'unknown';
+                const toolCallId = event?.data?.toolCallId || '';
+
                 this._broadcastToSSE(sessionId, CHAT_EVENTS.TOOL_START, {
-                    toolName: event?.data?.toolName || 'unknown',
-                    toolCallId: event?.data?.toolCallId || '',
+                    toolName,
+                    toolCallId,
                 });
+
+                // Auto-emit a progress hint for MCP/known tools so the UI shows
+                // contextual info immediately (e.g., "Navigating to page...")
+                const hint = ChatSessionManager._getToolProgressHint(toolName);
+                if (hint) {
+                    this._broadcastToSSE(sessionId, CHAT_EVENTS.TOOL_PROGRESS, {
+                        toolName,
+                        phase: hint.phase,
+                        message: hint.message,
+                    });
+                }
             });
             if (u3) unsubscribers.push(u3);
 
@@ -760,11 +972,17 @@ class ChatSessionManager extends EventEmitter {
             });
             if (u4) unsubscribers.push(u4);
 
-            // Reasoning (thinking)
+            // Reasoning (thinking) — accumulate into buffer for persistence
             const u5 = session.on('assistant.reasoning_delta', (event) => {
+                const delta = event?.data?.deltaContent || '';
+                const rid = event?.data?.reasoningId || '';
+                if (delta) {
+                    reasoningBuffer += delta;
+                    currentReasoningId = rid || currentReasoningId;
+                }
                 this._broadcastToSSE(sessionId, CHAT_EVENTS.REASONING, {
-                    deltaContent: event?.data?.deltaContent || '',
-                    reasoningId: event?.data?.reasoningId || '',
+                    deltaContent: delta,
+                    reasoningId: rid,
                 });
             });
             if (u5) unsubscribers.push(u5);
@@ -832,6 +1050,184 @@ class ChatSessionManager extends EventEmitter {
     }
 
     /**
+     * Broadcast a tool progress update to all active SSE-connected sessions.
+     * Called by long-running tool handlers to stream
+     * intermediate progress into the chat UI in real time.
+     *
+     * @param {string} toolName  - Name of the running tool
+     * @param {Object} data      - Progress payload { phase, message, elapsed, ... }
+     */
+    broadcastToolProgress(toolName, data) {
+        for (const [sessionId, entry] of this._sessions) {
+            if (entry.sseClients.length > 0 && !entry.archived) {
+                this._broadcastToSSE(sessionId, CHAT_EVENTS.TOOL_PROGRESS, {
+                    toolName,
+                    ...data,
+                });
+            }
+        }
+    }
+
+    /**
+     * Broadcast a synthetic tool start event to all active SSE-connected sessions.
+     * Used by orchestrating tools to emit per-phase
+     * sub-tool cards in the chat UI without actual LLM tool calls.
+     *
+     * @param {string} toolName   - Sub-tool name
+     * @param {string} toolCallId - Unique ID for this sub-tool instance
+     */
+    broadcastToolStart(toolName, toolCallId) {
+        for (const [sessionId, entry] of this._sessions) {
+            if (entry.sseClients.length > 0 && !entry.archived) {
+                this._broadcastToSSE(sessionId, CHAT_EVENTS.TOOL_START, {
+                    toolName,
+                    toolCallId,
+                });
+            }
+        }
+    }
+
+    /**
+     * Broadcast a synthetic tool complete event to all active SSE-connected sessions.
+     *
+     * @param {string} toolName   - Sub-tool name
+     * @param {string} toolCallId - Unique ID matching the start event
+     * @param {boolean} success   - Whether the sub-tool succeeded
+     * @param {string} [result]   - Optional result summary (truncated to 500 chars)
+     */
+    broadcastToolComplete(toolName, toolCallId, success, result) {
+        for (const [sessionId, entry] of this._sessions) {
+            if (entry.sseClients.length > 0 && !entry.archived) {
+                this._broadcastToSSE(sessionId, CHAT_EVENTS.TOOL_COMPLETE, {
+                    toolName,
+                    toolCallId,
+                    success,
+                    result: typeof result === 'string' ? result.substring(0, 2000) : '',
+                });
+            }
+        }
+    }
+
+    // ─── Auto-Progress Hints for MCP / Known Tools ──────────────────────────
+
+    /**
+     * Data-driven progress hint map. Each entry maps a tool name pattern to a
+     * { phase, message } pair that is automatically broadcast when the tool starts.
+     * This gives the chat UI immediate contextual feedback for MCP tools.
+     * @private
+     */
+    static _TOOL_PROGRESS_HINTS = {
+        // ── MCP Browser Navigation ──
+        'mcp_unified-autom_unified_navigate': { phase: 'browser', message: 'Navigating to page...' },
+        'mcp_unified-autom_unified_navigate_back': { phase: 'browser', message: 'Navigating back...' },
+        'mcp_unified-autom_unified_navigate_forward': { phase: 'browser', message: 'Navigating forward...' },
+        'mcp_unified-autom_unified_reload': { phase: 'browser', message: 'Reloading page...' },
+        'mcp_unified-autom_unified_get_page_url': { phase: 'browser', message: 'Reading current URL...' },
+        'mcp_unified-autom_unified_get_page_title': { phase: 'browser', message: 'Reading page title...' },
+        'mcp_unified-autom_unified_browser_close': { phase: 'browser', message: 'Closing browser...' },
+        'mcp_unified-autom_unified_list_all_pages': { phase: 'browser', message: 'Listing open pages...' },
+        'mcp_unified-autom_unified_tabs': { phase: 'browser', message: 'Listing browser tabs...' },
+
+        // ── MCP Snapshots / Selectors ──
+        'mcp_unified-autom_unified_snapshot': { phase: 'snapshot', message: 'Capturing accessibility snapshot...' },
+        'mcp_unified-autom_unified_get_by_role': { phase: 'selector', message: 'Finding element by ARIA role...' },
+        'mcp_unified-autom_unified_get_by_text': { phase: 'selector', message: 'Finding element by text...' },
+        'mcp_unified-autom_unified_get_by_label': { phase: 'selector', message: 'Finding element by label...' },
+        'mcp_unified-autom_unified_get_by_test_id': { phase: 'selector', message: 'Finding element by test ID...' },
+        'mcp_unified-autom_unified_get_by_placeholder': { phase: 'selector', message: 'Finding element by placeholder...' },
+        'mcp_unified-autom_unified_get_by_alt_text': { phase: 'selector', message: 'Finding element by alt text...' },
+        'mcp_unified-autom_unified_generate_locator': { phase: 'selector', message: 'Generating locator...' },
+
+        // ── MCP Interactions ──
+        'mcp_unified-autom_unified_click': { phase: 'interaction', message: 'Clicking element...' },
+        'mcp_unified-autom_unified_type': { phase: 'interaction', message: 'Typing text...' },
+        'mcp_unified-autom_unified_fill_form': { phase: 'interaction', message: 'Filling form fields...' },
+        'mcp_unified-autom_unified_select_option': { phase: 'interaction', message: 'Selecting option...' },
+        'mcp_unified-autom_unified_check': { phase: 'interaction', message: 'Checking checkbox...' },
+        'mcp_unified-autom_unified_uncheck': { phase: 'interaction', message: 'Unchecking checkbox...' },
+        'mcp_unified-autom_unified_hover': { phase: 'interaction', message: 'Hovering element...' },
+        'mcp_unified-autom_unified_press_key': { phase: 'interaction', message: 'Pressing key...' },
+        'mcp_unified-autom_unified_press_sequentially': { phase: 'interaction', message: 'Typing sequentially...' },
+        'mcp_unified-autom_unified_drag': { phase: 'interaction', message: 'Dragging element...' },
+        'mcp_unified-autom_unified_scroll_into_view': { phase: 'interaction', message: 'Scrolling into view...' },
+        'mcp_unified-autom_unified_file_upload': { phase: 'interaction', message: 'Uploading file...' },
+        'mcp_unified-autom_unified_handle_dialog': { phase: 'interaction', message: 'Handling dialog...' },
+        'mcp_unified-autom_unified_clear_input': { phase: 'interaction', message: 'Clearing input...' },
+        'mcp_unified-autom_unified_focus': { phase: 'interaction', message: 'Focusing element...' },
+        'mcp_unified-autom_unified_blur': { phase: 'interaction', message: 'Blurring element...' },
+        'mcp_unified-autom_unified_keyboard_type': { phase: 'interaction', message: 'Keyboard input...' },
+        'mcp_unified-autom_unified_mouse_click_xy': { phase: 'interaction', message: 'Mouse clicking...' },
+        'mcp_unified-autom_unified_mouse_move_xy': { phase: 'interaction', message: 'Mouse moving...' },
+
+        // ── MCP State Reading ──
+        'mcp_unified-autom_unified_is_visible': { phase: 'state', message: 'Checking element visibility...' },
+        'mcp_unified-autom_unified_is_enabled': { phase: 'state', message: 'Checking element state...' },
+        'mcp_unified-autom_unified_get_text_content': { phase: 'state', message: 'Reading text content...' },
+        'mcp_unified-autom_unified_get_inner_text': { phase: 'state', message: 'Reading inner text...' },
+        'mcp_unified-autom_unified_get_attribute': { phase: 'state', message: 'Reading attribute...' },
+        'mcp_unified-autom_unified_get_input_value': { phase: 'state', message: 'Reading input value...' },
+
+        // ── MCP Assertions ──
+        'mcp_unified-autom_unified_expect_url': { phase: 'assertion', message: 'Asserting URL...' },
+        'mcp_unified-autom_unified_expect_title': { phase: 'assertion', message: 'Asserting page title...' },
+        'mcp_unified-autom_unified_expect_element_text': { phase: 'assertion', message: 'Asserting element text...' },
+        'mcp_unified-autom_unified_expect_element_attribute': { phase: 'assertion', message: 'Asserting attribute...' },
+        'mcp_unified-autom_unified_verify_element_visible': { phase: 'assertion', message: 'Verifying element visible...' },
+        'mcp_unified-autom_unified_verify_text_visible': { phase: 'assertion', message: 'Verifying text visible...' },
+
+        // ── MCP Wait ──
+        'mcp_unified-autom_unified_wait_for': { phase: 'wait', message: 'Waiting for condition...' },
+        'mcp_unified-autom_unified_wait_for_element': { phase: 'wait', message: 'Waiting for element...' },
+        'mcp_unified-autom_unified_wait_for_response': { phase: 'wait', message: 'Waiting for network response...' },
+        'mcp_unified-autom_unified_wait_for_new_page': { phase: 'wait', message: 'Waiting for new page...' },
+
+        // ── MCP Screenshots / Visual ──
+        'mcp_unified-autom_unified_screenshot': { phase: 'screenshot', message: 'Taking screenshot...' },
+        'mcp_unified-autom_unified_screenshot_baseline': { phase: 'screenshot', message: 'Saving screenshot baseline...' },
+        'mcp_unified-autom_unified_screenshot_compare': { phase: 'screenshot', message: 'Comparing screenshots...' },
+
+        // ── MCP Advanced / CDP ──
+        'mcp_unified-autom_unified_evaluate': { phase: 'advanced', message: 'Evaluating JavaScript...' },
+        'mcp_unified-autom_unified_evaluate_cdp': { phase: 'advanced', message: 'Evaluating script (CDP)...' },
+        'mcp_unified-autom_unified_run_playwright_code': { phase: 'advanced', message: 'Running Playwright code...' },
+        'mcp_unified-autom_unified_console_messages': { phase: 'advanced', message: 'Reading console messages...' },
+        'mcp_unified-autom_unified_console_messages_cdp': { phase: 'advanced', message: 'Reading console (CDP)...' },
+        'mcp_unified-autom_unified_network_requests': { phase: 'advanced', message: 'Reading network requests...' },
+        'mcp_unified-autom_unified_page_errors': { phase: 'advanced', message: 'Reading page errors...' },
+        'mcp_unified-autom_unified_accessibility_audit': { phase: 'advanced', message: 'Running accessibility audit...' },
+        'mcp_unified-autom_unified_performance_analyze': { phase: 'advanced', message: 'Analyzing performance...' },
+
+        // ── Custom SDK Tools ──
+        'execute_test': { phase: 'execution', message: 'Preparing test execution...' },
+        'fetch_jira_ticket': { phase: 'jira', message: 'Fetching Jira ticket...' },
+        'create_jira_ticket': { phase: 'jira', message: 'Creating Jira ticket...' },
+        'update_jira_ticket': { phase: 'jira', message: 'Updating Jira ticket...' },
+        'generate_test_case_excel': { phase: 'excel', message: 'Generating Excel file...' },
+        'validate_generated_script': { phase: 'validation', message: 'Validating script...' },
+        'run_quality_gate': { phase: 'validation', message: 'Running quality gate...' },
+        'get_framework_inventory': { phase: 'framework', message: 'Scanning framework inventory...' },
+        'search_project_context': { phase: 'grounding', message: 'Searching project context...' },
+        'get_feature_map': { phase: 'grounding', message: 'Loading feature map...' },
+        'search_knowledge_base': { phase: 'kb', message: 'Searching knowledge base...' },
+        'get_knowledge_base_page': { phase: 'kb', message: 'Fetching KB page...' },
+        'get_test_results': { phase: 'execution', message: 'Loading test results...' },
+        'find_test_files': { phase: 'framework', message: 'Searching for test files...' },
+        'get_selector_recommendations': { phase: 'grounding', message: 'Getting selector recommendations...' },
+        'check_existing_coverage': { phase: 'grounding', message: 'Checking existing coverage...' },
+        'get_snapshot_quality': { phase: 'validation', message: 'Analyzing snapshot quality...' },
+        'analyze_test_failure': { phase: 'validation', message: 'Analyzing test failure...' },
+    };
+
+    /**
+     * Look up a progress hint for a tool name. Returns { phase, message } or null.
+     * @param {string} toolName
+     * @returns {{ phase: string, message: string } | null}
+     */
+    static _getToolProgressHint(toolName) {
+        return ChatSessionManager._TOOL_PROGRESS_HINTS[toolName] || null;
+    }
+
+    /**
      * Reverse-lookup: find a session entry by its SDK session reference.
      * Used inside onUserInputRequest where the sessionId isn't in closure scope.
      * @private
@@ -844,12 +1240,87 @@ class ChatSessionManager extends EventEmitter {
     }
 
     /**
+     * Programmatic user-input request for non-SDK callers.
+     *
+     * Finds the most recently active session with connected SSE clients, creates a pending
+     * input request, broadcasts it to the dashboard, and blocks until the user responds
+     * (or a timeout auto-resolves it).
+     *
+     * @param {string} question  - The question to display
+     * @param {string[]} options - Clickable option buttons (may be empty)
+     * @param {Object} [meta]   - Additional metadata: { type: 'credentials'|'password'|'default' }
+     * @returns {Promise<{ answer: string|Object, wasFreeform: boolean }>}
+     */
+    requestUserInput(question, options = [], meta = {}) {
+        // Find the best target session: prefer the most recent non-archived session with SSE clients
+        let targetSid = null;
+        let targetEntry = null;
+        for (const [sid, entry] of this._sessions) {
+            if (!entry.archived && entry.sseClients.length > 0) {
+                targetSid = sid;
+                targetEntry = entry;
+                // Don't break — keep iterating to find the most recently created one
+            }
+        }
+        if (!targetSid || !targetEntry) {
+            console.warn('[ChatManager] requestUserInput: no active session with SSE clients — auto-answering');
+            return Promise.resolve({ answer: 'skip', wasFreeform: true });
+        }
+
+        const requestId = `uir_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const inputType = meta?.type || 'default';
+        console.log(`[ChatManager] 💬 Programmatic user input requested (${requestId}, type=${inputType}): ${question.slice(0, 120)}`);
+
+        return new Promise((resolve) => {
+            // Auto-resolve timer — prevents hanging forever
+            const timer = setTimeout(() => {
+                if (targetEntry.pendingInputRequests.has(requestId)) {
+                    console.log(`[ChatManager] ⏱️ Programmatic user input timed out (${requestId}) — auto-resolving`);
+                    targetEntry.pendingInputRequests.delete(requestId);
+                    this._broadcastToSSE(targetSid, CHAT_EVENTS.USER_INPUT_COMPLETE, {
+                        requestId,
+                        answer: inputType === 'credentials' ? 'skip' : 'Continue with the best approach based on available context.',
+                        auto: true,
+                    });
+                    resolve({
+                        answer: inputType === 'credentials' ? 'skip' : 'Continue with the best approach based on available context.',
+                        wasFreeform: true,
+                    });
+                }
+            }, USER_INPUT_TIMEOUT_MS);
+
+            // Store the pending request (include meta for credential awareness in resolveUserInput)
+            targetEntry.pendingInputRequests.set(requestId, { resolve, question, options, timer, meta });
+
+            // Record in message history so it replays on reconnect
+            targetEntry.messages.push({
+                role: 'user_input_request',
+                content: question,
+                requestId,
+                options,
+                type: inputType,
+                timestamp: new Date().toISOString(),
+            });
+
+            // Broadcast SSE event to the dashboard — include type for credential UI
+            this._broadcastToSSE(targetSid, CHAT_EVENTS.USER_INPUT_REQUEST, {
+                requestId,
+                question,
+                options,
+                type: inputType,
+            });
+
+            this._persistHistory();
+        });
+    }
+
+    /**
      * Resolve a pending user-input request (called when the user submits their answer
      * from the dashboard UI).
      *
      * @param {string} sessionId
      * @param {string} requestId  - Unique ID of the pending request
-     * @param {string} answer     - The user's answer text
+     * @param {string|Object} answer - The user's answer: plain string, or structured object (e.g., { username, password } for credentials)
      * @returns {{ resolved: true }}
      */
     resolveUserInput(sessionId, requestId, answer) {
@@ -865,27 +1336,34 @@ class ChatSessionManager extends EventEmitter {
         // Remove from pending map
         entry.pendingInputRequests.delete(requestId);
 
-        // Record the user's answer in message history
+        // Determine if this is a credential response — mask in history for security
+        const isCredential = pending.meta?.type === 'credentials' || pending.meta?.type === 'password';
+        const historyContent = isCredential
+            ? '🔐 Credentials provided (hidden for security)'
+            : (typeof answer === 'string' ? answer : JSON.stringify(answer));
+
+        // Record the user's answer in message history (masked for credentials)
         entry.messages.push({
             role: 'user_input_response',
-            content: answer,
+            content: historyContent,
             requestId,
             timestamp: new Date().toISOString(),
         });
 
-        // Notify dashboard clients
+        // Notify dashboard clients — mask credential answers in SSE broadcast
         this._broadcastToSSE(sessionId, CHAT_EVENTS.USER_INPUT_COMPLETE, {
             requestId,
-            answer,
+            answer: isCredential ? '🔐 Credentials provided' : answer,
             auto: false,
         });
 
         this._persistHistory();
 
-        // Unblock the SDK agent — resolve the Promise returned in onUserInputRequest
-        pending.resolve({ answer, wasFreeform: true });
+        // Unblock the caller — resolve the Promise with the ACTUAL answer (unmasked)
+        pending.resolve({ answer, wasFreeform: typeof answer === 'string' });
 
-        console.log(`[ChatManager] ✅ User input resolved (${requestId}): ${answer.slice(0, 100)}`);
+        const logAnswer = isCredential ? '🔐 [credentials masked]' : (typeof answer === 'string' ? answer.slice(0, 100) : '[structured object]');
+        console.log(`[ChatManager] ✅ User input resolved (${requestId}): ${logAnswer}`);
         return { resolved: true };
     }
 
@@ -930,6 +1408,7 @@ class ChatSessionManager extends EventEmitter {
             historyMessage.attachmentMeta = attachments.map(att => ({
                 type: att.type,
                 media_type: att.media_type,
+                filename: att.filename || undefined,
                 size: att.data ? Math.ceil(att.data.length * 0.75) : 0, // estimated decoded size
             }));
 
@@ -964,19 +1443,39 @@ class ChatSessionManager extends EventEmitter {
 
         // Send to SDK session (non-blocking — response streams via events)
         // IMPORTANT: SDK MessageOptions requires { prompt }, not { content }
-        const messageOptions = { prompt: content };
+        let promptContent = content;
 
-        // Convert base64 image attachments → temp files for SDK
+        // Convert base64 image/document attachments → temp files for SDK
         // The Copilot SDK only accepts { type: 'file', path } attachments,
         // NOT inline base64 data. We decode to temp files and clean up after.
         let tempFiles = [];
+        let imageSDKAttachments = [];
         if (attachments && attachments.length > 0) {
-            const { sdkAttachments, tempFiles: files } = this._convertAttachmentsToTempFiles(attachments);
+            const { sdkAttachments, tempFiles: files, docTempFiles } = this._convertAttachmentsToTempFiles(attachments);
             tempFiles = files;
-            if (sdkAttachments.length > 0) {
-                messageOptions.attachments = sdkAttachments;
-                console.log(`[ChatManager] \u{1F4CE} Sending ${sdkAttachments.length} image(s) as file attachments to SDK`);
+
+            // Collect image-only SDK attachments (documents are not passed as SDK file attachments)
+            imageSDKAttachments = sdkAttachments.filter(a => a.displayName && /\.(png|jpg|gif|webp)$/.test(a.displayName));
+
+            // For document attachments, extract text and inject into the prompt
+            if (docTempFiles && docTempFiles.length > 0) {
+                try {
+                    const extractedText = await this._extractDocumentText(docTempFiles);
+                    if (extractedText) {
+                        promptContent = extractedText + '\n\n' + (content || 'Please analyze the uploaded document(s).');
+                        console.log(`[ChatManager] \u{1F4DD} Injected ${extractedText.length} chars of document text into prompt`);
+                    }
+                } catch (err) {
+                    console.error('[ChatManager] \u274C Document text extraction failed:', err.message);
+                    promptContent = `[Document upload failed: ${err.message}]\n\n${content}`;
+                }
             }
+        }
+
+        const messageOptions = { prompt: promptContent };
+        if (imageSDKAttachments.length > 0) {
+            messageOptions.attachments = imageSDKAttachments;
+            console.log(`[ChatManager] \u{1F4CE} Sending ${imageSDKAttachments.length} image(s) as file attachments to SDK`);
         }
 
         const messageId = await entry.session.send(messageOptions);
@@ -1058,6 +1557,7 @@ class ChatSessionManager extends EventEmitter {
                         requestId: msg.requestId,
                         question: msg.content,
                         options: msg.options || [],
+                        type: msg.type || 'default',
                         resolved: !stillPending,
                     },
                 };
@@ -1079,7 +1579,9 @@ class ChatSessionManager extends EventEmitter {
             } else {
                 type = CHAT_EVENTS.MESSAGE;
             }
-            const event = { type, sessionId, timestamp: msg.timestamp, data: { content: msg.content, role: msg.role } };
+            const data = { content: msg.content, role: msg.role };
+            if (msg.reasoning) data.reasoning = msg.reasoning;
+            const event = { type, sessionId, timestamp: msg.timestamp, data };
             try {
                 res.write(`event: ${type}\ndata: ${JSON.stringify(event)}\n\n`);
             } catch { /* ignore */ }

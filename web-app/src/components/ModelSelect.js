@@ -75,11 +75,10 @@ export default function ModelSelect({ value, onChange, className = '' }) {
             <button
                 type="button"
                 onClick={() => setOpen(!open)}
-                className={`w-full bg-white border rounded-xl px-4 py-2.5 pr-10 text-sm font-medium text-surface-800 cursor-pointer text-left transition-all duration-150 ${
-                    open
+                className={`w-full bg-white border rounded-xl px-4 py-2.5 pr-10 text-sm font-medium text-surface-800 cursor-pointer text-left transition-all duration-150 ${open
                         ? 'border-brand-400 ring-2 ring-brand-500/20'
                         : 'border-surface-200 hover:border-brand-300 hover:bg-brand-50/30'
-                }`}
+                    }`}
             >
                 <span className="truncate block">{selectedLabel}</span>
                 {/* Chevron */}
@@ -101,7 +100,7 @@ export default function ModelSelect({ value, onChange, className = '' }) {
 
             {/* Dropdown panel — always opens downward */}
             {open && (
-                <div className="absolute left-0 right-0 top-full mt-1.5 z-50 bg-white border border-surface-200 rounded-xl shadow-xl overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150">
+                <div className="absolute left-0 right-0 top-full mt-1.5 z-[999] bg-white border border-surface-200 rounded-xl shadow-xl overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150">
                     {/* Search input */}
                     <div className="p-2 border-b border-surface-100">
                         <div className="relative">
@@ -139,11 +138,10 @@ export default function ModelSelect({ value, onChange, className = '' }) {
                                                 key={model.value}
                                                 type="button"
                                                 onClick={() => handleSelect(model.value)}
-                                                className={`w-full text-left px-4 py-2 text-sm transition-colors flex items-center gap-2 ${
-                                                    isSelected
+                                                className={`w-full text-left px-4 py-2 text-sm transition-colors flex items-center gap-2 ${isSelected
                                                         ? 'bg-brand-50 text-brand-700 font-semibold'
                                                         : 'text-surface-700 hover:bg-surface-100'
-                                                }`}
+                                                    }`}
                                             >
                                                 {isSelected && (
                                                     <svg className="w-3.5 h-3.5 text-brand-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor">

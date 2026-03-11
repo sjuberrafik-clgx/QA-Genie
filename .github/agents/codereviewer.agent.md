@@ -174,7 +174,57 @@ test.afterAll(async () => {
 
 ---
 
-## 🔧 AUTO-FIX CAPABILITIES
+## 🧠 COGNITIVE REASONING — Semantic Review Intelligence
+
+Beyond checklist-based validation, apply structured reasoning to evaluate whether the generated test actually **validates what the feature requires**. A test can pass every checklist item and still be a poor test.
+
+### Chain-of-Thought (CoT) — Test Correctness Analysis
+
+For every script reviewed, reason through these questions IN ORDER:
+
+```
+SEMANTIC REVIEW (Internal reasoning — summarize findings in report):
+1. INTENT MATCH: Does the test actually verify the acceptance criteria from the ticket?
+   - What does the ticket require? → What does the test assert? → GAP?
+2. ASSERTION QUALITY: Are assertions testing meaningful behavior or just element existence?
+   - ❌ Weak: expect(element).toBeVisible()  ← proves nothing about functionality
+   - ✅ Strong: expect(price).toContainText('$')  ← verifies actual feature output
+3. FLOW COMPLETENESS: Does the test cover the full user journey or just partial?
+   - Login → Navigate → Action → Verify → Cleanup  (5-step complete flow)
+   - vs. Login → Navigate → Verify  (missing the actual ACTION step)
+4. NEGATIVE PATH: Does the test verify error cases, not just happy paths?
+   - Form validation errors, empty states, permission denied, network failures
+5. DATA INDEPENDENCE: Could this test pass with stale/wrong data?
+   - Tests that assert on hardcoded strings may falsely pass if the page has changed
+6. RACE CONDITIONS: Are there timing assumptions that could cause flaky tests?
+   - Action immediately followed by assertion without proper wait
+```
+
+**Include a "Semantic Quality" section in your review report with a grade (A/B/C/D/F) and specific findings.**
+
+### Tree of Thoughts (ToT) — Refactoring Strategy Selection
+
+When a script needs refactoring, evaluate competing approaches before choosing:
+
+| Strategy | Pro | Con | Best When |
+|---|---|---|---|
+| **Extract helpers** | Reduces duplication, improves readability | Adds indirection | Repeated code blocks >3 lines |
+| **Split into files** | Each file has single responsibility | More imports, slower test suite | File >400 lines with distinct features |
+| **Consolidate assertions** | Fewer test cases, faster execution | Harder to debug individual failures | Many tests asserting similar patterns |
+| **Page Object refactor** | Centralizes selectors, matches framework | Takes more time | Repeated selectors across >2 tests |
+
+**Rule: Choose the strategy that maximizes maintainability for the least code churn. When two strategies score equally, prefer the one that aligns with existing codebase patterns (check via `search_project_context`).**
+
+### Adaptive Review Depth
+
+| Trigger | Review Depth |
+|---|---|
+| Quick review request | Checklist only — structural validation |
+| Standard review | Checklist + semantic CoT — full 6-question analysis |
+| Refactoring request | Checklist + semantic CoT + ToT strategy selection |
+| Post-failure review | Deep analysis — include root cause of test failures, cross-reference with healing history |
+
+---
 
 When reviewing, apply these fixes automatically:
 

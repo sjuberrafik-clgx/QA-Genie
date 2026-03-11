@@ -45,6 +45,7 @@ const ENTRY_TYPES = {
     GENERATION_PROGRESS: 'generation_progress', // Coder incremental progress
     REVIEW_FEEDBACK: 'review_feedback',         // Reviewer → Coder (retry)
     DRYRUN_RESULTS: 'dryrun_results',           // DryRun → Coder (fix)
+
 };
 
 // ─── Shared Context Store ───────────────────────────────────────────────────

@@ -1,0 +1,52 @@
+{
+    "$schema": "./brand-kit.schema.json",
+    "name": "Client Template",
+    "description": "Starter template — duplicate and customize for each client or project",
+    "version": "2.0.0",
+    "logo": null,
+    "logoDark": null,
+    "favicon": null,
+    "fontFamily": "Calibri",
+    "fontFamilySecondary": "Arial",
+    "fontFamilyDisplay": "Calibri Light",
+    "fontFamilyMono": "Consolas",
+    "colors": {
+        "primary": "#333333",
+        "primaryDark": "#1A1A1A",
+        "primaryLight": "#F5F5F5",
+        "accent": "#FF6B35",
+        "accentDark": "#CC5529"
+    },
+    "gradients": {
+        "hero": {
+            "start": "#333333",
+            "end": "#FF6B35",
+            "angle": 120
+        },
+        "primary": {
+            "start": "#333333",
+            "end": "#1A1A1A",
+            "angle": 135
+        },
+        "dark": {
+            "start": "#1A1A1A",
+            "end": "#0D0D0D",
+            "angle": 135
+        }
+    },
+    "slideDefaults": {
+        "titleStyle": "centered",
+        "showLogo": false,
+        "logoPosition": "bottom-right",
+        "footerText": "Confidential — [Client Name]",
+        "showSlideNumbers": true,
+        "defaultTransition": "fade"
+    },
+    "docDefaults": {
+        "showCoverPage": true,
+        "showTableOfContents": true,
+        "headerText": "",
+        "footerText": "Confidential — [Client Name]",
+        "watermark": null
+    }
+}

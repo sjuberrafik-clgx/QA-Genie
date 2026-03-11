@@ -1,0 +1,181 @@
+{
+  "version": "1.0.0",
+  "lastUpdated": "2026-03-08T14:49:59.657Z",
+  "navigationPatterns": {
+    "cognitive-coder": {
+      "reg-login": {
+        "accessCount": 6,
+        "levels": {
+          "L1": 6
+        },
+        "filePath": "loginPage.js",
+        "lastAccessed": "2026-03-08T14:49:59.639Z"
+      },
+      "reg-popup": {
+        "accessCount": 3,
+        "levels": {
+          "L0": 3
+        },
+        "filePath": "popupHandler.js",
+        "lastAccessed": "2026-03-08T14:49:59.637Z"
+      },
+      "reg-search": {
+        "accessCount": 3,
+        "levels": {
+          "L2": 3
+        },
+        "filePath": "searchPage.js",
+        "lastAccessed": "2026-03-08T14:49:59.639Z"
+      }
+    }
+  },
+  "resolutionOutcomes": [
+    {
+      "regionId": "reg-login",
+      "agentName": "cognitive-coder",
+      "allocatedLevel": "L2",
+      "neededLevel": "L1",
+      "sufficient": false,
+      "taskType": "selector-extraction",
+      "timestamp": "2026-03-08T14:47:52.065Z"
+    },
+    {
+      "regionId": "reg-login",
+      "agentName": "cognitive-coder",
+      "allocatedLevel": "L2",
+      "neededLevel": "L1",
+      "sufficient": false,
+      "taskType": "selector-extraction",
+      "timestamp": "2026-03-08T14:47:52.067Z"
+    },
+    {
+      "regionId": "reg-login",
+      "agentName": "cognitive-coder",
+      "allocatedLevel": "L2",
+      "neededLevel": "L1",
+      "sufficient": false,
+      "taskType": "selector-extraction",
+      "timestamp": "2026-03-08T14:47:52.069Z"
+    },
+    {
+      "regionId": "reg-login",
+      "agentName": "cognitive-coder",
+      "allocatedLevel": "L2",
+      "neededLevel": "L1",
+      "sufficient": false,
+      "taskType": "selector-extraction",
+      "timestamp": "2026-03-08T14:49:33.551Z"
+    },
+    {
+      "regionId": "reg-login",
+      "agentName": "cognitive-coder",
+      "allocatedLevel": "L2",
+      "neededLevel": "L1",
+      "sufficient": false,
+      "taskType": "selector-extraction",
+      "timestamp": "2026-03-08T14:49:33.558Z"
+    },
+    {
+      "regionId": "reg-login",
+      "agentName": "cognitive-coder",
+      "allocatedLevel": "L2",
+      "neededLevel": "L1",
+      "sufficient": false,
+      "taskType": "selector-extraction",
+      "timestamp": "2026-03-08T14:49:33.560Z"
+    },
+    {
+      "regionId": "reg-login",
+      "agentName": "cognitive-coder",
+      "allocatedLevel": "L2",
+      "neededLevel": "L1",
+      "sufficient": false,
+      "taskType": "selector-extraction",
+      "timestamp": "2026-03-08T14:49:59.641Z"
+    },
+    {
+      "regionId": "reg-login",
+      "agentName": "cognitive-coder",
+      "allocatedLevel": "L2",
+      "neededLevel": "L1",
+      "sufficient": false,
+      "taskType": "selector-extraction",
+      "timestamp": "2026-03-08T14:49:59.643Z"
+    },
+    {
+      "regionId": "reg-login",
+      "agentName": "cognitive-coder",
+      "allocatedLevel": "L2",
+      "neededLevel": "L1",
+      "sufficient": false,
+      "taskType": "selector-extraction",
+      "timestamp": "2026-03-08T14:49:59.645Z"
+    }
+  ],
+  "hallucinationHotspots": {
+    "reg-search": {
+      "count": 6,
+      "types": {
+        "selector": 6
+      },
+      "samples": [
+        "#bad-id",
+        ".non-existent-class",
+        "#bad-id",
+        ".non-existent-class",
+        "#bad-id"
+      ],
+      "lastTimestamp": "2026-03-08T14:49:59.651Z"
+    }
+  },
+  "phaseDependencies": [
+    {
+      "producerPhase": "cognitive-explorer-nav",
+      "consumerPhase": "cognitive-coder",
+      "regionId": "reg-login",
+      "dataType": "verified_selectors",
+      "importance": 0.9,
+      "occurrences": 3,
+      "firstSeen": "2026-03-08T14:47:52.075Z",
+      "lastSeen": "2026-03-08T14:49:59.653Z"
+    }
+  ],
+  "runMetrics": [
+    {
+      "runId": "test-1",
+      "timestamp": "2026-03-08T14:47:52.077Z",
+      "verifiedPercent": "70%",
+      "ungroundedPercent": "20%"
+    },
+    {
+      "runId": "test-2",
+      "timestamp": "2026-03-08T14:47:52.079Z",
+      "verifiedPercent": "80%",
+      "ungroundedPercent": "10%"
+    },
+    {
+      "runId": "test-1",
+      "timestamp": "2026-03-08T14:49:33.573Z",
+      "verifiedPercent": "70%",
+      "ungroundedPercent": "20%"
+    },
+    {
+      "runId": "test-2",
+      "timestamp": "2026-03-08T14:49:33.576Z",
+      "verifiedPercent": "80%",
+      "ungroundedPercent": "10%"
+    },
+    {
+      "runId": "test-1",
+      "timestamp": "2026-03-08T14:49:59.655Z",
+      "verifiedPercent": "70%",
+      "ungroundedPercent": "20%"
+    },
+    {
+      "runId": "test-2",
+      "timestamp": "2026-03-08T14:49:59.657Z",
+      "verifiedPercent": "80%",
+      "ungroundedPercent": "10%"
+    }
+  ]
+}

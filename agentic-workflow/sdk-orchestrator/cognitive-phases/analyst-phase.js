@@ -52,11 +52,50 @@ Before producing the plan, reason through these questions IN ORDER:
 5. What could go wrong? (popups, loading spinners, authentication walls, dynamic content)
 6. What assertions will the tests need? (text values, URLs, element states)
 
+## Tree of Thoughts — Multiple Exploration Strategies (MANDATORY)
+After your initial reasoning, generate **2-3 distinct exploration strategies** before producing the final plan. This ensures you consider alternative approaches and select the most robust one.
+
+### Strategy Generation:
+1. **Optimistic Strategy** — Assume happy path: elements load quickly, no popups, standard selectors work. Minimal waits.
+2. **Defensive Strategy** — Assume complications: add extra waits/snapshots, wider selectors (text-based fallbacks), popup handling at every navigation, try alternative paths if elements are missing.
+3. **Fallback Strategy** (optional, for complex/risky flows) — Completely different navigation path to achieve the same test coverage (e.g., use URL parameters instead of UI navigation, or test features in a different order to avoid state dependencies).
+
+### Strategy Selection:
+For each strategy, self-evaluate:
+- **Robustness** (0-10): How likely is this to succeed even with unexpected page states?
+- **Coverage** (0-10): Does this cover ALL test steps?
+- **Efficiency** (0-10): How many MCP calls does this need?
+
+Pick the strategy with the highest combined score as your PRIMARY plan.
+Include the runner-up as "fallbackStrategy" in your output.
+
 ## Output Format
 Respond with ONLY a JSON object (no markdown, no explanation outside the JSON):
 
 {
   "reasoning": "Your chain-of-thought reasoning (2-5 sentences summarizing the flow)",
+  "strategyEvaluation": {
+    "strategies": [
+      {
+        "name": "optimistic",
+        "description": "Happy path with minimal waits",
+        "robustness": 6,
+        "coverage": 9,
+        "efficiency": 9,
+        "totalScore": 24
+      },
+      {
+        "name": "defensive",
+        "description": "Extra waits, wider selectors, popup handling",
+        "robustness": 9,
+        "coverage": 9,
+        "efficiency": 6,
+        "totalScore": 24
+      }
+    ],
+    "selectedStrategy": "defensive",
+    "selectionReasoning": "Defensive chosen because this feature has known popup overlays"
+  },
   "testCaseMapping": [
     {
       "testStepId": "1.1",
@@ -93,6 +132,13 @@ Respond with ONLY a JSON object (no markdown, no explanation outside the JSON):
     "totalElements": 15,
     "totalInteractions": 8,
     "totalAssertions": 5
+  },
+  "fallbackStrategy": {
+    "_comment": "Runner-up strategy from Tree-of-Thoughts evaluation. Used if primary plan fails at Explorer phase.",
+    "name": "optimistic",
+    "description": "Brief description of the alternative approach",
+    "keyDifferences": ["uses text selectors instead of role selectors", "skips intermediate snapshots"],
+    "testCaseMapping": []
   }
 }
 
@@ -236,10 +282,31 @@ function parseAnalystOutput(rawResponse) {
         errors.push('[WARN] No reasoning provided — chain-of-thought is recommended');
     }
 
+    // ToT: Strategy evaluation (non-blocking but tracked)
+    if (!plan.strategyEvaluation) {
+        errors.push('[WARN] No strategy evaluation (Tree-of-Thoughts) — single-path plan generated');
+    } else {
+        const strategies = plan.strategyEvaluation.strategies || [];
+        if (strategies.length < 2) {
+            errors.push('[WARN] Only one strategy evaluated — ToT recommends 2-3 alternatives');
+        }
+        if (!plan.strategyEvaluation.selectedStrategy) {
+            errors.push('[WARN] No strategy selection reasoning provided');
+        }
+    }
+
+    // ToT: Fallback strategy (non-blocking)
+    if (!plan.fallbackStrategy) {
+        errors.push('[WARN] No fallback strategy — if primary plan fails, no alternative is available');
+    }
+
     return {
         valid: errors.filter(e => !e.startsWith('[WARN]')).length === 0,
         plan,
         errors,
+        // ToT: expose strategy metadata for metrics
+        strategyEvaluation: plan.strategyEvaluation || null,
+        hasFallback: !!plan.fallbackStrategy,
     };
 }
 
@@ -272,28 +339,41 @@ function scorePlan(plan) {
     // Has navigate+snapshot as first two steps on first test case
     const firstMapping = (plan.testCaseMapping || [])[0];
     const firstSteps = (firstMapping?.explorationSteps || []).map(s => s.tool);
-    breakdown.startsWithNavigation = firstSteps[0] === 'navigate' ? 20 : 0;
-    breakdown.hasSnapshot = firstSteps.includes('snapshot') ? 20 : 0;
+    breakdown.startsWithNavigation = firstSteps[0] === 'navigate' ? 15 : 0;
+    breakdown.hasSnapshot = firstSteps.includes('snapshot') ? 15 : 0;
 
     // Risk awareness
-    breakdown.riskAwareness = (plan.riskAreas?.length || 0) > 0 ? 15 : 0;
+    breakdown.riskAwareness = (plan.riskAreas?.length || 0) > 0 ? 10 : 0;
 
     // Transitions
     const transitionCount = Object.keys(plan.pageTransitionGraph || {}).length;
-    breakdown.transitions = Math.min(transitionCount * 5, 15);
+    breakdown.transitions = Math.min(transitionCount * 5, 10);
 
     // Reasoning present
-    breakdown.reasoning = plan.reasoning ? 10 : 0;
+    breakdown.reasoning = plan.reasoning ? 5 : 0;
+
+    // ToT: Strategy diversity bonus — reward multi-strategy evaluation
+    const strategyCount = plan.strategyEvaluation?.strategies?.length || 0;
+    breakdown.strategyDiversity = Math.min(strategyCount * 5, 10);
+
+    // ToT: Fallback plan bonus
+    breakdown.hasFallback = plan.fallbackStrategy ? 5 : 0;
+
+    // ToT: Strategy selection reasoning
+    breakdown.strategyReasoning = plan.strategyEvaluation?.selectionReasoning ? 5 : 0;
 
     // Calculate total (max 100)
     const score = Math.min(100, Math.round(
         (breakdown.coverage * 0.2) +  // 20% weight
-        Math.min(breakdown.avgDepth * 5, 20) +  // up to 20 points
+        Math.min(breakdown.avgDepth * 5, 15) +  // up to 15 points
         breakdown.startsWithNavigation +
         breakdown.hasSnapshot +
         breakdown.riskAwareness +
         breakdown.transitions +
-        breakdown.reasoning
+        breakdown.reasoning +
+        breakdown.strategyDiversity +     // ToT bonus: up to 10 points
+        breakdown.hasFallback +           // ToT bonus: 5 points
+        breakdown.strategyReasoning       // ToT bonus: 5 points
     ));
 
     return { score, breakdown };

@@ -15,6 +15,7 @@ export function usePipeline() {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [networkWarning, setNetworkWarning] = useState(null);
+    const [cognitiveInsights, setCognitiveInsights] = useState(null);
 
     const stagesRef = useRef({});
     const pollIntervalRef = useRef(null);
@@ -74,6 +75,26 @@ export function usePipeline() {
 
             case 'error':
                 setError(data.error || 'Unknown pipeline error');
+                break;
+
+            case 'cognitive_scaling':
+                setCognitiveInsights({
+                    tier: data.tier,
+                    scaling: data.scaling,
+                    source: data.source,
+                    timestamp: Date.now(),
+                });
+                break;
+
+            case 'ooda_health_check':
+                setCognitiveInsights(prev => ({
+                    ...prev,
+                    ooda: {
+                        decision: data.decision,
+                        score: data.score,
+                        duration: data.duration,
+                    },
+                }));
                 break;
         }
     }, []);
@@ -189,6 +210,7 @@ export function usePipeline() {
         loading,
         error,
         networkWarning,
+        cognitiveInsights,
         sseStatus,
         retryCount,
         startPipeline,
