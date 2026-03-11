@@ -1141,6 +1141,251 @@ function createCustomTools(defineTool, agentName, deps = {}) {
     }
 
     // ───────────────────────────────────────────────────────────────────
+    // TOOL 11b2: analyze_video_recording
+    // Available to: buggenie
+    // Extracts frames from uploaded video and provides structured context
+    // ───────────────────────────────────────────────────────────────────
+    if (agentName === 'buggenie') {
+        tools.push(defineTool('analyze_video_recording', {
+            description:
+                'Analyzes a screen recording video from the current chat session. ' +
+                'Extracts key frames using ffmpeg, returns video metadata and frame information. ' +
+                'The extracted frames are automatically attached as images for vision analysis. ' +
+                'Call this when the user mentions they have uploaded a video/recording of a bug.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    sessionId: {
+                        type: 'string',
+                        description: 'Chat session ID to retrieve video context from. Use the current session ID.',
+                    },
+                },
+                required: [],
+            },
+            handler: async ({ sessionId }) => {
+                try {
+                    const chatManager = deps.chatManager;
+                    if (!chatManager) {
+                        return JSON.stringify({ success: false, error: 'Chat manager not available' });
+                    }
+
+                    const entry = chatManager._sessions?.get(sessionId);
+                    const videoCtx = entry?.videoContext;
+
+                    if (!videoCtx || videoCtx.length === 0) {
+                        return JSON.stringify({
+                            success: false,
+                            error: 'No video recordings found in the current session. The user may not have uploaded a video yet.',
+                        });
+                    }
+
+                    // Return info for all videos in the session
+                    const results = videoCtx.map(v => ({
+                        filename: v.filename,
+                        duration: `${v.duration}s`,
+                        frameCount: v.frameCount,
+                        resolution: v.metadata ? `${v.metadata.width}x${v.metadata.height}` : 'unknown',
+                        codec: v.metadata?.codec || 'unknown',
+                        frames: v.frames.map(f => ({
+                            timestamp: `${f.timestamp}s`,
+                            path: f.path,
+                        })),
+                    }));
+
+                    return JSON.stringify({
+                        success: true,
+                        videoCount: results.length,
+                        videos: results,
+                        instructions: 'The video frames are attached as images in chronological order. '
+                            + 'Analyze them to identify: (1) the user flow/steps, (2) where the defect manifests, '
+                            + '(3) expected vs actual behavior, (4) timestamps of key moments.',
+                    });
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `Video analysis error: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 11b3: attach_video_frames_to_jira
+    // Available to: buggenie
+    // Attaches key video frames to a Jira ticket
+    // ───────────────────────────────────────────────────────────────────
+    if (agentName === 'buggenie') {
+        tools.push(defineTool('attach_video_frames_to_jira', {
+            description:
+                'Attaches key video frames from a screen recording to a Jira ticket. ' +
+                'Uploads the most important frames (timestamps where bugs are visible) as JPEG images. ' +
+                'Call this after creating a bug ticket when the user provided a video recording.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    ticketKey: {
+                        type: 'string',
+                        description: 'Jira ticket key to attach frames to (e.g., "AOTF-17300")',
+                    },
+                    sessionId: {
+                        type: 'string',
+                        description: 'Chat session ID to retrieve video frames from.',
+                    },
+                    frameTimestamps: {
+                        type: 'array',
+                        items: { type: 'number' },
+                        description: 'Optional: specific frame timestamps (in seconds) to attach. If omitted, attaches up to 8 evenly-spaced frames.',
+                    },
+                },
+                required: ['ticketKey'],
+            },
+            handler: async ({ ticketKey, sessionId, frameTimestamps }) => {
+                try {
+                    loadEnvVars();
+                    const cloudId = (process.env.JIRA_CLOUD_ID || '').replace(/"/g, '');
+                    const baseUrl = process.env.JIRA_BASE_URL;
+                    const email = process.env.JIRA_EMAIL || process.env.ATLASSIAN_EMAIL || '';
+                    const apiToken = process.env.JIRA_API_TOKEN || process.env.ATLASSIAN_API_TOKEN || '';
+
+                    if (!email || !apiToken) {
+                        return JSON.stringify({ success: false, error: 'JIRA_EMAIL and JIRA_API_TOKEN required' });
+                    }
+
+                    const chatManager = deps.chatManager;
+                    const entry = chatManager?._sessions?.get(sessionId);
+                    const videoCtx = entry?.videoContext;
+
+                    if (!videoCtx || videoCtx.length === 0) {
+                        return JSON.stringify({ success: false, error: 'No video recordings found in session' });
+                    }
+
+                    // Collect frames to upload
+                    const MAX_JIRA_FRAMES = 8;
+                    let framesToUpload = [];
+
+                    for (const video of videoCtx) {
+                        if (frameTimestamps && frameTimestamps.length > 0) {
+                            // Upload specific requested timestamps
+                            for (const ts of frameTimestamps) {
+                                const match = video.frames.find(f => Math.abs(f.timestamp - ts) <= 1);
+                                if (match) framesToUpload.push(match);
+                            }
+                        } else {
+                            // Select up to MAX_JIRA_FRAMES evenly-spaced frames
+                            const step = Math.max(1, Math.floor(video.frames.length / MAX_JIRA_FRAMES));
+                            for (let i = 0; i < video.frames.length && framesToUpload.length < MAX_JIRA_FRAMES; i += step) {
+                                framesToUpload.push(video.frames[i]);
+                            }
+                        }
+                    }
+
+                    framesToUpload = framesToUpload.slice(0, MAX_JIRA_FRAMES);
+
+                    if (framesToUpload.length === 0) {
+                        return JSON.stringify({ success: false, error: 'No matching frames found to upload' });
+                    }
+
+                    let attachUrl;
+                    if (cloudId) {
+                        attachUrl = `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issue/${ticketKey}/attachments`;
+                    } else {
+                        attachUrl = `${baseUrl.replace(/\/$/, '')}/rest/api/3/issue/${ticketKey}/attachments`;
+                    }
+
+                    const results = [];
+                    for (let i = 0; i < framesToUpload.length; i++) {
+                        const frame = framesToUpload[i];
+                        const fileName = `bug-video-frame-${frame.timestamp}s.jpg`;
+
+                        try {
+                            const buffer = fs.readFileSync(frame.path);
+                            const boundary = `----JiraVideoFrame${Date.now()}${i}`;
+                            const header = Buffer.from(
+                                `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: image/jpeg\r\n\r\n`
+                            );
+                            const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+                            const body = Buffer.concat([header, buffer, footer]);
+
+                            const resp = await fetch(attachUrl, {
+                                method: 'POST',
+                                headers: {
+                                    'Authorization': 'Basic ' + Buffer.from(`${email}:${apiToken}`).toString('base64'),
+                                    'X-Atlassian-Token': 'no-check',
+                                    'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                                },
+                                body,
+                            });
+
+                            if (resp.ok) {
+                                results.push({ fileName, timestamp: `${frame.timestamp}s`, success: true });
+                            } else {
+                                const errText = await resp.text();
+                                results.push({ fileName, success: false, error: `HTTP ${resp.status}: ${errText.slice(0, 200)}` });
+                            }
+                        } catch (uploadErr) {
+                            results.push({ fileName, success: false, error: uploadErr.message });
+                        }
+                    }
+
+                    const successCount = results.filter(r => r.success).length;
+
+                    // Upload original video recording(s) to Jira if available and under 50 MB
+                    const videoRecordings = [];
+                    for (const ctx of videoCtx) {
+                        if (!ctx.videoPath) continue;
+                        try {
+                            const stat = fs.statSync(ctx.videoPath);
+                            if (stat.size > 50 * 1024 * 1024) {
+                                videoRecordings.push({ fileName: ctx.filename || path.basename(ctx.videoPath), success: false, error: 'File exceeds 50 MB Jira attachment limit' });
+                                continue;
+                            }
+                            const videoBuf = fs.readFileSync(ctx.videoPath);
+                            const videoFileName = ctx.filename || path.basename(ctx.videoPath);
+                            const ext = path.extname(videoFileName).toLowerCase();
+                            const mimeType = { '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime' }[ext] || 'application/octet-stream';
+                            const boundary = `----JiraVideo${Date.now()}`;
+                            const header = Buffer.from(
+                                `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${videoFileName}"\r\nContent-Type: ${mimeType}\r\n\r\n`
+                            );
+                            const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+                            const body = Buffer.concat([header, videoBuf, footer]);
+
+                            const resp = await fetch(attachUrl, {
+                                method: 'POST',
+                                headers: {
+                                    'Authorization': 'Basic ' + Buffer.from(`${email}:${apiToken}`).toString('base64'),
+                                    'X-Atlassian-Token': 'no-check',
+                                    'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                                },
+                                body,
+                            });
+
+                            if (resp.ok) {
+                                videoRecordings.push({ fileName: videoFileName, success: true });
+                            } else {
+                                const errText = await resp.text();
+                                videoRecordings.push({ fileName: videoFileName, success: false, error: `HTTP ${resp.status}: ${errText.slice(0, 200)}` });
+                            }
+                        } catch (vidErr) {
+                            videoRecordings.push({ fileName: ctx.filename || 'unknown', success: false, error: vidErr.message });
+                        }
+                    }
+
+                    return JSON.stringify({
+                        success: successCount > 0 || videoRecordings.some(r => r.success),
+                        ticketKey,
+                        totalFrames: framesToUpload.length,
+                        uploaded: successCount,
+                        failed: framesToUpload.length - successCount,
+                        results,
+                        videoRecordings: videoRecordings.length > 0 ? videoRecordings : undefined,
+                    });
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `Video frame attachment error: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
     // TOOL 11c: update_jira_ticket
     // Available to: buggenie, testgenie, taskgenie
     // ───────────────────────────────────────────────────────────────────

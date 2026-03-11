@@ -690,6 +690,27 @@
             "warnThreshold": 60
         }
     },
+    "videoAnalysis": {
+        "_comment": "Video recording analysis for BugGenie. Extracts frames from screen recordings via ffmpeg and sends to vision-enabled LLMs for automated bug report generation.",
+        "enabled": true,
+        "frameRate": 1,
+        "maxFrames": 30,
+        "maxFramesThorough": 60,
+        "maxSDKFrames": 10,
+        "maxDurationSec": 300,
+        "maxFileSizeMB": 200,
+        "outputResolution": 768,
+        "jpegQuality": 4,
+        "_sdkQualityNote": "outputResolution and jpegQuality control SDK frame quality (low-res to avoid 413 payload errors). Jira frames use jiraOutputResolution and jiraJpegQuality (high-res).",
+        "jiraOutputResolution": 1280,
+        "jiraJpegQuality": 2,
+        "deduplicationThreshold": 0.05,
+        "_deduplicationNote": "Minimum perceptual difference (0-1) between consecutive frames to keep. 0.05 = 5% pixel diff. Set 0 to disable dedup.",
+        "frameSelectionStrategy": "hybrid",
+        "allowedProviders": ["loom", "gdrive", "sharepoint", "direct"],
+        "attachKeyFramesToJira": true,
+        "maxJiraFrames": 8
+    },
     "ooda": {
         "_comment": "OODA (Observe–Orient–Decide–Act) loop configuration. Controls pre-pipeline health checks and MCP exploration quality assessment. All OODA logic is deterministic JS — zero LLM calls, zero token cost.",
         "environmentHealth": {

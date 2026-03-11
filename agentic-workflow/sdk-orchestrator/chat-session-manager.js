@@ -214,22 +214,33 @@ class ChatSessionManager extends EventEmitter {
         'application/json': '.json',
     };
 
+    /** MIME type → file extension mapping for video attachments. */
+    static _VIDEO_EXTENSIONS = {
+        'video/mp4': '.mp4',
+        'video/webm': '.webm',
+        'video/quicktime': '.mov',
+        'video/x-msvideo': '.avi',
+        'video/x-matroska': '.mkv',
+    };
+
     /**
      * Convert base64 image/document attachments to temp files for the Copilot SDK.
+     * Video attachments arrive as file paths (already on disk from streaming upload).
      * Returns SDK-compatible attachment objects with file paths.
      *
-     * @param {Object[]} attachments - Frontend attachments: [{ type: 'image'|'document', media_type, data, filename? }]
-     * @returns {{ sdkAttachments: Object[], tempFiles: string[], docTempFiles: { path: string, filename: string }[] }}
+     * @param {Object[]} attachments - Frontend attachments: [{ type: 'image'|'document'|'video'|'video_link', media_type, data?, tempPath?, filename? }]
+     * @returns {{ sdkAttachments: Object[], tempFiles: string[], docTempFiles: { path: string, filename: string }[], videoTempFiles: { path: string, filename: string, media_type: string }[] }}
      */
     _convertAttachmentsToTempFiles(attachments) {
         const sdkAttachments = [];
         const tempFiles = [];
         const docTempFiles = []; // { path, filename } for document text extraction
+        const videoTempFiles = []; // { path, filename, media_type } for video frame extraction
         const tempDir = os.tmpdir();
 
         for (let i = 0; i < attachments.length; i++) {
             const att = attachments[i];
-            if (!att.data) continue;
+            if (!att.data && att.type !== 'video' && att.type !== 'video_link') continue;
 
             if (att.type === 'image') {
                 const ext = ChatSessionManager._IMAGE_EXTENSIONS[att.media_type] || '.png';
@@ -270,10 +281,28 @@ class ChatSessionManager extends EventEmitter {
                 } catch (err) {
                     console.error(`[ChatManager] \u274C Failed to write temp document ${i}:`, err.message);
                 }
+            } else if (att.type === 'video' && att.tempPath) {
+                // Video files arrive as paths from the streaming upload endpoint — no base64 decoding needed
+                const ext = ChatSessionManager._VIDEO_EXTENSIONS[att.media_type] || '.mp4';
+                const safeName = (att.filename || `video-${i}`).replace(/[^a-zA-Z0-9._\- ]/g, '_');
+                try {
+                    if (fs.existsSync(att.tempPath)) {
+                        videoTempFiles.push({ path: att.tempPath, filename: safeName, media_type: att.media_type });
+                        console.log(`[ChatManager] \u{1F3AC} Video attachment: ${safeName} (path-based, ${ext})`);
+                    } else {
+                        console.error(`[ChatManager] \u274C Video temp file not found: ${att.tempPath}`);
+                    }
+                } catch (err) {
+                    console.error(`[ChatManager] \u274C Failed to process video ${i}:`, err.message);
+                }
+            } else if (att.type === 'video_link' && att.url) {
+                // External video links are processed later by VideoAnalyzer.fetchExternalVideo()
+                videoTempFiles.push({ url: att.url, provider: att.provider || 'direct', filename: `video-link-${i}`, media_type: 'video/mp4' });
+                console.log(`[ChatManager] \u{1F517} Video link attachment: ${att.url} (${att.provider || 'direct'})`);
             }
         }
 
-        return { sdkAttachments, tempFiles, docTempFiles };
+        return { sdkAttachments, tempFiles, docTempFiles, videoTempFiles };
     }
 
     /**
@@ -463,7 +492,7 @@ class ChatSessionManager extends EventEmitter {
             'Detect the user\'s intent from their message and activate the appropriate expertise:',
             '- **Test case keywords**: "generate test cases", "test scenarios", "test steps", "excel", "test case" → Activate TestGenie expertise',
             '- **Script generation keywords**: "automate", "script", "spec.js", "explore page", "MCP", "playwright", "browser" → Activate ScriptGenie expertise',
-            '- **Bug report keywords**: "bug", "defect", "issue", "failure", "broken", "not working", "create bug" → Activate BugGenie expertise',
+            '- **Bug report keywords**: "bug", "defect", "issue", "failure", "broken", "not working", "create bug", "screen recording", "video recording", "recording of bug", "attached video", "video shows" → Activate BugGenie expertise',
             '- **Task creation keywords**: "task", "testing task", "assign", "link task", "create task" → Activate TaskGenie expertise',
             '- **File open/view keywords**: "open file", "open the", "launch", "view in app", "show in explorer", "reveal in finder", "open excel", "open word", "open report", "open video", "open folder", "open ppt", "open pdf" → Activate FileGenie file-opening tools',
             '- **Document/video generation keywords**: "generate video", "animation", "animated", "video walkthrough", "multimedia", "create document", "generate presentation", "create slides", "generate report", "infographic", "poster", "html report", "generate markdown", "create pdf", "generate pptx", "generate docx", "storyboard" → Activate DocGenie document generation expertise',
@@ -1451,7 +1480,7 @@ class ChatSessionManager extends EventEmitter {
         let tempFiles = [];
         let imageSDKAttachments = [];
         if (attachments && attachments.length > 0) {
-            const { sdkAttachments, tempFiles: files, docTempFiles } = this._convertAttachmentsToTempFiles(attachments);
+            const { sdkAttachments, tempFiles: files, docTempFiles, videoTempFiles } = this._convertAttachmentsToTempFiles(attachments);
             tempFiles = files;
 
             // Collect image-only SDK attachments (documents are not passed as SDK file attachments)
@@ -1468,6 +1497,90 @@ class ChatSessionManager extends EventEmitter {
                 } catch (err) {
                     console.error('[ChatManager] \u274C Document text extraction failed:', err.message);
                     promptContent = `[Document upload failed: ${err.message}]\n\n${content}`;
+                }
+            }
+
+            // For video attachments, extract frames and build video context for vision analysis
+            if (videoTempFiles && videoTempFiles.length > 0) {
+                try {
+                    const { createVideoAnalyzer } = require('./video-analyzer');
+                    const analyzer = createVideoAnalyzer();
+
+                    for (const video of videoTempFiles) {
+                        let videoPath = video.path;
+
+                        // If it's an external link, download it first
+                        if (video.url && !videoPath) {
+                            videoPath = await analyzer.fetchExternalVideo(video.url, video.provider);
+                            if (!entry._videoTempFiles) entry._videoTempFiles = [];
+                            entry._videoTempFiles.push(videoPath);
+                        }
+
+                        if (!videoPath) continue;
+
+                        const result = await analyzer.buildVideoContext(videoPath);
+                        if (result && result.frames && result.frames.length > 0) {
+                            // Track video frames in session-lifetime array (NOT the 60s tempFiles timer).
+                            // BugGenie needs these files for attach_video_frames_to_jira which runs
+                            // minutes after extraction. They get cleaned in destroySession() instead.
+                            if (!entry._videoTempFiles) entry._videoTempFiles = [];
+                            for (const frame of result.frames) {
+                                entry._videoTempFiles.push(frame.path);
+                            }
+                            // Also track SDK low-res copies for cleanup
+                            if (result.sdkFrames) {
+                                for (const sf of result.sdkFrames) {
+                                    entry._videoTempFiles.push(sf.path);
+                                }
+                            }
+
+                            // Use low-res SDK copies for Copilot API attachments (avoids 413 payload errors).
+                            // High-res frames are stored in entry.videoContext for Jira uploads.
+                            const MAX_SDK_VIDEO_FRAMES = 10;
+                            const availableSdkFrames = (result.sdkFrames && result.sdkFrames.length > 0)
+                                ? result.sdkFrames : result.frames;
+                            let sdkFrames;
+                            if (availableSdkFrames.length <= MAX_SDK_VIDEO_FRAMES) {
+                                sdkFrames = availableSdkFrames;
+                            } else {
+                                // Hybrid select: first + last + evenly-spaced
+                                sdkFrames = [availableSdkFrames[0]];
+                                const innerCount = MAX_SDK_VIDEO_FRAMES - 2;
+                                const step = (availableSdkFrames.length - 2) / (innerCount + 1);
+                                for (let k = 1; k <= innerCount; k++) {
+                                    const idx = Math.min(Math.round(step * k), availableSdkFrames.length - 2);
+                                    if (idx > 0) sdkFrames.push(availableSdkFrames[idx]);
+                                }
+                                sdkFrames.push(availableSdkFrames[availableSdkFrames.length - 1]);
+                            }
+
+                            for (const frame of sdkFrames) {
+                                imageSDKAttachments.push({
+                                    type: 'file',
+                                    path: frame.path,
+                                    displayName: `video-frame-${frame.timestamp}s.jpg`,
+                                });
+                            }
+
+                            // Prepend video context to the prompt
+                            promptContent = result.contextPrompt + '\n\n' + (promptContent || 'Analyze this video recording and identify the bug.');
+                            console.log(`[ChatManager] \u{1F3AC} Extracted ${result.frames.length} frames from video (${result.metadata.duration}s), sending ${sdkFrames.length} to SDK`);
+
+                            // Store ALL video frames in session for BugGenie tools (analyze_video_recording)
+                            if (!entry.videoContext) entry.videoContext = [];
+                            entry.videoContext.push({
+                                videoPath,
+                                filename: video.filename,
+                                duration: result.metadata.duration,
+                                frameCount: result.frames.length,
+                                frames: result.frames.map(f => ({ path: f.path, timestamp: f.timestamp })),
+                                metadata: result.metadata,
+                            });
+                        }
+                    }
+                } catch (err) {
+                    console.error('[ChatManager] \u274C Video processing failed:', err.message);
+                    promptContent = `[Video processing failed: ${err.message}]\n\n${promptContent}`;
                 }
             }
         }
@@ -1627,6 +1740,19 @@ class ChatSessionManager extends EventEmitter {
         }
 
         this._sessions.delete(sessionId);
+
+        // Clean up video temp files (frames + downloaded videos) persisted for BugGenie
+        if (entry._videoTempFiles && entry._videoTempFiles.length > 0) {
+            for (const fp of entry._videoTempFiles) {
+                try {
+                    if (fs.existsSync(fp)) {
+                        fs.unlinkSync(fp);
+                        console.log(`[ChatManager] \u{1F5D1}\uFE0F  Cleaned video temp file: ${path.basename(fp)}`);
+                    }
+                } catch { /* non-critical */ }
+            }
+            console.log(`[ChatManager] Cleaned ${entry._videoTempFiles.length} video temp files on session destroy`);
+        }
 
         // Clean up stale temp image files (older than 5 minutes)
         try {

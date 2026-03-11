@@ -4,17 +4,21 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { PaperclipIcon } from '@/components/Icons';
 import ImagePreview from '@/components/ImagePreview';
 import FilePreview from '@/components/FilePreview';
-import { LIMITS, ALLOWED_IMAGE_TYPES, ALLOWED_DOC_TYPES, DOC_EXT_TO_MIME, FILE_ACCEPT_STRING } from '@/lib/constants';
+import { LIMITS, ALLOWED_IMAGE_TYPES, ALLOWED_DOC_TYPES, DOC_EXT_TO_MIME, ALLOWED_VIDEO_TYPES, ALLOWED_VIDEO_EXTENSIONS, VIDEO_EXT_TO_MIME, FILE_ACCEPT_STRING } from '@/lib/constants';
+import { API_CONFIG } from '@/lib/api-config';
 
 const MAX_IMAGES = LIMITS.MAX_IMAGES_PER_MESSAGE;
 const MAX_IMAGE_SIZE = LIMITS.MAX_IMAGE_SIZE_BYTES;
 const MAX_DOCS = LIMITS.MAX_DOCS_PER_MESSAGE;
 const MAX_DOC_SIZE = LIMITS.MAX_DOC_SIZE_BYTES;
+const MAX_VIDEOS = LIMITS.MAX_VIDEOS_PER_MESSAGE;
+const MAX_VIDEO_SIZE = LIMITS.MAX_VIDEO_SIZE_BYTES;
 
 export default function ChatInput({ onSend, onAbort, isProcessing, disabled, placeholder: customPlaceholder, prefillText, supportsImages = true }) {
     const [input, setInput] = useState('');
     const [attachments, setAttachments] = useState([]); // images: [{ id, name, type, size, dataUrl, base64, kind:'image' }]
     const [docAttachments, setDocAttachments] = useState([]); // [{ id, name, mimeType, size, base64, extension, kind:'document' }]
+    const [videoAttachments, setVideoAttachments] = useState([]); // [{ id, name, mimeType, size, tempPath, kind:'video' }]
     const [imageError, setImageError] = useState(null);
     const [isDragging, setIsDragging] = useState(false);
     const textareaRef = useRef(null);
@@ -113,6 +117,10 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
         setDocAttachments(prev => prev.filter((_, i) => i !== index));
     }, []);
 
+    const removeVideoAttachment = useCallback((index) => {
+        setVideoAttachments(prev => prev.filter((_, i) => i !== index));
+    }, []);
+
     /**
      * Resolve MIME type — browsers sometimes report empty or generic MIME for Office files.
      * Falls back to extension-based lookup.
@@ -120,7 +128,7 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
     const resolveMime = (file) => {
         if (file.type && file.type !== 'application/octet-stream') return file.type;
         const ext = '.' + (file.name || '').split('.').pop().toLowerCase();
-        return DOC_EXT_TO_MIME[ext] || file.type || 'application/octet-stream';
+        return DOC_EXT_TO_MIME[ext] || VIDEO_EXT_TO_MIME[ext] || file.type || 'application/octet-stream';
     };
 
     /**
@@ -174,23 +182,87 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
     }, [docAttachments.length, imageError]);
 
     /**
-     * Route a list of files into image or document processors based on MIME type.
+     * Upload a video file via streaming endpoint (never base64 — prevents OOM for large files).
+     */
+    const processVideoFiles = useCallback(async (files) => {
+        if (!supportsImages) {
+            setImageError('Selected model does not support video analysis. Switch to a vision-enabled model.');
+            return;
+        }
+        const remaining = MAX_VIDEOS - videoAttachments.length;
+        if (remaining <= 0) {
+            setImageError(`Maximum ${MAX_VIDEOS} videos allowed per message.`);
+            return;
+        }
+
+        const toProcess = Array.from(files).slice(0, remaining);
+
+        for (const file of toProcess) {
+            const mime = resolveMime(file);
+            if (!ALLOWED_VIDEO_TYPES.includes(mime)) continue;
+            if (file.size > MAX_VIDEO_SIZE) {
+                setImageError(`Video "${file.name}" exceeds ${MAX_VIDEO_SIZE / (1024 * 1024)} MB limit.`);
+                continue;
+            }
+
+            try {
+                const resp = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.chatUploadVideo}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': mime,
+                        'X-Filename': encodeURIComponent(file.name),
+                        'Content-Length': String(file.size),
+                    },
+                    body: file,
+                });
+
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({ error: 'Upload failed' }));
+                    setImageError(err.error || `Video upload failed (${resp.status})`);
+                    continue;
+                }
+
+                const { tempPath, filename, mediaType, size } = await resp.json();
+                setVideoAttachments(prev => {
+                    if (prev.length >= MAX_VIDEOS) return prev;
+                    return [...prev, {
+                        id: `vid_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                        name: filename,
+                        mimeType: mediaType,
+                        size,
+                        tempPath,
+                        extension: ALLOWED_VIDEO_EXTENSIONS[mediaType]?.ext || '.mp4',
+                        kind: 'video',
+                    }];
+                });
+            } catch {
+                setImageError(`Failed to upload video "${file.name}".`);
+            }
+        }
+    }, [videoAttachments.length, supportsImages]);
+
+    /**
+     * Route a list of files into image, document, or video processors based on MIME type.
      */
     const routeFiles = useCallback((files) => {
         const images = [];
         const docs = [];
+        const videos = [];
         for (const file of Array.from(files)) {
             const mime = resolveMime(file);
             if (ALLOWED_IMAGE_TYPES.includes(mime)) {
                 images.push(file);
             } else if (ALLOWED_DOC_TYPES[mime]) {
                 docs.push(file);
+            } else if (ALLOWED_VIDEO_TYPES.includes(mime)) {
+                videos.push(file);
             }
         }
         if (images.length > 0) processImageFiles(images);
         if (docs.length > 0) processDocumentFiles(docs);
-        return images.length + docs.length;
-    }, [processImageFiles, processDocumentFiles]);
+        if (videos.length > 0) processVideoFiles(videos);
+        return images.length + docs.length + videos.length;
+    }, [processImageFiles, processDocumentFiles, processVideoFiles]);
 
     // ── Paste handler: intercept Ctrl+V with files ──
     const handlePaste = useCallback((e) => {
@@ -245,7 +317,7 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
         if (files && files.length > 0) {
             const handled = routeFiles(files);
             if (handled === 0) {
-                setImageError('Unsupported file type. Supported: images, PDF, Word, Excel, PowerPoint, CSV, TXT, Markdown, JSON.');
+                setImageError('Unsupported file type. Supported: images, PDF, Word, Excel, PowerPoint, CSV, TXT, Markdown, JSON, MP4, WebM, MOV, AVI, MKV.');
             }
         }
     }, [routeFiles]);
@@ -262,12 +334,13 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        const hasContent = input.trim() || attachments.length > 0 || docAttachments.length > 0;
+        const hasContent = input.trim() || attachments.length > 0 || docAttachments.length > 0 || videoAttachments.length > 0;
         if (!hasContent || disabled || isProcessing) return;
-        onSend(input.trim(), attachments, docAttachments);
+        onSend(input.trim(), attachments, docAttachments, videoAttachments);
         setInput('');
         setAttachments([]);
         setDocAttachments([]);
+        setVideoAttachments([]);
         setImageError(null);
     };
 
@@ -278,8 +351,8 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
         }
     };
 
-    const canSend = (input.trim() || attachments.length > 0 || docAttachments.length > 0) && !disabled && !isProcessing;
-    const totalAttachments = attachments.length + docAttachments.length;
+    const canSend = (input.trim() || attachments.length > 0 || docAttachments.length > 0 || videoAttachments.length > 0) && !disabled && !isProcessing;
+    const totalAttachments = attachments.length + docAttachments.length + videoAttachments.length;
 
     return (
         <div className="border-t border-surface-200/60 bg-white/80 backdrop-blur-sm px-5 py-3">
@@ -323,6 +396,11 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
                             <FilePreview attachments={docAttachments} onRemove={removeDocAttachment} />
                         )}
 
+                        {/* Video previews (above the textarea) */}
+                        {videoAttachments.length > 0 && (
+                            <FilePreview attachments={videoAttachments} onRemove={removeVideoAttachment} />
+                        )}
+
                         {/* Image error toast */}
                         {imageError && (
                             <div className="px-3 py-1.5">
@@ -351,8 +429,7 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
                                         type="button"
                                         onClick={() => fileInputRef.current?.click()}
                                         disabled={disabled}
-                                        className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors ${
-                                            disabled
+                                        className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors ${disabled
                                                 ? 'text-surface-300 cursor-not-allowed'
                                                 : 'text-surface-400 hover:text-surface-600 hover:bg-surface-100'
                                             }`}

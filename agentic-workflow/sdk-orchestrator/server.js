@@ -29,6 +29,7 @@ const http = require('http');
 const fs = require('fs');
 const fsP = fs.promises;
 const path = require('path');
+const os = require('os');
 // NOTE: SDKOrchestrator is lazy-required inside startServer() to avoid
 // circular dependency with index.js which re-exports startServer.
 const { RunStore, RUN_STATUS } = require('./run-store');
@@ -59,6 +60,8 @@ class Router {
 
     get(pattern, handler) { this._routes.push({ method: 'GET', pattern, handler }); }
     post(pattern, handler) { this._routes.push({ method: 'POST', pattern, handler }); }
+    /** Register a POST route that receives the raw request stream (no JSON parsing). */
+    postRaw(pattern, handler) { this._routes.push({ method: 'POST', pattern, handler, rawBody: true }); }
     delete(pattern, handler) { this._routes.push({ method: 'DELETE', pattern, handler }); }
 
     /**
@@ -85,7 +88,7 @@ class Router {
                 }
             }
 
-            if (match) return { handler: route.handler, params };
+            if (match) return { handler: route.handler, params, rawBody: !!route.rawBody };
         }
         return null;
     }
@@ -144,7 +147,7 @@ class Router {
             ? origin : this._corsOrigins[0];
         res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Filename');
 
         // Preflight
         if (req.method === 'OPTIONS') {
@@ -162,6 +165,16 @@ class Router {
 
         try {
             const query = this._parseQuery(req.url);
+            req.params = route.params;
+            req.query = query;
+
+            // Raw-body routes receive the request stream directly (e.g. streaming file uploads)
+            if (route.rawBody) {
+                req.body = {};
+                await route.handler(req, res);
+                return;
+            }
+
             // Use higher body limit for chat message endpoint (supports base64 image + document attachments)
             // Supports up to 10 images × 5 MB + 5 docs × 50 MB × 1.37 base64 overhead
             const isMessageRoute = req.url.includes('/messages');
@@ -170,8 +183,6 @@ class Router {
                 ? await this._readBody(req, maxBodyBytes)
                 : {};
 
-            req.params = route.params;
-            req.query = query;
             req.body = body;
 
             await route.handler(req, res);
@@ -1253,6 +1264,136 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
     });
 
     // ═════════════════════════════════════════════════════════════════
+    // VIDEO UPLOAD (Streaming — prevents OOM for large recordings)
+    // ═════════════════════════════════════════════════════════════════
+
+    const VALID_VIDEO_MEDIA = [
+        'video/mp4', 'video/webm', 'video/quicktime',
+        'video/x-msvideo', 'video/x-matroska',
+    ];
+    const MAX_VIDEO_UPLOAD_BYTES = 200 * 1024 * 1024; // 200 MB
+    const VIDEO_UPLOAD_DIR = path.join(os.tmpdir(), 'qa-video-uploads');
+    const VIDEO_TEMP_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+    // Video magic bytes for validation
+    const VIDEO_MAGIC = {
+        'video/mp4': [Buffer.from('66747970', 'hex')],  // "ftyp" at offset 4
+        'video/quicktime': [Buffer.from('66747970', 'hex')],
+        'video/webm': [Buffer.from('1a45dfa3', 'hex')],  // EBML header
+        'video/x-matroska': [Buffer.from('1a45dfa3', 'hex')],
+        'video/x-msvideo': [Buffer.from('52494646', 'hex')],  // "RIFF"
+    };
+
+    /**
+     * POST /api/chat/upload-video
+     * Accepts raw binary video via streaming — never holds full file in memory.
+     * Headers required:
+     *   Content-Type: <video MIME type>
+     *   X-Filename: <original filename>
+     *   Content-Length: <file size in bytes>
+     * Returns: { tempPath, filename, mediaType, size }
+     */
+    router.postRaw('/api/chat/upload-video', async (req, res) => {
+        if (!chatManager) return json(res, 503, { error: 'Chat manager not ready' });
+
+        const mediaType = (req.headers['content-type'] || '').split(';')[0].trim();
+        const filename = req.headers['x-filename'] ? decodeURIComponent(req.headers['x-filename']) : undefined;
+        const contentLength = parseInt(req.headers['content-length'] || '0', 10);
+
+        // Validate MIME type
+        if (!VALID_VIDEO_MEDIA.includes(mediaType)) {
+            req.resume(); // drain the stream
+            return badRequest(res, `Unsupported video type: ${mediaType}. Allowed: ${VALID_VIDEO_MEDIA.join(', ')}`);
+        }
+
+        // Validate filename presence
+        if (!filename) {
+            req.resume();
+            return badRequest(res, 'X-Filename header is required');
+        }
+
+        // Validate Content-Length
+        if (contentLength > MAX_VIDEO_UPLOAD_BYTES) {
+            req.resume();
+            return json(res, 413, { error: `Video exceeds ${MAX_VIDEO_UPLOAD_BYTES / (1024 * 1024)} MB limit` });
+        }
+
+        // Sanitize filename — strip path traversal characters
+        const safeName = path.basename(String(filename).replace(/[\\/]/g, '').replace(/\.\./g, ''));
+
+        try {
+            await fsP.mkdir(VIDEO_UPLOAD_DIR, { recursive: true });
+
+            const tempName = `vid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeName}`;
+            const tempPath = path.join(VIDEO_UPLOAD_DIR, tempName);
+
+            // Stream request body directly to disk — never buffer in memory
+            await new Promise((resolve, reject) => {
+                const ws = fs.createWriteStream(tempPath);
+                let written = 0;
+
+                req.on('data', (chunk) => {
+                    written += chunk.length;
+                    if (written > MAX_VIDEO_UPLOAD_BYTES) {
+                        req.destroy();
+                        ws.destroy();
+                        fsP.unlink(tempPath).catch(() => { });
+                        reject(new Error(`Upload exceeds ${MAX_VIDEO_UPLOAD_BYTES / (1024 * 1024)} MB limit`));
+                        return;
+                    }
+                    if (!ws.write(chunk)) {
+                        req.pause();
+                        ws.once('drain', () => req.resume());
+                    }
+                });
+
+                req.on('end', () => ws.end(resolve));
+                req.on('error', (err) => { ws.destroy(); reject(err); });
+                ws.on('error', (err) => { req.destroy(); reject(err); });
+            });
+
+            // Validate magic bytes
+            const fd = await fsP.open(tempPath, 'r');
+            const headerBuf = Buffer.alloc(12);
+            await fd.read(headerBuf, 0, 12, 0);
+            await fd.close();
+
+            const magicPatterns = VIDEO_MAGIC[mediaType] || [];
+            const isValid = magicPatterns.some(magic => {
+                // MP4/MOV: "ftyp" at offset 4
+                if (mediaType === 'video/mp4' || mediaType === 'video/quicktime') {
+                    return headerBuf.subarray(4, 8).equals(magic);
+                }
+                return headerBuf.subarray(0, magic.length).equals(magic);
+            });
+
+            if (!isValid) {
+                await fsP.unlink(tempPath).catch(() => { });
+                return badRequest(res, 'File content does not match declared video type');
+            }
+
+            const stat = await fsP.stat(tempPath);
+
+            // Schedule cleanup — delete after TTL if not claimed
+            setTimeout(async () => {
+                try { await fsP.unlink(tempPath); } catch { /* already cleaned */ }
+            }, VIDEO_TEMP_TTL_MS);
+
+            ok(res, {
+                tempPath,
+                filename: safeName,
+                mediaType,
+                size: stat.size,
+            });
+        } catch (error) {
+            if (error.message.includes('limit')) {
+                return json(res, 413, { error: error.message });
+            }
+            json(res, 500, { error: `Video upload failed: ${error.message}` });
+        }
+    });
+
+    // ═════════════════════════════════════════════════════════════════
     // CHAT SESSIONS (AI Assistant)
     // ═════════════════════════════════════════════════════════════════
 
@@ -1289,11 +1430,14 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
      * Returns: { messageId }
      *
      * Attachments are optional base64-encoded images or documents:
-     *   Images:    [{ type: 'image',    media_type: 'image/png', data: '<base64>' }]
-     *   Documents: [{ type: 'document', media_type: 'application/pdf', data: '<base64>', filename: 'report.pdf' }]
+     *   Images:      [{ type: 'image',      media_type: 'image/png', data: '<base64>' }]
+     *   Documents:   [{ type: 'document',   media_type: 'application/pdf', data: '<base64>', filename: 'report.pdf' }]
+     *   Videos:      [{ type: 'video',      media_type: 'video/mp4', tempPath: '/tmp/...', filename: 'bug.mp4' }]
+     *   Video links: [{ type: 'video_link', url: 'https://...', provider: 'loom' }]
      */
     const MAX_IMAGES_PER_MESSAGE = 10;
     const MAX_DOCS_PER_MESSAGE = 5;
+    const MAX_VIDEOS_PER_MESSAGE = 2;
     const VALID_IMAGE_MEDIA = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
     const VALID_DOC_MEDIA = [
         'application/pdf',
@@ -1317,12 +1461,38 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         if (attachments && Array.isArray(attachments)) {
             let imageCount = 0;
             let docCount = 0;
+            let videoCount = 0;
             for (const att of attachments) {
-                if (!att.type || !['image', 'document'].includes(att.type)) {
-                    return badRequest(res, 'Attachment type must be "image" or "document"');
+                if (!att.type || !['image', 'document', 'video', 'video_link'].includes(att.type)) {
+                    return badRequest(res, 'Attachment type must be "image", "document", "video", or "video_link"');
                 }
-                if (!att.data || typeof att.data !== 'string') {
-                    return badRequest(res, 'Attachment data must be a base64 string');
+
+                if (att.type === 'video') {
+                    videoCount++;
+                    if (!att.tempPath || typeof att.tempPath !== 'string') {
+                        return badRequest(res, 'Video attachment requires tempPath from upload endpoint');
+                    }
+                    if (!VALID_VIDEO_MEDIA.includes(att.media_type)) {
+                        return badRequest(res, `Unsupported video type: ${att.media_type}`);
+                    }
+                    // Validate tempPath is within the expected upload directory
+                    const resolved = path.resolve(att.tempPath);
+                    if (!resolved.startsWith(path.resolve(VIDEO_UPLOAD_DIR))) {
+                        return badRequest(res, 'Invalid video tempPath');
+                    }
+                    // Sanitize filename
+                    if (att.filename) {
+                        att.filename = String(att.filename).replace(/[\\/]/g, '').replace(/\.\./g, '');
+                    }
+                } else if (att.type === 'video_link') {
+                    videoCount++;
+                    if (!att.url || typeof att.url !== 'string') {
+                        return badRequest(res, 'Video link attachment requires url');
+                    }
+                } else if (att.type === 'image' || att.type === 'document') {
+                    if (!att.data || typeof att.data !== 'string') {
+                        return badRequest(res, 'Attachment data must be a base64 string');
+                    }
                 }
 
                 if (att.type === 'image') {
@@ -1354,6 +1524,9 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
             }
             if (docCount > MAX_DOCS_PER_MESSAGE) {
                 return badRequest(res, `Maximum ${MAX_DOCS_PER_MESSAGE} document attachments per message`);
+            }
+            if (videoCount > MAX_VIDEOS_PER_MESSAGE) {
+                return badRequest(res, `Maximum ${MAX_VIDEOS_PER_MESSAGE} video attachments per message`);
             }
         }
 

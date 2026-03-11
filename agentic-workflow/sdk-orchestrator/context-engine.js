@@ -99,7 +99,7 @@ const DEFAULT_CONFIG = {
     agentContextFilters: {
         testgenie: ['ticketContext', 'groundingContext', 'kbContext', 'sharedContext'],
         scriptgenerator: ['ticketContext', 'groundingContext', 'frameworkInventory', 'historicalFailures', 'assertionConfig', 'sharedContext'],
-        buggenie: ['ticketContext', 'groundingContext', 'sharedContext'],
+        buggenie: ['ticketContext', 'groundingContext', 'videoContext', 'sharedContext'],
         codereviewer: ['frameworkInventory', 'groundingContext', 'assertionConfig'],
         taskgenie: ['ticketContext', 'sharedContext'],
     },
