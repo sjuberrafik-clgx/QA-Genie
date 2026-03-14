@@ -74,7 +74,8 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
         let rejected = 0;
 
         toProcess.forEach((file) => {
-            if (!ALLOWED_TYPES.includes(file.type)) {
+            const mime = resolveMime(file);
+            if (!ALLOWED_IMAGE_TYPES.includes(mime)) {
                 rejected++;
                 return;
             }
@@ -94,7 +95,7 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
                     return [...prev, {
                         id: `img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
                         name: file.name || 'pasted-image.png',
-                        type: file.type,
+                        type: mime,
                         size: file.size,
                         dataUrl,
                         base64,
@@ -430,8 +431,8 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
                                         onClick={() => fileInputRef.current?.click()}
                                         disabled={disabled}
                                         className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors ${disabled
-                                                ? 'text-surface-300 cursor-not-allowed'
-                                                : 'text-surface-400 hover:text-surface-600 hover:bg-surface-100'
+                                            ? 'text-surface-300 cursor-not-allowed'
+                                            : 'text-surface-400 hover:text-surface-600 hover:bg-surface-100'
                                             }`}
                                         title="Attach file"
                                     >

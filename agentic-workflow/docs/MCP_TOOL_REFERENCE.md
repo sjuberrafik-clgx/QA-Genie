@@ -15,6 +15,7 @@ This document provides a comprehensive reference for all MCP (Model Context Prot
 |----------|-----------|-------------|
 | **Navigation** | `unified_navigate` | Navigate to a URL |
 | | `unified_navigate_back` | Go back in history |
+| | `unified_create_tab` | Create a tab with optional URL and activation |
 | | `unified_tabs` | List/create/close/select tabs |
 | **Snapshots** | `unified_snapshot` | Get accessibility tree with refs (PREFERRED) |
 | **Interactions** | `unified_click` | Click element by ref/description |
@@ -64,7 +65,12 @@ The unified MCP server automatically routes calls to the appropriate backend:
 - ✅ Clicking, typing, or hovering → `unified_click`, `unified_type`, `unified_hover`
 - ✅ Filling forms → `unified_fill_form`
 - ✅ Managing browser tabs → `unified_tabs`
+- ✅ Opening a new working tab directly → `unified_create_tab`
 - ✅ Basic wait operations → `unified_wait_for`
+
+### Stable Tab IDs
+- `unified_tabs({ action: 'list' })` now returns `tabId` for each tab.
+- `unified_tabs({ action: 'select', tabId })` and `unified_tabs({ action: 'close', tabId })` are supported alongside legacy `index` targeting.
 
 ### Performance & Network Analysis:
 - ✅ Executing complex JavaScript → `unified_evaluate_cdp`

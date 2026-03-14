@@ -7,7 +7,7 @@ import { MODEL_GROUPS, getModelLabel } from '@/lib/model-options';
  * Custom AI Model dropdown — always opens downward, supports search & grouped options.
  * Replaces native <select> to fix browser-controlled upward opening.
  */
-export default function ModelSelect({ value, onChange, className = '' }) {
+export default function ModelSelect({ value, onChange, className = '', groups = MODEL_GROUPS, loading = false, disabled = false }) {
     const [open, setOpen] = useState(false);
     const [search, setSearch] = useState('');
     const containerRef = useRef(null);
@@ -48,10 +48,10 @@ export default function ModelSelect({ value, onChange, className = '' }) {
 
     // Filtered models based on search
     const filteredGroups = useMemo(() => {
-        if (!search.trim()) return MODEL_GROUPS;
+        if (!search.trim()) return groups;
 
         const q = search.toLowerCase();
-        return MODEL_GROUPS
+        return groups
             .map(group => ({
                 ...group,
                 models: group.models.filter(
@@ -59,26 +59,32 @@ export default function ModelSelect({ value, onChange, className = '' }) {
                 ),
             }))
             .filter(group => group.models.length > 0);
-    }, [search]);
+    }, [groups, search]);
 
-    const handleSelect = (val) => {
+    const handleSelect = (model) => {
+        if (model.available === false) return;
+
+        const val = model.value;
         onChange(val);
         setOpen(false);
         setSearch('');
     };
 
-    const selectedLabel = getModelLabel(value);
+    const selectedLabel = value
+        ? getModelLabel(value, groups)
+        : (loading ? 'Loading models...' : 'Select a model');
 
     return (
         <div ref={containerRef} className={`relative ${className}`}>
             {/* Trigger button — matches custom-select styling */}
             <button
                 type="button"
-                onClick={() => setOpen(!open)}
+                onClick={() => !disabled && setOpen(!open)}
+                disabled={disabled}
                 className={`w-full bg-white border rounded-xl px-4 py-2.5 pr-10 text-sm font-medium text-surface-800 cursor-pointer text-left transition-all duration-150 ${open
-                        ? 'border-brand-400 ring-2 ring-brand-500/20'
-                        : 'border-surface-200 hover:border-brand-300 hover:bg-brand-50/30'
-                    }`}
+                    ? 'border-brand-400 ring-2 ring-brand-500/20'
+                    : 'border-surface-200 hover:border-brand-300 hover:bg-brand-50/30'
+                    } ${disabled ? 'opacity-60 cursor-not-allowed' : ''}`}
             >
                 <span className="truncate block">{selectedLabel}</span>
                 {/* Chevron */}
@@ -133,13 +139,17 @@ export default function ModelSelect({ value, onChange, className = '' }) {
                                     </div>
                                     {group.models.map((model) => {
                                         const isSelected = model.value === value;
+                                        const isUnavailable = model.available === false;
                                         return (
                                             <button
                                                 key={model.value}
                                                 type="button"
-                                                onClick={() => handleSelect(model.value)}
+                                                onClick={() => handleSelect(model)}
+                                                disabled={isUnavailable}
                                                 className={`w-full text-left px-4 py-2 text-sm transition-colors flex items-center gap-2 ${isSelected
-                                                        ? 'bg-brand-50 text-brand-700 font-semibold'
+                                                    ? 'bg-brand-50 text-brand-700 font-semibold'
+                                                    : isUnavailable
+                                                        ? 'text-surface-400 bg-surface-50 cursor-not-allowed'
                                                         : 'text-surface-700 hover:bg-surface-100'
                                                     }`}
                                             >
@@ -148,7 +158,12 @@ export default function ModelSelect({ value, onChange, className = '' }) {
                                                         <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
                                                     </svg>
                                                 )}
-                                                <span className={isSelected ? '' : 'pl-5.5'}>{model.label}</span>
+                                                <span className={`flex-1 ${isSelected ? '' : 'pl-5.5'}`}>{model.label}</span>
+                                                {isUnavailable && (
+                                                    <span className="text-[10px] uppercase tracking-wide text-surface-400">
+                                                        Unavailable
+                                                    </span>
+                                                )}
                                             </button>
                                         );
                                     })}

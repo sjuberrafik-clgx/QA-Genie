@@ -492,6 +492,22 @@ class ExplorationQualityAnalyzer {
     // ─── OBSERVE: Parse snapshot content ────────────────────────────
 
     _observe(snapshotResult) {
+        let payload = null;
+        if (snapshotResult && typeof snapshotResult === 'object') {
+            payload = snapshotResult;
+        } else if (typeof snapshotResult === 'string') {
+            const trimmed = snapshotResult.trim();
+            if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+                try {
+                    payload = JSON.parse(trimmed);
+                } catch {
+                    payload = null;
+                }
+            }
+        }
+
+        const blocker = payload?.blockerState?.blocker || null;
+        const blockerClassification = blocker?.classification || null;
         const text = typeof snapshotResult === 'string'
             ? snapshotResult
             : JSON.stringify(snapshotResult || '');
@@ -547,6 +563,15 @@ class ExplorationQualityAnalyzer {
             popupTerms: popupMatches.length,
             dynamicIdCount: dynamicIdMatches.length,
             interactiveElements: interactiveMatches.length,
+            blocker: {
+                present: payload?.blockerState?.present === true && !!blocker,
+                kind: blocker?.kind || null,
+                category: blockerClassification?.category || null,
+                severity: blockerClassification?.severity || null,
+                autoRecoverable: blockerClassification?.autoRecoverable === true,
+                focusTrap: blocker?.focusTrap === true,
+                targetOccluded: Boolean(blocker?.occlusion?.pointsBlocked),
+            },
         };
     }
 
@@ -586,9 +611,27 @@ class ExplorationQualityAnalyzer {
         }
 
         // 5. Popup dominance penalty
-        if (metrics.popupDominance > 50) {
+        if (metrics.blocker.present) {
+            if (metrics.blocker.autoRecoverable) {
+                score -= 15;
+                warnings.push(`Recoverable blocker detected (${metrics.blocker.category || metrics.blocker.kind}) — run blocker recovery before trusting this snapshot`);
+            } else {
+                score -= 35;
+                warnings.push(`Non-recoverable blocker detected (${metrics.blocker.category || metrics.blocker.kind}) — exploration is blocked until it is resolved`);
+            }
+        } else if (metrics.popupDominance > 50) {
             score -= 25;
             warnings.push(`Popup/overlay dominates snapshot (${metrics.popupDominance}% of elements) — dismiss popups first`);
+        }
+
+        if (metrics.blocker.targetOccluded) {
+            score -= 10;
+            warnings.push('Target occlusion detected — an overlay is intercepting the intended page content');
+        }
+
+        if (metrics.blocker.focusTrap) {
+            score -= 10;
+            warnings.push('Focus trap detected inside blocker — underlying page may not be interactable');
         }
 
         // 6. Dynamic ID concern (informational, moderate penalty)
@@ -649,7 +692,13 @@ class ExplorationQualityAnalyzer {
             steps.push('Wait for page to fully load using waitForLoadState("networkidle") or wait_for_element');
         }
 
-        if (metrics.popupDominance > 50) {
+        if (metrics.blocker.present) {
+            if (metrics.blocker.autoRecoverable) {
+                steps.push('Trigger blocker recovery in the MCP layer, then re-snapshot the page once the blocker clears');
+            } else {
+                steps.push('Resolve the blocker manually or via environment/auth fix before re-snapshotting');
+            }
+        } else if (metrics.popupDominance > 50) {
             steps.push('Dismiss popups using PopupHandler.dismissAll() before re-snapshotting');
         }
 

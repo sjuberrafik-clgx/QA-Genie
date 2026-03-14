@@ -1,9 +1,10 @@
 'use client';
 
 import { Component } from 'react';
+import { usePathname } from 'next/navigation';
 import { WarningTriangleIcon } from '@/components/Icons';
 
-export default class ErrorBoundary extends Component {
+class RouteAwareErrorBoundary extends Component {
     constructor(props) {
         super(props);
         this.state = { hasError: false, error: null };
@@ -15,6 +16,12 @@ export default class ErrorBoundary extends Component {
 
     componentDidCatch(error, info) {
         console.error('[ErrorBoundary]', error, info?.componentStack);
+    }
+
+    componentDidUpdate(prevProps) {
+        if (this.state.hasError && prevProps.resetKey !== this.props.resetKey) {
+            this.setState({ hasError: false, error: null });
+        }
     }
 
     render() {
@@ -42,4 +49,14 @@ export default class ErrorBoundary extends Component {
 
         return this.props.children;
     }
+}
+
+export default function ErrorBoundary({ children }) {
+    const pathname = usePathname();
+
+    return (
+        <RouteAwareErrorBoundary resetKey={pathname}>
+            {children}
+        </RouteAwareErrorBoundary>
+    );
 }

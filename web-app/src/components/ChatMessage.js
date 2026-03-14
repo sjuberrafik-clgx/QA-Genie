@@ -20,6 +20,8 @@ function ChatMessage({ message, isStreaming = false }) {
     const isUser = role === 'user';
     const [copied, setCopied] = useState(false);
     const [expandedImage, setExpandedImage] = useState(null);
+    const imageAttachments = Array.isArray(attachments) ? attachments.filter(att => att.kind !== 'document' && att.kind !== 'video') : [];
+    const documentAttachments = Array.isArray(attachments) ? attachments.filter(att => att.kind === 'document') : [];
 
     if (!isUser && !isStreaming && (!content || !content.trim()) && (!attachments || attachments.length === 0)) {
         return null;
@@ -69,9 +71,9 @@ function ChatMessage({ message, isStreaming = false }) {
                     : 'bg-white/95 backdrop-blur-sm border border-surface-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.04),0_1px_2px_rgba(0,0,0,0.02)] rounded-tl-sm'
                     }`}>
                     {/* User image attachments */}
-                    {isUser && attachments && attachments.length > 0 && (
+                    {isUser && imageAttachments.length > 0 && (
                         <div className="flex flex-wrap gap-2 mb-2">
-                            {attachments.filter(att => att.kind !== 'document').map((att, idx) => (
+                            {imageAttachments.map((att, idx) => (
                                 <button
                                     key={att.id || idx}
                                     type="button"
@@ -88,9 +90,9 @@ function ChatMessage({ message, isStreaming = false }) {
                         </div>
                     )}
                     {/* User document attachments */}
-                    {isUser && attachments && attachments.some(a => a.kind === 'document') && (
+                    {isUser && documentAttachments.length > 0 && (
                         <div className="flex flex-wrap gap-1.5 mb-2">
-                            {attachments.filter(att => att.kind === 'document').map((att, idx) => (
+                            {documentAttachments.map((att, idx) => (
                                 <FileAttachmentCard key={att.id || `doc-${idx}`} attachment={att} isUser />
                             ))}
                         </div>
@@ -145,6 +147,25 @@ function ChatMessage({ message, isStreaming = false }) {
                                     },
                                 }}
                             >{content || ''}</ReactMarkdown>
+                        </div>
+                    )}
+
+                    {!isUser && imageAttachments.length > 0 && (
+                        <div className="flex flex-wrap gap-2 mt-3">
+                            {imageAttachments.map((att, idx) => (
+                                <button
+                                    key={att.id || idx}
+                                    type="button"
+                                    onClick={() => setExpandedImage(att.dataUrl)}
+                                    className="block rounded-lg overflow-hidden border border-surface-200 hover:ring-2 hover:ring-brand-400/50 transition-all cursor-pointer"
+                                >
+                                    <img
+                                        src={att.dataUrl}
+                                        alt={att.alt || att.name || `Image ${idx + 1}`}
+                                        className="max-w-[240px] max-h-[180px] object-cover"
+                                    />
+                                </button>
+                            ))}
                         </div>
                     )}
                 </div>

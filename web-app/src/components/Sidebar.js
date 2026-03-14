@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import apiClient from '@/lib/api-client';
 import { NAV_ITEMS, isNavActive } from '@/lib/navigation';
-import LottieLogo from '@/components/LottieLogo';
+import RobotMascotLogo from '@/components/RobotMascotLogo';
 
 function ConnectionIndicator() {
     const [status, setStatus] = useState('checking'); // 'online' | 'offline' | 'checking'
@@ -43,18 +43,25 @@ export default function Sidebar() {
         <aside className="fixed left-0 top-0 h-full w-[260px] glass-sidebar flex flex-col z-40">
             {/* Logo */}
             <div className="px-5 py-5 border-b border-surface-200">
-                <div className="flex items-center gap-3">
-                    <LottieLogo size={56} className="rounded-xl" />
-                    <div>
-                        <h1 className="text-[15px] font-bold tracking-tight leading-tight text-surface-800">QA Automation</h1>
-                        <p className="text-[10px] font-medium mt-0.5 text-surface-400">AI-Powered Testing Platform</p>
+                <Link href="/" className="block rounded-[22px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/40">
+                    <div className="rounded-[22px] border border-surface-200/80 bg-white/80 px-3.5 py-3 shadow-[0_12px_30px_rgba(15,23,42,0.06)] backdrop-blur-sm transition-transform duration-200 hover:-translate-y-0.5 hover:shadow-[0_16px_34px_rgba(124,58,237,0.12)]">
+                        <div className="flex items-center gap-3.5">
+                            <div className="relative shrink-0 rounded-[20px] bg-[radial-gradient(circle_at_30%_20%,rgba(180,92,255,0.24),transparent_42%),radial-gradient(circle_at_70%_70%,rgba(31,158,171,0.18),transparent_46%),linear-gradient(180deg,rgba(15,23,42,0.05),rgba(15,23,42,0.02))] p-1.5">
+                                <RobotMascotLogo size={68} emphasis="hero" mood="minimal" />
+                            </div>
+                            <div className="min-w-0">
+                                <p className="type-kicker text-brand-500/80">Cognitive QA</p>
+                                <h1 className="mt-1 font-display text-[16px] font-bold leading-tight tracking-[-0.04em] text-surface-800">QA Automation</h1>
+                                <p className="mt-1 text-[10.5px] font-medium leading-relaxed tracking-[-0.01em] text-surface-400">Home for agent workflows, reports, and the unified control surface.</p>
+                            </div>
+                        </div>
                     </div>
-                </div>
+                </Link>
             </div>
 
             {/* Navigation */}
             <nav className="flex-1 px-3 py-4 space-y-0.5">
-                <p className="px-3 mb-2 text-[9px] font-bold text-surface-400 uppercase tracking-[0.15em]">Navigation</p>
+                <p className="type-nav-section px-3 mb-2">Navigation</p>
                 {NAV_ITEMS.map(({ to, label, Icon }) => {
                     const active = isNavActive(to, pathname);
                     return (
@@ -70,7 +77,7 @@ export default function Sidebar() {
                                 }`}>
                                 <Icon className="w-[18px] h-[18px]" strokeWidth={1.8} />
                             </span>
-                            <span className="font-medium">{label}</span>
+                            <span className="type-nav-item">{label}</span>
                             {active && (
                                 <span className="ml-auto w-1.5 h-1.5 rounded-full bg-brand-500" />
                             )}
@@ -83,7 +90,7 @@ export default function Sidebar() {
             <div className="px-4 py-4 border-t border-surface-200">
                 <ConnectionIndicator />
                 <div className="mt-2.5 flex items-center justify-between">
-                    <span className="text-[10px] text-surface-300 font-medium">v2.0</span>
+                    <span className="type-meta-label text-surface-300">v2.0</span>
                 </div>
             </div>
         </aside>

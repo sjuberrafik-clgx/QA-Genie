@@ -24,6 +24,7 @@ const { AgentSessionFactory } = require('./agent-sessions');
 const { PipelineRunner } = require('./pipeline-runner');
 const { LearningStore } = require('./learning-store');
 const { SelfHealingEngine } = require('./self-healing');
+const { buildModelCatalog } = require('./model-catalog');
 
 // ─── Configuration Loader ───────────────────────────────────────────────────
 
@@ -91,6 +92,9 @@ class SDKOrchestrator {
         this.selfHealing = null;
         this.pipelineRunner = null;
         this.isRunning = false;
+        this._modelCatalogCache = null;
+        this._modelCatalogCacheMs = 60 * 1000;
+        this._modelCatalogFallbackCacheMs = 5 * 1000;
 
         // Event listeners
         this._listeners = {};
@@ -246,7 +250,56 @@ class SDKOrchestrator {
         }
 
         this.isRunning = false;
+        this._modelCatalogCache = null;
         this._log('info', 'SDK Orchestrator stopped');
+    }
+
+    async getModelCatalog(options = {}) {
+        const now = Date.now();
+        const refresh = options.refresh === true;
+
+        if (!refresh && this._modelCatalogCache) {
+            const cacheTtl = this._modelCatalogCache.catalog?.source === 'sdk-discovered'
+                ? this._modelCatalogCacheMs
+                : this._modelCatalogFallbackCacheMs;
+
+            if ((now - this._modelCatalogCache.cachedAt) < cacheTtl) {
+                return this._modelCatalogCache.catalog;
+            }
+        }
+
+        const warnings = [];
+        let rawModels = [];
+
+        if (!this.client || typeof this.client.listModels !== 'function') {
+            warnings.push('Copilot SDK model discovery is not available in this runtime.');
+        } else {
+            try {
+                rawModels = await this.client.listModels();
+            } catch (error) {
+                warnings.push(`Copilot SDK model discovery failed: ${error.message}`);
+            }
+        }
+
+        const catalog = buildModelCatalog(rawModels, {
+            warnings,
+            configuredDefaultModel: this.options.model,
+            defaultModelSource: this._getDefaultModelSource(),
+            lastUpdated: new Date().toISOString(),
+        });
+
+        this._modelCatalogCache = {
+            cachedAt: now,
+            catalog,
+        };
+
+        return catalog;
+    }
+
+    async isModelSupported(model) {
+        if (!model) return true;
+        const catalog = await this.getModelCatalog();
+        return (catalog.availableModels || catalog.models || []).some(entry => entry.value === model);
     }
 
     // ─── Pipeline Execution ─────────────────────────────────────────────
@@ -267,6 +320,11 @@ class SDKOrchestrator {
 
         const mode = options.mode || 'full';
         const model = options.model || null;
+
+        if (model && !(await this.isModelSupported(model))) {
+            throw new Error(`Unsupported model: ${model}`);
+        }
+
         this._log('info', `\nRunning pipeline for ${ticketId} [mode: ${mode}]${model ? ` [model: ${model}]` : ''}`);
 
         // Override session factory model for this run if specified
@@ -392,6 +450,15 @@ class SDKOrchestrator {
         if (level === 'error') console.error(`${prefix} ❌ ${message}`);
         else if (level === 'warn') console.warn(`${prefix} ⚠️ ${message}`);
         else if (this.options.verbose || level === 'info') console.log(`${prefix} ${message}`);
+    }
+
+    _getDefaultModelSource() {
+        if (this.options.model && this.options.model !== (process.env.COPILOT_MODEL || null) && this.options.model !== (this.sdkConfig.model || null)) {
+            return 'startup-option';
+        }
+        if (this.sdkConfig.model) return 'workflow-config';
+        if (process.env.COPILOT_MODEL) return 'env';
+        return 'fallback';
     }
 }
 

@@ -2,6 +2,7 @@
 
 import { memo } from 'react';
 import { ClockIcon } from '@/components/Icons';
+import RobotMascotLogo from '@/components/RobotMascotLogo';
 
 const MODE_LABELS = {
     full: 'Full Pipeline',
@@ -42,18 +43,21 @@ function PipelineCard({ run, onForceCancel }) {
     return (
         <div className={`glass-card border-l-4 ${accentMap[status] || accentMap.pending} hover-lift flex items-center justify-between py-3 px-4`}>
             <div className="flex items-center gap-3 min-w-0">
-                <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wide ${badgeMap[status] || badgeMap.pending}`}>
+                <div className="hidden sm:flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-surface-100 bg-[linear-gradient(180deg,rgba(255,255,255,0.95),rgba(248,250,252,0.92))] shadow-sm">
+                    <RobotMascotLogo size={24} mood="minimal" />
+                </div>
+                <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-[0.14em] ${badgeMap[status] || badgeMap.pending}`}>
                     {status === 'running' && (
                         <span className="inline-block w-1.5 h-1.5 bg-brand-500 rounded-full mr-1 align-middle" />
                     )}
                     {status}
                 </span>
                 <div className="min-w-0">
-                    <span className="text-sm font-semibold text-surface-900">{ticketId}</span>
-                    <span className="text-[10px] text-surface-500 ml-2 uppercase tracking-wider">{MODE_LABELS[mode] || mode}</span>
+                    <span className="font-display text-[15px] font-bold tracking-[-0.03em] text-surface-900">{ticketId}</span>
+                    <span className="ml-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-surface-500">{MODE_LABELS[mode] || mode}</span>
                 </div>
             </div>
-            <div className="flex items-center gap-4 text-xs text-surface-500 flex-shrink-0">
+            <div className="flex items-center gap-4 text-xs font-medium tracking-[-0.01em] text-surface-500 flex-shrink-0">
                 {formattedDuration && (
                     <span className="flex items-center gap-1">
                         <ClockIcon className="w-3 h-3" />
@@ -61,7 +65,7 @@ function PipelineCard({ run, onForceCancel }) {
                     </span>
                 )}
                 <span className="hidden md:inline">{formattedTime}</span>
-                <span className="font-mono text-[10px] text-surface-400">{runId?.substring(0, 8)}</span>
+                <span className="font-mono text-[10px] font-semibold text-surface-400">{runId?.substring(0, 8)}</span>
                 {status === 'running' && onForceCancel && (
                     <button
                         onClick={(e) => {

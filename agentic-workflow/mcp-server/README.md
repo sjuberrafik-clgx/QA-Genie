@@ -149,6 +149,7 @@ Add to your VS Code settings (`.vscode/mcp.json` or user settings):
 
 | Tool | Description | Source |
 |------|-------------|--------|
+| `unified_create_tab` | Create a tab with optional URL/activation | Playwright |
 | `unified_tabs` | Manage browser tabs | Playwright |
 | `unified_handle_dialog` | Handle dialogs | Playwright |
 | `unified_browser_close` | Close browser | Playwright |
@@ -200,6 +201,12 @@ Agent uses:
 1. unified_network_requests_cdp (filter: "/api/")
 2. unified_get_network_request (reqid: "req-123") - for details
 ```
+
+### Stable Tab Management
+
+`unified_tabs` continues to support index-based `select` and `close`, and now also accepts stable `tabId` values returned from `list` and `create` operations.
+
+Use `unified_create_tab` when you only need to open a new tab. It accepts optional `url` and `activate` arguments and returns the created tab metadata.
 
 ## 🏗️ Architecture
 

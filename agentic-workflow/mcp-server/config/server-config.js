@@ -33,6 +33,15 @@ const DEFAULT_CONFIG = {
         timeout: 60000,
         toolCallTimeout: 120000, // Per-tool-call timeout (ms) — prevents indefinite hangs
         waitForNetworkIdle: true,
+        autoDismissKnownPopups: true,
+        autoDismissDiscoveredBlockers: true,
+        blockerRegistryEnabled: true,
+        blockerRecovery: {
+            postActionObservationMs: 750,
+            pollIntervalMs: 50,
+            allowEscapeKey: true,
+            allowBackdropClick: false,
+        },
         capabilities: ['vision', 'pdf', 'testing'],
     },
 

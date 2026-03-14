@@ -1,27 +1,53 @@
 import './globals.css';
+import { Suspense } from 'react';
+import { Plus_Jakarta_Sans, Space_Grotesk } from 'next/font/google';
 import Sidebar from '@/components/Sidebar';
 import AppShell from '@/components/AppShell';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import RouteLoadingBar from '@/components/RouteLoadingBar';
 
+const bodyFont = Plus_Jakarta_Sans({
+    subsets: ['latin'],
+    display: 'swap',
+    variable: '--font-plus-jakarta',
+    weight: ['400', '500', '600', '700', '800'],
+});
+
+const displayFont = Space_Grotesk({
+    subsets: ['latin'],
+    display: 'swap',
+    variable: '--font-space-grotesk',
+    weight: ['500', '600', '700'],
+});
+
 export const metadata = {
     title: 'QA Automation Dashboard',
     description: 'AI-powered QA automation platform — Powered by Doremon Team',
+    manifest: '/manifest.webmanifest',
+    icons: {
+        icon: '/icon.svg',
+        shortcut: '/icon.svg',
+        apple: '/icon.svg',
+        other: [
+            {
+                rel: 'mask-icon',
+                url: '/icon.svg',
+                color: '#7c3aed',
+            },
+        ],
+    },
 };
 
 export default function RootLayout({ children }) {
     return (
-        <html lang="en">
-            <head>
-                <link rel="preconnect" href="https://fonts.googleapis.com" />
-                <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-                <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
-            </head>
+        <html lang="en" className={`${bodyFont.variable} ${displayFont.variable}`}>
             <body className="min-h-screen bg-surface-50">
                 <div className="flex min-h-screen">
                     <Sidebar />
                     <div className="flex-1 ml-[260px] min-h-screen overflow-x-hidden">
-                        <RouteLoadingBar />
+                        <Suspense fallback={null}>
+                            <RouteLoadingBar />
+                        </Suspense>
                         <ErrorBoundary>
                             <AppShell>
                                 {children}

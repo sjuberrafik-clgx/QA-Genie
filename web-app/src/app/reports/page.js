@@ -89,11 +89,11 @@ export default function ReportsPage() {
 
     return (
         <div id="report-container" className="rpt-page-bg min-h-screen">
-            <div className="p-6 max-w-[960px] mx-auto space-y-5">
+            <div className="mx-auto max-w-6xl space-y-6 px-6 py-6">
                 {/* ─── Header ─── */}
                 <PageHeader
                     title="Test Reports"
-                    subtitle={`${reportCount} execution ${reportCount === 1 ? 'report' : 'reports'}`}
+                    subtitle={`${reportCount} ${reportCount === 1 ? 'report' : 'reports'} in the reporting workspace, with live summaries and consolidated run detail.`}
                     Icon={BarChartIcon}
                     actions={
                         <>
@@ -101,8 +101,7 @@ export default function ReportsPage() {
                             <select
                                 value={timeFilter}
                                 onChange={(e) => { setTimeFilter(e.target.value); setRefreshKey(k => k + 1); }}
-                                className="px-3 py-2 text-xs font-semibold bg-white/20 text-white rounded-xl border-none outline-none cursor-pointer appearance-none hover:bg-white/30 transition-colors"
-                                style={{ backgroundImage: 'none' }}
+                                className="page-header-button page-header-select cursor-pointer rounded-xl px-3 py-2 text-[11px] font-semibold outline-none"
                                 aria-label="Filter reports by time range"
                             >
                                 {TIME_FILTERS.map(f => (

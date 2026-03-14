@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { sortSpecs } from './SortDropdown';
 import { countAllSpecs } from '@/lib/report-utils';
 import { ChevronRightIcon, FolderIcon } from '@/components/Icons';
+import RobotMascotLogo from '@/components/RobotMascotLogo';
 
 /**
  * TestResultTree — Allure-style collapsible suite → spec tree with status icons,
@@ -175,7 +176,7 @@ function SuiteNode({ suite, depth = 0, sortMode = 'order-earliest' }) {
                     strokeWidth={2}
                 />
                 <FolderIcon className="w-4 h-4 text-brand-400" />
-                <span className="text-xs font-semibold rpt-text-primary flex-1">
+                <span className="font-display text-[13px] font-bold tracking-[-0.02em] rpt-text-primary flex-1">
                     {suite.title || 'Root Suite'}
                 </span>
                 {/* Allure-style count badge */}
@@ -202,6 +203,9 @@ export default function TestResultTree({ report, sortMode = 'order-earliest' }) 
     if (!report || !report.suites || report.suites.length === 0) {
         return (
             <div className="text-center py-8 text-sm rpt-text-muted">
+                <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-[20px] border border-surface-100 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.92))] shadow-sm">
+                    <RobotMascotLogo size={34} mood="minimal" />
+                </div>
                 No test suite data available for this report.
             </div>
         );
@@ -212,7 +216,7 @@ export default function TestResultTree({ report, sortMode = 'order-earliest' }) 
             {/* Global errors */}
             {report.errors && report.errors.length > 0 && (
                 <div className="mb-3 rounded-lg border border-red-200 bg-red-50/80 p-3">
-                    <p className="text-[10px] font-bold text-red-800 uppercase tracking-wider mb-1">Global Errors</p>
+                    <p className="type-meta-label mb-1 text-red-800">Global Errors</p>
                     {report.errors.map((err, i) => (
                         <pre key={i} className="text-[11px] text-red-700 whitespace-pre-wrap break-words font-mono">
                             {err.message || JSON.stringify(err)}

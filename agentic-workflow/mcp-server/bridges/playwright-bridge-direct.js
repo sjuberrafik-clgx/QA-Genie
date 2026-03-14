@@ -14,9 +14,13 @@
 
 import { chromium, firefox, webkit } from 'playwright';
 import { EventEmitter } from 'events';
+import { createRequire } from 'module';
 import { applyEnhancedMethods } from './enhanced-playwright-methods.js';
 import { applyAdvancedMethods } from './advanced-playwright-methods.js';
 import { SelectorEngine } from '../utils/selector-engine.js';
+import { BlockerRegistry } from '../utils/blocker-registry.js';
+
+const require = createRequire(import.meta.url);
 
 /**
  * Direct Playwright Bridge - Uses Playwright library directly
@@ -31,7 +35,17 @@ export class PlaywrightDirectBridge extends EventEmitter {
             browser: config.browser ?? process.env.MCP_BROWSER ?? 'chromium',
             viewport: config.viewport ?? { width: 1280, height: 720 },
             timeout: config.timeout ?? (parseInt(process.env.MCP_TIMEOUT) || 30000),
+            autoDismissKnownPopups: config.autoDismissKnownPopups ?? true,
+            autoDismissDiscoveredBlockers: config.autoDismissDiscoveredBlockers ?? true,
+            blockerRegistryEnabled: config.blockerRegistryEnabled ?? true,
+            blockerRegistryPath: config.blockerRegistryPath,
             ...config,
+            blockerRecovery: {
+                postActionObservationMs: config.blockerRecovery?.postActionObservationMs ?? 750,
+                pollIntervalMs: config.blockerRecovery?.pollIntervalMs ?? 50,
+                allowEscapeKey: config.blockerRecovery?.allowEscapeKey ?? true,
+                allowBackdropClick: config.blockerRecovery?.allowBackdropClick ?? false,
+            },
         };
 
         this.browser = null;
@@ -43,17 +57,27 @@ export class PlaywrightDirectBridge extends EventEmitter {
         // Storage for multi-page and download handling
         this._lastNewPage = null;
         this._lastDownload = null;
+        this._trackedPages = new WeakSet();
+        this._tabIds = new WeakMap();
+        this._nextTabId = 1;
 
         // Event capture storage (ring buffers with configurable max size)
         this._consoleMessages = [];
         this._networkRequests = new Map();
         this._pageErrors = [];
         this._dialogs = [];
+        this._activeDialog = null;
+        this._pendingDialogHandler = null;
         this._maxConsoleMessages = config.maxConsoleMessages ?? 1000;
         this._maxNetworkRequests = config.maxNetworkRequests ?? 500;
         this._maxPageErrors = config.maxPageErrors ?? 100;
         this._captureConsole = config.captureConsole ?? true;
         this._captureNetwork = config.captureNetwork ?? true;
+        this._popupHandlerClass = undefined;
+        this._blockerRegistry = new BlockerRegistry({
+            enabled: this.config.blockerRegistryEnabled,
+            registryPath: this.config.blockerRegistryPath,
+        });
 
         // Apply enhanced methods from Playwright cheatsheet
         applyEnhancedMethods(this);
@@ -121,6 +145,10 @@ export class PlaywrightDirectBridge extends EventEmitter {
      */
     _attachEventListeners(page) {
         if (!page) return;
+        if (this._trackedPages.has(page)) return;
+
+        this._trackedPages.add(page);
+        this._ensureTabId(page);
 
         // ── Console Messages ──
         if (this._captureConsole) {
@@ -207,16 +235,77 @@ export class PlaywrightDirectBridge extends EventEmitter {
         }
 
         // ── Dialogs (alert, confirm, prompt, beforeunload) ──
-        page.on('dialog', (dialog) => {
+        page.on('dialog', async (dialog) => {
             const entry = {
+                id: `dialog-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                kind: 'native-dialog',
                 type: dialog.type(),
                 message: dialog.message(),
                 defaultValue: dialog.defaultValue(),
                 timestamp: Date.now(),
+                handled: false,
+                blocking: true,
+                dialogHandle: dialog,
             };
             this._dialogs.push(entry);
+            this._activeDialog = entry;
             this.emit('dialog', entry);
+
+            const pendingHandler = this._pendingDialogHandler;
+            if (pendingHandler) {
+                this._pendingDialogHandler = null;
+                try {
+                    await this._resolveDialog(entry, pendingHandler);
+                } catch (error) {
+                    entry.error = error.message;
+                }
+            }
         });
+
+        page.on('close', () => {
+            // WeakMap entries are GC-managed; refresh active page if needed.
+            if (page === this.page) {
+                const remainingPages = this.context?.pages?.() || [];
+                this.page = remainingPages[0] || null;
+            }
+        });
+    }
+
+    _ensureTabId(page) {
+        if (!page) return null;
+
+        let tabId = this._tabIds.get(page);
+        if (!tabId) {
+            tabId = `tab-${this._nextTabId++}`;
+            this._tabIds.set(page, tabId);
+        }
+
+        return tabId;
+    }
+
+    _getTabDescriptors() {
+        const pages = this.context?.pages?.() || [];
+        return pages.map((page, index) => ({
+            page,
+            index,
+            tabId: this._ensureTabId(page),
+            url: typeof page.url === 'function' ? page.url() : '',
+            active: page === this.page,
+        }));
+    }
+
+    _resolveTabTarget({ index, tabId } = {}) {
+        const tabs = this._getTabDescriptors();
+
+        if (tabId) {
+            return tabs.find((tab) => tab.tabId === tabId) || null;
+        }
+
+        if (index !== undefined) {
+            return tabs.find((tab) => tab.index === index) || null;
+        }
+
+        return null;
     }
 
     /**
@@ -243,6 +332,791 @@ export class PlaywrightDirectBridge extends EventEmitter {
         }
     }
 
+    _serializeBlocker(entry) {
+        if (!entry) return null;
+
+        const classification = entry.classification || this._classifyBlocker(entry);
+
+        return {
+            id: entry.id || null,
+            kind: entry.kind || 'unknown',
+            type: entry.type || null,
+            message: entry.message || null,
+            blocking: entry.blocking !== false,
+            selectorHint: entry.selectorHint || null,
+            role: entry.role || null,
+            ariaLabel: entry.ariaLabel || null,
+            text: entry.text || null,
+            dismissControls: entry.dismissControls || [],
+            bounds: entry.bounds || null,
+            zIndex: entry.zIndex || null,
+            timestamp: entry.timestamp || null,
+            handled: entry.handled === true,
+            handledAt: entry.handledAt || null,
+            action: entry.action || null,
+            classification,
+            focusTrap: entry.focusTrap === true,
+            bodyOverflowLocked: entry.bodyOverflowLocked === true,
+            occlusion: entry.occlusion || null,
+        };
+    }
+
+    _buildBlockedResult(action, blocker, extra = {}) {
+        const serialized = this._serializeBlocker(blocker);
+        const recommendedAction = serialized?.kind === 'native-dialog'
+            ? 'handle_dialog'
+            : serialized?.classification?.recommendedAction || 'dismiss_modal_or_retry';
+        const blockerLabel = serialized?.kind === 'native-dialog'
+            ? `native dialog${serialized?.message ? `: ${serialized.message}` : ''}`
+            : serialized?.kind === 'dom-modal'
+                ? `blocking modal${serialized?.text ? `: ${serialized.text}` : ''}`
+                : 'runtime blocker';
+
+        return {
+            success: false,
+            error: `Blocked by ${blockerLabel}`,
+            errorCode: 'RUNTIME_BLOCKER',
+            blocker: serialized,
+            recovery: {
+                recommendedAction,
+                retryable: serialized?.classification?.retryable !== false,
+            },
+            ...extra,
+        };
+    }
+
+    _normalizeText(value) {
+        return (value || '').replace(/\s+/g, ' ').trim();
+    }
+
+    _classifyBlocker(blocker) {
+        if (!blocker) {
+            return {
+                category: 'unknown',
+                severity: 'medium',
+                confidence: 0,
+                autoRecoverable: false,
+                retryable: true,
+                recommendedAction: 'inspect_blocker',
+                reasons: ['missing-blocker'],
+            };
+        }
+
+        if (blocker.kind === 'native-dialog') {
+            return {
+                category: 'browser-dialog',
+                severity: 'high',
+                confidence: 1,
+                autoRecoverable: false,
+                retryable: true,
+                recommendedAction: 'handle_dialog',
+                reasons: ['native-dialog'],
+            };
+        }
+
+        const textParts = [
+            blocker.text,
+            blocker.message,
+            blocker.ariaLabel,
+            blocker.role,
+            ...(blocker.dismissControls || []).flatMap((control) => [control.text, control.ariaLabel]),
+        ].filter(Boolean);
+        const normalized = this._normalizeText(textParts.join(' ')).toLowerCase();
+        const dismissLabels = (blocker.dismissControls || [])
+            .map((control) => this._normalizeText(`${control.text || ''} ${control.ariaLabel || ''}`).toLowerCase())
+            .filter(Boolean);
+
+        const hasKeyword = (patterns) => patterns.some((pattern) => pattern.test(normalized));
+        const hasDismissKeyword = (patterns) => dismissLabels.some((label) => patterns.some((pattern) => pattern.test(label)));
+
+        if (hasKeyword([/session expired/, /sign in/, /log ?in/, /authenticate/, /re-auth/, /password/, /access denied/])) {
+            return {
+                category: 'auth-required',
+                severity: 'high',
+                confidence: 0.92,
+                autoRecoverable: false,
+                retryable: false,
+                recommendedAction: 'refresh_auth',
+                reasons: ['auth-keywords'],
+            };
+        }
+
+        if (hasKeyword([/error/, /failed/, /unavailable/, /exception/, /try again later/, /problem occurred/])) {
+            return {
+                category: 'app-error',
+                severity: 'high',
+                confidence: 0.9,
+                autoRecoverable: false,
+                retryable: false,
+                recommendedAction: 'inspect_application_error',
+                reasons: ['error-keywords'],
+            };
+        }
+
+        if (hasKeyword([/terms/, /privacy/, /consent/, /permission/, /allow access/, /location access/, /cookies?/])) {
+            return {
+                category: 'consent-required',
+                severity: 'high',
+                confidence: 0.88,
+                autoRecoverable: false,
+                retryable: false,
+                recommendedAction: 'review_consent_prompt',
+                reasons: ['consent-keywords'],
+            };
+        }
+
+        if (hasKeyword([/loading/, /please wait/, /fetching/, /initializing/, /spinner/, /processing/])) {
+            return {
+                category: 'loading-interstitial',
+                severity: 'medium',
+                confidence: 0.82,
+                autoRecoverable: true,
+                retryable: true,
+                recommendedAction: 'wait_for_overlay_to_clear',
+                reasons: ['loading-keywords'],
+            };
+        }
+
+        if (blocker.kind === 'dom-occlusion' || blocker.occlusion?.pointsBlocked > 0 || blocker.focusTrap === true) {
+            return {
+                category: 'occluding-overlay',
+                severity: 'medium',
+                confidence: 0.72,
+                autoRecoverable: (blocker.dismissControls || []).length > 0,
+                retryable: true,
+                recommendedAction: (blocker.dismissControls || []).length > 0 ? 'auto_dismiss_blocker' : 'inspect_blocker',
+                reasons: ['target-occlusion-or-focus-trap'],
+            };
+        }
+
+        if (hasKeyword([/tour/, /welcome/, /getting started/, /onboarding/, /tips?/, /hot sheet/, /news/, /alerts?/]) || hasDismissKeyword([/close/, /dismiss/, /skip/, /not now/, /got it/, /continue/, /ok\b/, /i('| a)m ready/, /i('| a)ve read this/, /read later/, /understood/])) {
+            return {
+                category: 'informational-modal',
+                severity: 'low',
+                confidence: 0.8,
+                autoRecoverable: true,
+                retryable: true,
+                recommendedAction: 'auto_dismiss_blocker',
+                reasons: ['informational-keywords-or-safe-dismiss'],
+            };
+        }
+
+        return {
+            category: 'unknown-modal',
+            severity: 'medium',
+            confidence: 0.4,
+            autoRecoverable: false,
+            retryable: true,
+            recommendedAction: 'inspect_blocker',
+            reasons: ['fallback-unknown'],
+        };
+    }
+
+    _isSafeDismissControl(control, classification) {
+        if (!control) return false;
+        if (!classification?.autoRecoverable) return false;
+
+        const label = this._normalizeText(`${control.text || ''} ${control.ariaLabel || ''}`).toLowerCase();
+        if (!label) {
+            return /close|dismiss|dialog-close|modal-close/i.test(control.selectorHint || '');
+        }
+
+        if (/(accept|allow|agree|consent|enable|turn on|yes|submit|confirm|log ?in|sign in)/i.test(label)) {
+            return false;
+        }
+
+        return /(close|dismiss|skip|not now|later|got it|continue|ok\b|cancel|understood|i('| a)ve read this|read later)/i.test(label);
+    }
+
+    _rankDismissControls(blocker, classification) {
+        const scoreControl = (control) => {
+            const label = this._normalizeText(`${control.text || ''} ${control.ariaLabel || ''}`).toLowerCase();
+            let score = 0;
+            if (/(i('| a)ve read this|dismiss|close)/i.test(label)) score += 50;
+            if (/(skip|not now|later|got it|understood)/i.test(label)) score += 40;
+            if (/(continue|ok\b|cancel)/i.test(label)) score += 25;
+            if (control.selectorHint && /(data-testid|data-test-id|aria-label|button:has-text|text=)/i.test(control.selectorHint)) score += 10;
+            if (!this._isSafeDismissControl(control, classification)) score -= 100;
+            return score;
+        };
+
+        return [...(blocker.dismissControls || [])]
+            .map((control) => ({ control, score: scoreControl(control) }))
+            .filter((entry) => entry.score > 0)
+            .sort((left, right) => right.score - left.score)
+            .map((entry) => entry.control);
+    }
+
+    _recordResolvedBlocker(blocker, classification, strategy, control = null) {
+        try {
+            this._blockerRegistry?.recordResolution({
+                blocker,
+                classification,
+                strategy,
+                control,
+                source: 'playwright-bridge',
+            });
+        } catch (error) {
+            console.error(`[PlaywrightDirect] Failed to persist blocker resolution: ${error.message}`);
+        }
+    }
+
+    async _dismissUsingRegistry(blocker, classification) {
+        const registryMatch = this._blockerRegistry?.findResolution(blocker, classification);
+        if (!registryMatch?.preferredStrategy) {
+            return { success: false, skipped: true, reason: 'no blocker registry match' };
+        }
+
+        const preferred = registryMatch.preferredStrategy;
+
+        if (preferred.name === 'escape-key') {
+            const escapeResult = await this._dismissWithEscape(blocker, classification);
+            if (escapeResult.success) {
+                this._recordResolvedBlocker(blocker, classification, 'escape-key');
+            }
+            return {
+                ...escapeResult,
+                strategy: 'registry-escape-key',
+                registryMatch,
+            };
+        }
+
+        if (preferred.controlSelectorHint && typeof this.page?.click === 'function') {
+            try {
+                await this.page.click(preferred.controlSelectorHint);
+                const resolution = await this._waitForBlockerResolution(blocker.id);
+                if (resolution.success) {
+                    this._recordResolvedBlocker(blocker, classification, 'registry-control', {
+                        selectorHint: preferred.controlSelectorHint,
+                        text: preferred.controlText,
+                    });
+                }
+                return {
+                    success: resolution.success,
+                    dismissed: resolution.success,
+                    strategy: 'registry-control',
+                    registryMatch,
+                    remainingBlocker: resolution.remainingBlocker || null,
+                };
+            } catch (error) {
+                return {
+                    success: false,
+                    dismissed: false,
+                    strategy: 'registry-control',
+                    registryMatch,
+                    error: error.message,
+                };
+            }
+        }
+
+        return { success: false, skipped: true, reason: 'unsupported registry strategy', registryMatch };
+    }
+
+    async _waitForBlockerResolution(previousBlockerId, timeoutMs = 400) {
+        const pollIntervalMs = this.config.blockerRecovery?.pollIntervalMs || 50;
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() <= deadline) {
+            const blockerState = await this.getBlockingState();
+            if (!blockerState.present) {
+                return { success: true, remainingBlocker: null };
+            }
+
+            if (previousBlockerId && blockerState.blocker?.id && blockerState.blocker.id !== previousBlockerId) {
+                return { success: false, remainingBlocker: blockerState.blocker, replaced: true };
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+        }
+
+        const remaining = await this.getBlockingState();
+        return {
+            success: !remaining.present,
+            remainingBlocker: remaining.blocker || null,
+        };
+    }
+
+    async _dismissViaDiscoveredControls(blocker, classification) {
+        if (!this.config.autoDismissDiscoveredBlockers) {
+            return { success: false, skipped: true, reason: 'autoDismissDiscoveredBlockers disabled' };
+        }
+
+        const controls = this._rankDismissControls(blocker, classification);
+        if (controls.length === 0) {
+            return { success: false, skipped: true, reason: 'no safe discovered dismiss controls' };
+        }
+
+        for (const control of controls) {
+            if (!control.selectorHint || typeof this.page?.click !== 'function') {
+                continue;
+            }
+
+            try {
+                await this.page.click(control.selectorHint);
+                const resolution = await this._waitForBlockerResolution(blocker.id);
+                if (resolution.success) {
+                    this._recordResolvedBlocker(blocker, classification, 'discovered-control', control);
+                    return {
+                        success: true,
+                        dismissed: true,
+                        strategy: 'discovered-control',
+                        control,
+                    };
+                }
+            } catch (error) {
+                return {
+                    success: false,
+                    dismissed: false,
+                    strategy: 'discovered-control',
+                    control,
+                    error: error.message,
+                };
+            }
+        }
+
+        return {
+            success: false,
+            dismissed: false,
+            strategy: 'discovered-control',
+            reason: 'controls did not clear blocker',
+        };
+    }
+
+    async _dismissWithEscape(blocker, classification) {
+        if (!classification?.autoRecoverable || !this.config.blockerRecovery?.allowEscapeKey) {
+            return { success: false, skipped: true, reason: 'escape disabled or blocker not auto-recoverable' };
+        }
+
+        if (typeof this.page?.keyboard?.press !== 'function') {
+            return { success: false, skipped: true, reason: 'keyboard press unavailable' };
+        }
+
+        try {
+            await this.page.keyboard.press('Escape');
+            const resolution = await this._waitForBlockerResolution(blocker.id);
+            if (resolution.success) {
+                this._recordResolvedBlocker(blocker, classification, 'escape-key');
+            }
+            return {
+                success: resolution.success,
+                dismissed: resolution.success,
+                strategy: 'escape-key',
+                remainingBlocker: resolution.remainingBlocker || null,
+            };
+        } catch (error) {
+            return {
+                success: false,
+                dismissed: false,
+                strategy: 'escape-key',
+                error: error.message,
+            };
+        }
+    }
+
+    async _attemptBlockerRecovery(action, target, blocker, options = {}) {
+        const serialized = this._serializeBlocker(blocker);
+        const classification = serialized?.classification || this._classifyBlocker(blocker);
+        const attempts = [];
+
+        if (!serialized?.kind?.startsWith('dom-') || options.tryAutoDismiss === false) {
+            return {
+                recovered: false,
+                classification,
+                attempts,
+            };
+        }
+
+        const knownDismissal = await this.dismissKnownPopups();
+        attempts.push({ strategy: 'known-popup-handler', ...knownDismissal });
+        let blockerState = await this.getBlockingState(options);
+        if (!blockerState.present) {
+            this._recordResolvedBlocker(blocker, classification, 'known-popup-handler');
+            return {
+                recovered: true,
+                classification,
+                attempts,
+            };
+        }
+
+        const registryDismissal = await this._dismissUsingRegistry(blockerState.blocker, classification);
+        attempts.push(registryDismissal);
+        blockerState = await this.getBlockingState(options);
+        if (!blockerState.present) {
+            return {
+                recovered: true,
+                classification,
+                attempts,
+            };
+        }
+
+        const discoveredDismissal = await this._dismissViaDiscoveredControls(blockerState.blocker, classification);
+        attempts.push(discoveredDismissal);
+        blockerState = await this.getBlockingState(options);
+        if (!blockerState.present) {
+            return {
+                recovered: true,
+                classification,
+                attempts,
+            };
+        }
+
+        const escapeDismissal = await this._dismissWithEscape(blockerState.blocker, classification);
+        attempts.push(escapeDismissal);
+        blockerState = await this.getBlockingState(options);
+        return {
+            recovered: !blockerState.present,
+            classification,
+            attempts,
+            remainingBlocker: blockerState.blocker || null,
+            action,
+            target,
+        };
+    }
+
+    async recoverCurrentBlocker(options = {}) {
+        const blockerState = options.existingBlocker
+            ? { present: true, blocker: options.existingBlocker }
+            : await this.getBlockingState(options);
+
+        if (!blockerState?.present || !blockerState.blocker) {
+            return {
+                recovered: false,
+                skipped: true,
+                reason: 'no active blocker',
+            };
+        }
+
+        return this._attemptBlockerRecovery(
+            options.action || 'recover_current_blocker',
+            options.target || options.targetSelector || null,
+            blockerState.blocker,
+            options,
+        );
+    }
+
+    async _detectDomModalBlocker(options = {}) {
+        if (!this.page || this.page.isClosed()) {
+            return null;
+        }
+
+        try {
+            return await this.page.evaluate(({ targetSelector }) => {
+                const normalizeText = (value) => (value || '').replace(/\s+/g, ' ').trim();
+                const escapeText = (value) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                const safeQuerySelector = (selector) => {
+                    if (!selector || typeof selector !== 'string') return null;
+                    if (/^text=|^xpath=|>>|:has-text\(/i.test(selector)) return null;
+                    try {
+                        return document.querySelector(selector);
+                    } catch {
+                        return null;
+                    }
+                };
+                const toStableId = (value) => normalizeText(value).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'blocker';
+                const toSelectorHint = (element) => {
+                    if (!element) return null;
+                    if (element.id) return `#${element.id}`;
+                    const testId = element.getAttribute('data-testid') || element.getAttribute('data-test-id') || element.getAttribute('data-qa');
+                    if (testId) return `[data-testid="${testId}"]`;
+                    const ariaLabel = element.getAttribute('aria-label');
+                    if (ariaLabel) return `[aria-label="${ariaLabel}"]`;
+                    const text = normalizeText(element.textContent).slice(0, 80);
+                    if (text && (element.tagName?.toLowerCase() === 'button' || element.getAttribute('role') === 'button')) {
+                        return `button:has-text("${escapeText(text)}")`;
+                    }
+                    if (element.getAttribute('role')) return `[role="${element.getAttribute('role')}"]`;
+                    if (element.classList?.length) return `${element.tagName.toLowerCase()}.${Array.from(element.classList).slice(0, 2).join('.')}`;
+                    return element.tagName.toLowerCase();
+                };
+                const findBlockingRoot = (element, targetElement) => {
+                    let current = element;
+                    while (current && current !== document.body) {
+                        if (targetElement && (current === targetElement || current.contains(targetElement))) {
+                            return null;
+                        }
+                        const style = window.getComputedStyle(current);
+                        const rect = current.getBoundingClientRect();
+                        const zIndex = Number.parseInt(style.zIndex || '0', 10) || 0;
+                        const area = rect.width * rect.height;
+                        const flagged = current.matches?.('dialog,[role="dialog"],[aria-modal="true"],[class*="modal"],[class*="overlay"],[class*="popup"],[class*="alert"],[class*="notice"]');
+                        const positioned = ['fixed', 'sticky', 'absolute'].includes(style.position);
+                        if ((flagged || positioned || zIndex >= 5) && area > 0 && style.pointerEvents !== 'none') {
+                            return current;
+                        }
+                        current = current.parentElement;
+                    }
+                    return null;
+                };
+
+                const isVisible = (element) => {
+                    if (!element) return false;
+                    const style = window.getComputedStyle(element);
+                    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+                    const rect = element.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                };
+
+                const viewportArea = Math.max(window.innerWidth * window.innerHeight, 1);
+                const candidates = new Set();
+                document.querySelectorAll('dialog,[role="dialog"],[aria-modal="true"],[class*="modal"],[class*="dialog"],[class*="overlay"],[class*="popup"],[class*="alert"],[class*="notice"],[class*="toast"],[id*="modal" i],[id*="popup" i],[id*="dialog" i]').forEach((element) => candidates.add(element));
+                Array.from(document.body?.children || []).forEach((element) => {
+                    const style = window.getComputedStyle(element);
+                    const rect = element.getBoundingClientRect();
+                    const coverage = (rect.width * rect.height) / viewportArea;
+                    const zIndex = Number.parseInt(style.zIndex || '0', 10) || 0;
+                    const isOverlayPosition = style.position === 'fixed' || style.position === 'sticky' || style.position === 'absolute';
+                    const interceptsPointerEvents = style.pointerEvents !== 'none';
+                    if (isOverlayPosition && interceptsPointerEvents && coverage > 0.15 && zIndex >= 5) {
+                        candidates.add(element);
+                    }
+                });
+
+                const targetElement = safeQuerySelector(targetSelector);
+                if (targetElement && isVisible(targetElement)) {
+                    const rect = targetElement.getBoundingClientRect();
+                    const points = [
+                        { x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2) },
+                        { x: rect.left + Math.min(Math.max(rect.width - 2, 0), 6), y: rect.top + Math.min(Math.max(rect.height - 2, 0), 6) },
+                        { x: rect.right - Math.min(Math.max(rect.width - 2, 0), 6), y: rect.bottom - Math.min(Math.max(rect.height - 2, 0), 6) },
+                    ].filter((point) => point.x >= 0 && point.y >= 0 && point.x <= window.innerWidth && point.y <= window.innerHeight);
+
+                    let blockedPoints = 0;
+                    let blockingRoot = null;
+                    for (const point of points) {
+                        const hit = document.elementFromPoint(point.x, point.y);
+                        if (!hit || hit === targetElement || targetElement.contains(hit)) {
+                            continue;
+                        }
+                        const root = findBlockingRoot(hit, targetElement);
+                        if (root) {
+                            blockedPoints += 1;
+                            blockingRoot = root;
+                        }
+                    }
+
+                    if (blockingRoot && blockedPoints > 0) {
+                        blockingRoot.__mcpOcclusion = {
+                            targetSelector,
+                            pointsBlocked: blockedPoints,
+                            hitSelector: toSelectorHint(blockingRoot),
+                        };
+                        candidates.add(blockingRoot);
+                    }
+                }
+
+                const ranked = Array.from(candidates)
+                    .filter(isVisible)
+                    .map((element) => {
+                        const rect = element.getBoundingClientRect();
+                        const style = window.getComputedStyle(element);
+                        const coverage = (rect.width * rect.height) / viewportArea;
+                        const zIndex = Number.parseInt(style.zIndex || '0', 10) || 0;
+                        const focusableCount = element.querySelectorAll('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])').length;
+                        const activeElement = document.activeElement;
+                        const focusTrap = !!activeElement && element.contains(activeElement) && focusableCount >= 2;
+                        const bodyOverflowLocked = ['hidden', 'clip'].includes(window.getComputedStyle(document.body).overflow) ||
+                            ['hidden', 'clip'].includes(window.getComputedStyle(document.documentElement).overflow);
+                        const occlusion = element.__mcpOcclusion || null;
+                        const dismissControls = Array.from(element.querySelectorAll('button,[role="button"],[aria-label*="close" i],[aria-label*="ok" i],[aria-label*="dismiss" i],[aria-label*="skip" i],[aria-label*="continue" i]'))
+                            .slice(0, 5)
+                            .map((control) => ({
+                                text: normalizeText(control.textContent).slice(0, 80),
+                                ariaLabel: control.getAttribute('aria-label') || null,
+                                selectorHint: toSelectorHint(control),
+                            }));
+
+                        const isDialogLike = element.matches?.('dialog,[role="dialog"],[aria-modal="true"],[class*="modal"],[class*="dialog"],[class*="popup"],[class*="alert"],[class*="notice"]');
+                        const kind = occlusion?.pointsBlocked > 0
+                            ? 'dom-occlusion'
+                            : isDialogLike
+                                ? 'dom-modal'
+                                : 'dom-overlay';
+                        const stableId = `${kind}-${toStableId(`${toSelectorHint(element) || ''}-${element.getAttribute('role') || ''}-${element.getAttribute('aria-label') || ''}-${normalizeText(element.textContent).slice(0, 80)}`)}`;
+
+                        return {
+                            score: (coverage * 1000) + zIndex + (occlusion?.pointsBlocked ? 2000 : 0) + (focusTrap ? 120 : 0) + (bodyOverflowLocked ? 40 : 0),
+                            blocker: {
+                                id: stableId,
+                                kind,
+                                blocking: true,
+                                role: element.getAttribute('role') || null,
+                                ariaLabel: element.getAttribute('aria-label') || null,
+                                selectorHint: toSelectorHint(element),
+                                text: normalizeText(element.textContent).slice(0, 200),
+                                zIndex,
+                                bounds: {
+                                    x: rect.x,
+                                    y: rect.y,
+                                    width: rect.width,
+                                    height: rect.height,
+                                },
+                                dismissControls,
+                                focusTrap,
+                                bodyOverflowLocked,
+                                occlusion,
+                                timestamp: Date.now(),
+                            },
+                        };
+                    })
+                    .sort((left, right) => right.score - left.score);
+
+                return ranked[0]?.blocker || null;
+            }, { targetSelector: options.targetSelector || null });
+        } catch (error) {
+            console.error(`[PlaywrightDirect] DOM blocker detection failed: ${error.message}`);
+            return null;
+        }
+    }
+
+    async _resolveDialog(entry, handler) {
+        const dialog = entry?.dialogHandle;
+        if (!dialog) {
+            throw new Error('No active dialog available to resolve');
+        }
+
+        if (handler.accept) {
+            await dialog.accept(handler.promptText || '');
+        } else {
+            await dialog.dismiss();
+        }
+
+        entry.handled = true;
+        entry.handledAt = Date.now();
+        entry.action = handler.accept ? 'accepted' : 'dismissed';
+        entry.promptText = handler.promptText || null;
+        entry.dialogHandle = null;
+
+        if (this._activeDialog?.id === entry.id) {
+            this._activeDialog = null;
+        }
+
+        this.emit('dialog-handled', this._serializeBlocker(entry));
+
+        return {
+            success: true,
+            action: entry.action,
+            blocker: this._serializeBlocker(entry),
+        };
+    }
+
+    async getBlockingState(options = {}) {
+        const includeDom = options.includeDom !== false;
+
+        const activeDialog = this._activeDialog && this._activeDialog.handled !== true
+            ? this._serializeBlocker(this._activeDialog)
+            : null;
+
+        if (activeDialog) {
+            return {
+                present: true,
+                blocker: activeDialog,
+                blockers: [activeDialog],
+            };
+        }
+
+        const domModal = includeDom ? await this._detectDomModalBlocker(options) : null;
+        const serializedDomModal = domModal ? this._serializeBlocker(domModal) : null;
+        return {
+            present: !!serializedDomModal,
+            blocker: serializedDomModal,
+            blockers: serializedDomModal ? [serializedDomModal] : [],
+        };
+    }
+
+    _getPopupHandlerClass() {
+        if (this._popupHandlerClass !== undefined) {
+            return this._popupHandlerClass;
+        }
+
+        try {
+            const popupModule = require('../../../tests/utils/popupHandler.js');
+            this._popupHandlerClass = popupModule?.PopupHandler || null;
+        } catch (error) {
+            console.error(`[PlaywrightDirect] PopupHandler unavailable: ${error.message}`);
+            this._popupHandlerClass = null;
+        }
+
+        return this._popupHandlerClass;
+    }
+
+    async dismissKnownPopups() {
+        if (!this.config.autoDismissKnownPopups) {
+            return { success: false, skipped: true, reason: 'autoDismissKnownPopups disabled' };
+        }
+
+        const PopupHandler = this._getPopupHandlerClass();
+        if (!PopupHandler) {
+            return { success: false, skipped: true, reason: 'PopupHandler unavailable' };
+        }
+
+        try {
+            const popupHandler = new PopupHandler(this.page);
+            await popupHandler.dismissAll();
+            const remaining = await this.getBlockingState();
+            return {
+                success: !remaining.present,
+                dismissed: true,
+                remainingBlocker: remaining.blocker || null,
+            };
+        } catch (error) {
+            return {
+                success: false,
+                dismissed: false,
+                error: error.message,
+            };
+        }
+    }
+
+    async _guardInteraction(action, target, options = {}) {
+        const guardOptions = {
+            ...options,
+            targetSelector: typeof target === 'string' ? target : options.targetSelector,
+        };
+
+        let blockerState = await this.getBlockingState(guardOptions);
+        if (blockerState.present && blockerState.blocker?.kind?.startsWith('dom-') && options.tryAutoDismiss !== false) {
+            const recovery = await this._attemptBlockerRecovery(action, target, blockerState.blocker, guardOptions);
+            blockerState = await this.getBlockingState(guardOptions);
+            if (!blockerState.present) {
+                return null;
+            }
+
+            return this._buildBlockedResult(action, blockerState.blocker, {
+                target,
+                attemptedRecovery: recovery,
+            });
+        }
+
+        if (!blockerState.present) {
+            return null;
+        }
+
+        return this._buildBlockedResult(action, blockerState.blocker, { target });
+    }
+
+    async _capturePostActionBlocker(action, target, waitMs = this.config.blockerRecovery?.postActionObservationMs || 750) {
+        const deadline = Date.now() + waitMs;
+        const pollIntervalMs = this.config.blockerRecovery?.pollIntervalMs || 50;
+        while (Date.now() <= deadline) {
+            const blockerState = await this.getBlockingState({ targetSelector: typeof target === 'string' ? target : null });
+            if (blockerState.present) {
+                const recovery = await this._attemptBlockerRecovery(action, target, blockerState.blocker, { includeDom: true });
+                const remaining = await this.getBlockingState();
+                if (!remaining.present) {
+                    return null;
+                }
+
+                return this._buildBlockedResult(action, remaining.blocker, {
+                    target,
+                    actionPerformed: true,
+                    attemptedRecovery: recovery,
+                });
+            }
+            await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+        }
+
+        return null;
+    }
+
     /**
      * Call a tool by name
      * Note: Enhanced methods are injected by applyEnhancedMethods() and override this
@@ -265,6 +1139,7 @@ export class PlaywrightDirectBridge extends EventEmitter {
             'browser_fill_form': () => this.fillForm(args),
             'browser_wait_for': () => this.waitFor(args),
             'browser_tabs': () => this.manageTabs(args),
+            'browser_create_tab': () => this.createTab(args),
             'browser_evaluate': () => this.evaluate(args),
             'browser_run_code': () => this.runCode(args),
             'browser_console_messages': () => this.getConsoleMessages(args),
@@ -436,6 +1311,7 @@ export class PlaywrightDirectBridge extends EventEmitter {
         }
 
         return {
+            blockerState: await this.getBlockingState(),
             ariaTree: ariaTree,
             elements: enrichedElements,
             url: this.page.url(),
@@ -568,7 +1444,22 @@ export class PlaywrightDirectBridge extends EventEmitter {
         }
 
         console.error(`[PlaywrightDirect] Clicking: ${selector}`);
+        const blocked = await this._guardInteraction('click', selector, { includeDom: true });
+        if (blocked) {
+            return blocked;
+        }
+
         await this.page.click(selector);
+        const postActionBlocker = await this._capturePostActionBlocker('click', selector);
+        if (postActionBlocker) {
+            return {
+                success: true,
+                clicked: selector,
+                blockerDetected: postActionBlocker.blocker,
+                requiresRecovery: true,
+            };
+        }
+
         return { success: true, clicked: selector };
     }
 
@@ -592,10 +1483,27 @@ export class PlaywrightDirectBridge extends EventEmitter {
 
         console.error(`[PlaywrightDirect] Typing into: ${selector}`);
 
+        const blocked = await this._guardInteraction('type', selector, { includeDom: true });
+        if (blocked) {
+            return blocked;
+        }
+
         if (clear) {
             await this.page.fill(selector, '');
         }
         await this.page.type(selector, text);
+
+        const postActionBlocker = await this._capturePostActionBlocker('type', selector);
+        if (postActionBlocker) {
+            return {
+                success: true,
+                typed: text,
+                into: selector,
+                blockerDetected: postActionBlocker.blocker,
+                requiresRecovery: true,
+            };
+        }
+
         return { success: true, typed: text, into: selector };
     }
 
@@ -616,7 +1524,22 @@ export class PlaywrightDirectBridge extends EventEmitter {
             selector = element;
         }
 
+        const blocked = await this._guardInteraction('hover', selector, { includeDom: true });
+        if (blocked) {
+            return blocked;
+        }
+
         await this.page.hover(selector);
+        const postActionBlocker = await this._capturePostActionBlocker('hover', selector);
+        if (postActionBlocker) {
+            return {
+                success: true,
+                hovered: selector,
+                blockerDetected: postActionBlocker.blocker,
+                requiresRecovery: true,
+            };
+        }
+
         return { success: true, hovered: selector };
     }
 
@@ -658,8 +1581,24 @@ export class PlaywrightDirectBridge extends EventEmitter {
         }
 
         const options = label ? { label } : { value };
+        const blocked = await this._guardInteraction('select_option', selector, { includeDom: true });
+        if (blocked) {
+            return blocked;
+        }
+
         await this.page.selectOption(selector, options);
-        return { success: true, selected: value || label };
+        const postActionBlocker = await this._capturePostActionBlocker('select_option', selector);
+        if (postActionBlocker) {
+            return {
+                success: true,
+                selected: value || label,
+                selector,
+                blockerDetected: postActionBlocker.blocker,
+                requiresRecovery: true,
+            };
+        }
+
+        return { success: true, selected: value || label, selector };
     }
 
     /**
@@ -668,6 +1607,11 @@ export class PlaywrightDirectBridge extends EventEmitter {
     async fillForm(args) {
         const { fields } = args;
         const results = [];
+
+        const blocked = await this._guardInteraction('fill_form', 'form', { includeDom: true });
+        if (blocked) {
+            return blocked;
+        }
 
         for (const field of fields) {
             const { element, ref, value } = field;
@@ -684,6 +1628,16 @@ export class PlaywrightDirectBridge extends EventEmitter {
             results.push({ selector, value, success: true });
         }
 
+        const postActionBlocker = await this._capturePostActionBlocker('fill_form', 'form');
+        if (postActionBlocker) {
+            return {
+                success: true,
+                filled: results,
+                blockerDetected: postActionBlocker.blocker,
+                requiresRecovery: true,
+            };
+        }
+
         return { success: true, filled: results };
     }
 
@@ -693,66 +1647,142 @@ export class PlaywrightDirectBridge extends EventEmitter {
     async waitFor(args) {
         const { text, selector, state, time } = args;
 
+        const target = text ? `text=${text}` : selector || `time=${time || 0}`;
+        const blocked = await this._guardInteraction('wait_for', target, { includeDom: true });
+        if (blocked) {
+            return blocked;
+        }
+
         if (time) {
             await this.page.waitForTimeout(time * 1000);
             return { success: true, waited: `${time} seconds` };
         }
 
         if (text) {
-            await this.page.waitForSelector(`text=${text}`, { state: state || 'visible' });
-            return { success: true, found: text };
+            try {
+                await this.page.waitForSelector(`text=${text}`, { state: state || 'visible' });
+                return { success: true, found: text };
+            } catch (error) {
+                const postWaitBlocker = await this.getBlockingState();
+                if (postWaitBlocker.present) {
+                    return this._buildBlockedResult('wait_for', postWaitBlocker.blocker, {
+                        target: `text=${text}`,
+                        errorCode: 'RUNTIME_BLOCKER',
+                    });
+                }
+                throw error;
+            }
         }
 
         if (selector) {
-            await this.page.waitForSelector(selector, { state: state || 'visible' });
-            return { success: true, found: selector };
+            try {
+                await this.page.waitForSelector(selector, { state: state || 'visible' });
+                return { success: true, found: selector };
+            } catch (error) {
+                const postWaitBlocker = await this.getBlockingState();
+                if (postWaitBlocker.present) {
+                    return this._buildBlockedResult('wait_for', postWaitBlocker.blocker, {
+                        target: selector,
+                        errorCode: 'RUNTIME_BLOCKER',
+                    });
+                }
+                throw error;
+            }
         }
 
         return { success: false, error: 'No wait condition specified' };
+    }
+
+    async createTab(args = {}) {
+        return this.manageTabs({ ...args, action: 'create' });
     }
 
     /**
      * Manage tabs
      */
     async manageTabs(args) {
-        const { action, index } = args;
-        const pages = this.context.pages();
+        const { action, index, tabId, url, activate = true } = args;
+        const normalizedAction = action === 'new' ? 'create' : action;
 
-        switch (action) {
+        switch (normalizedAction) {
             case 'list':
                 return {
-                    tabs: pages.map((p, i) => ({
-                        index: i,
-                        url: p.url(),
-                        active: p === this.page,
-                    })),
+                    tabs: this._getTabDescriptors().map(({ page, ...tab }) => tab),
+                    activeTabId: this.page ? this._ensureTabId(this.page) : null,
                 };
 
-            case 'new':
+            case 'create': {
                 const newPage = await this.context.newPage();
                 this._attachEventListeners(newPage);
-                this.page = newPage;
-                return { success: true, index: pages.length };
+                const createdTabId = this._ensureTabId(newPage);
 
-            case 'close':
-                if (index !== undefined && pages[index]) {
-                    await pages[index].close();
-                    if (pages[index] === this.page) {
+                if (url) {
+                    await newPage.goto(url);
+                }
+
+                if (activate !== false) {
+                    this.page = newPage;
+                    await newPage.bringToFront();
+                }
+
+                const updatedPages = this.context.pages();
+                return {
+                    success: true,
+                    action: 'create',
+                    index: updatedPages.indexOf(newPage),
+                    tabId: createdTabId,
+                    url: newPage.url(),
+                    title: await newPage.title(),
+                    active: activate !== false,
+                    activeTabId: this.page ? this._ensureTabId(this.page) : createdTabId,
+                    totalTabs: updatedPages.length,
+                };
+            }
+
+            case 'close': {
+                const target = this._resolveTabTarget({ index, tabId });
+
+                if (target) {
+                    const wasActive = target.page === this.page;
+                    const closedTabId = target.tabId;
+                    await target.page.close();
+
+                    if (wasActive) {
                         const fallbackPage = this.context.pages()[0] || await this.context.newPage();
-                        if (fallbackPage !== pages[index]) {
+                        if (fallbackPage && fallbackPage !== target.page) {
                             this._attachEventListeners(fallbackPage);
+                            this.page = fallbackPage;
                         }
-                        this.page = fallbackPage;
                     }
-                }
-                return { success: true, closed: index };
 
-            case 'select':
-                if (index !== undefined && pages[index]) {
-                    this.page = pages[index];
-                    await this.page.bringToFront();
+                    return {
+                        success: true,
+                        closed: target.index,
+                        closedTabId,
+                        activeTabId: this.page ? this._ensureTabId(this.page) : null,
+                    };
                 }
-                return { success: true, selected: index };
+
+                return { success: true, closed: index, closedTabId: tabId || null };
+            }
+
+            case 'select': {
+                const target = this._resolveTabTarget({ index, tabId });
+
+                if (target) {
+                    this.page = target.page;
+                    await this.page.bringToFront();
+
+                    return {
+                        success: true,
+                        selected: target.index,
+                        tabId: target.tabId,
+                        activeTabId: target.tabId,
+                    };
+                }
+
+                return { success: true, selected: index, tabId: tabId || null };
+            }
 
             default:
                 return { error: `Unknown tab action: ${action}` };
@@ -994,15 +2024,18 @@ export class PlaywrightDirectBridge extends EventEmitter {
     async handleDialog(args) {
         const { accept, promptText } = args;
 
-        this.page.once('dialog', async dialog => {
-            if (accept) {
-                await dialog.accept(promptText || '');
-            } else {
-                await dialog.dismiss();
-            }
-        });
+        if (this._activeDialog?.dialogHandle && this._activeDialog.handled !== true) {
+            return await this._resolveDialog(this._activeDialog, { accept, promptText });
+        }
 
-        return { success: true, action: accept ? 'accepted' : 'dismissed' };
+        this._pendingDialogHandler = { accept, promptText };
+
+        return {
+            success: true,
+            action: accept ? 'accept_pending' : 'dismiss_pending',
+            waiting: true,
+            message: 'Dialog handler armed for the next native browser dialog.',
+        };
     }
 
     /**

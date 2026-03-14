@@ -16,6 +16,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { markdownToAdf } = require('./adf-converter');
 
 // ─── Environment loader ─────────────────────────────────────────────────────
@@ -23,6 +24,101 @@ function loadEnvVars() {
     try {
         require('dotenv').config({ path: path.join(__dirname, '..', '.env'), override: true });
     } catch { /* dotenv not installed */ }
+}
+
+const VALID_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const VALID_VIDEO_MIME_TYPES = new Set(['video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska']);
+const JIRA_TICKET_KEY_PATTERN = /^[A-Z][A-Z0-9]*-\d+$/;
+
+function isNonEmptyString(value) {
+    return typeof value === 'string' && value.trim().length > 0;
+}
+
+function resolveActiveSessionId(explicitSessionId, deps) {
+    if (isNonEmptyString(explicitSessionId)) return explicitSessionId.trim();
+    if (isNonEmptyString(deps?.sessionContext?.sessionId)) return deps.sessionContext.sessionId.trim();
+    return null;
+}
+
+function getActiveSessionEntry(explicitSessionId, deps) {
+    const chatManager = deps?.chatManager;
+    if (!chatManager) {
+        return {
+            error: 'Chat manager context not available. Call this tool from an active chat session.',
+        };
+    }
+
+    const sessionId = resolveActiveSessionId(explicitSessionId, deps);
+    if (!sessionId) {
+        return {
+            error: 'No active chat session could be resolved. Call this tool from the same chat session where the attachments were uploaded.',
+        };
+    }
+
+    const entry = chatManager._sessions?.get(sessionId);
+    if (!entry) {
+        return {
+            error: `Chat session not found: ${sessionId}`,
+        };
+    }
+
+    return { sessionId, entry };
+}
+
+function isValidTicketKey(ticketKey) {
+    return JIRA_TICKET_KEY_PATTERN.test(String(ticketKey || '').trim());
+}
+
+function getJiraAttachmentConfig() {
+    const cloudId = (process.env.JIRA_CLOUD_ID || '').replace(/"/g, '').trim();
+    const baseUrl = (process.env.JIRA_BASE_URL || '').trim();
+    const email = (process.env.JIRA_EMAIL || process.env.ATLASSIAN_EMAIL || '').trim();
+    const apiToken = (process.env.JIRA_API_TOKEN || process.env.ATLASSIAN_API_TOKEN || '').trim();
+
+    if (!cloudId && !baseUrl) {
+        return { error: 'JIRA_BASE_URL or JIRA_CLOUD_ID is required for Jira attachments.' };
+    }
+    if (!email || !apiToken) {
+        return { error: 'JIRA_EMAIL and JIRA_API_TOKEN are required for Jira attachments.' };
+    }
+
+    return { cloudId, baseUrl, email, apiToken };
+}
+
+function buildJiraAttachmentUrl(ticketKey, jiraConfig) {
+    if (jiraConfig.cloudId) {
+        return `https://api.atlassian.com/ex/jira/${jiraConfig.cloudId}/rest/api/3/issue/${ticketKey}/attachments`;
+    }
+    return `${jiraConfig.baseUrl.replace(/\/+$/, '')}/rest/api/3/issue/${ticketKey}/attachments`;
+}
+
+function sanitizeFileName(fileName) {
+    return String(fileName || 'attachment')
+        .replace(/[\r\n"]/g, '_')
+        .replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+function buildMultipartPayload(fileName, mimeType, buffer, boundaryPrefix) {
+    const boundary = `----${boundaryPrefix}${crypto.randomBytes(16).toString('hex')}`;
+    const safeFileName = sanitizeFileName(fileName);
+    const header = Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${safeFileName}"\r\nContent-Type: ${mimeType}\r\n\r\n`
+    );
+    const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+
+    return {
+        boundary,
+        body: Buffer.concat([header, buffer, footer]),
+    };
+}
+
+function getImageMimeTypeForFile(filePath) {
+    const ext = path.extname(String(filePath || '')).toLowerCase();
+    if (ext === '.png') return 'image/png';
+    if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+    if (ext === '.gif') return 'image/gif';
+    if (ext === '.webp') return 'image/webp';
+    return null;
 }
 
 // ─── TTL Cache for Tool Results ─────────────────────────────────────────────
@@ -119,6 +215,80 @@ function getToolCache() { return _toolCache; }
 function createCustomTools(defineTool, agentName, deps = {}) {
     const { learningStore, config, contextStore, groundingStore } = deps;
     const tools = [];
+
+    tools.push(defineTool('publish_image_to_chat', {
+        description:
+            'Publish a local image file into the active chat as an assistant message. ' +
+            'Use this after taking a screenshot or generating an image artifact when the user asked to see proof inline in chat. ' +
+            'Provide a short caption such as the MLS name or validation result.',
+        parameters: {
+            type: 'object',
+            properties: {
+                filePath: {
+                    type: 'string',
+                    description: 'Absolute or workspace-relative path to an image file (png, jpg, jpeg, gif, webp).',
+                },
+                caption: {
+                    type: 'string',
+                    description: 'Optional text shown above the image in the assistant message.',
+                },
+                altText: {
+                    type: 'string',
+                    description: 'Optional alt text for the image.',
+                },
+                sessionId: {
+                    type: 'string',
+                    description: 'Optional chat session ID. Defaults to the current active session.',
+                },
+            },
+            required: ['filePath'],
+        },
+        handler: async ({ filePath, caption, altText, sessionId }) => {
+            try {
+                const sessionResult = getActiveSessionEntry(sessionId, deps);
+                if (sessionResult.error) {
+                    return JSON.stringify({ success: false, error: sessionResult.error });
+                }
+
+                const rawPath = String(filePath || '').trim();
+                const resolvedPath = path.isAbsolute(rawPath)
+                    ? rawPath
+                    : path.join(__dirname, '..', '..', rawPath);
+
+                if (!fs.existsSync(resolvedPath)) {
+                    return JSON.stringify({ success: false, error: `Image file not found: ${resolvedPath}` });
+                }
+
+                const mimeType = getImageMimeTypeForFile(resolvedPath);
+                if (!mimeType || !VALID_IMAGE_MIME_TYPES.has(mimeType)) {
+                    return JSON.stringify({
+                        success: false,
+                        error: 'Unsupported image file. Supported extensions: .png, .jpg, .jpeg, .gif, .webp',
+                    });
+                }
+
+                const publishResult = deps.chatManager.publishAssistantImage(sessionResult.sessionId, {
+                    filePath: resolvedPath,
+                    caption,
+                    altText,
+                });
+
+                return JSON.stringify({
+                    success: true,
+                    sessionId: sessionResult.sessionId,
+                    messageId: publishResult.messageId,
+                    filePath: resolvedPath,
+                    attachment: {
+                        name: publishResult.attachment.name,
+                        type: publishResult.attachment.type,
+                        size: publishResult.attachment.size,
+                    },
+                }, null, 2);
+            } catch (error) {
+                return JSON.stringify({ success: false, error: error.message });
+            }
+        },
+    }));
 
     // ───────────────────────────────────────────────────────────────────
     // TOOL 1: get_framework_inventory
@@ -1051,24 +1221,23 @@ function createCustomTools(defineTool, agentName, deps = {}) {
             handler: async ({ ticketKey, sessionId }) => {
                 try {
                     loadEnvVars();
-                    const cloudId = (process.env.JIRA_CLOUD_ID || '').replace(/"/g, '');
-                    const baseUrl = process.env.JIRA_BASE_URL;
-                    const email = process.env.JIRA_EMAIL || process.env.ATLASSIAN_EMAIL || '';
-                    const apiToken = process.env.JIRA_API_TOKEN || process.env.ATLASSIAN_API_TOKEN || '';
-
-                    if (!email || !apiToken) {
-                        return JSON.stringify({ success: false, error: 'JIRA_EMAIL and JIRA_API_TOKEN required' });
+                    if (!isValidTicketKey(ticketKey)) {
+                        return JSON.stringify({ success: false, error: 'Invalid ticket key format. Expected values like AOTF-17300.' });
                     }
 
-                    // Access session attachments via the deps closure
-                    const chatManager = deps.chatManager;
-                    let attachments = [];
-                    if (chatManager && sessionId) {
-                        const entry = chatManager._sessions?.get(sessionId);
-                        if (entry?.sessionAttachments?.length > 0) {
-                            attachments = entry.sessionAttachments;
-                        }
+                    const jiraConfig = getJiraAttachmentConfig();
+                    if (jiraConfig.error) {
+                        return JSON.stringify({ success: false, error: jiraConfig.error });
                     }
+
+                    const sessionResult = getActiveSessionEntry(sessionId, deps);
+                    if (sessionResult.error) {
+                        return JSON.stringify({ success: false, error: sessionResult.error });
+                    }
+
+                    const attachments = Array.isArray(sessionResult.entry.sessionAttachments)
+                        ? sessionResult.entry.sessionAttachments
+                        : [];
 
                     if (attachments.length === 0) {
                         return JSON.stringify({
@@ -1077,36 +1246,35 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         });
                     }
 
-                    // Build Jira attachment upload URL
-                    let attachUrl;
-                    if (cloudId) {
-                        attachUrl = `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issue/${ticketKey}/attachments`;
-                    } else {
-                        attachUrl = `${baseUrl.replace(/\/$/, '')}/rest/api/3/issue/${ticketKey}/attachments`;
-                    }
+                    const attachUrl = buildJiraAttachmentUrl(ticketKey, jiraConfig);
 
                     const results = [];
                     for (let i = 0; i < attachments.length; i++) {
                         const att = attachments[i];
-                        const ext = att.media_type === 'image/png' ? '.png' :
-                            att.media_type === 'image/jpeg' ? '.jpg' :
-                                att.media_type === 'image/gif' ? '.gif' :
-                                    att.media_type === 'image/webp' ? '.webp' : '.png';
+                        const mimeType = VALID_IMAGE_MIME_TYPES.has(att?.media_type) ? att.media_type : 'image/png';
+                        const ext = mimeType === 'image/png' ? '.png' :
+                            mimeType === 'image/jpeg' ? '.jpg' :
+                                mimeType === 'image/gif' ? '.gif' : '.webp';
                         const fileName = `bug-screenshot-${i + 1}${ext}`;
+
+                        if (!isNonEmptyString(att?.data)) {
+                            results.push({ fileName, success: false, error: 'Attachment data is missing or invalid.' });
+                            continue;
+                        }
 
                         try {
                             const buffer = Buffer.from(att.data, 'base64');
-                            const boundary = `----JiraAttachment${Date.now()}${i}`;
-                            const header = Buffer.from(
-                                `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${att.media_type || 'image/png'}\r\n\r\n`
-                            );
-                            const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
-                            const body = Buffer.concat([header, buffer, footer]);
+                            if (!buffer.length) {
+                                results.push({ fileName, success: false, error: 'Attachment data decoded to an empty file.' });
+                                continue;
+                            }
+
+                            const { boundary, body } = buildMultipartPayload(fileName, mimeType, buffer, 'JiraAttachment');
 
                             const resp = await fetch(attachUrl, {
                                 method: 'POST',
                                 headers: {
-                                    'Authorization': 'Basic ' + Buffer.from(`${email}:${apiToken}`).toString('base64'),
+                                    'Authorization': 'Basic ' + Buffer.from(`${jiraConfig.email}:${jiraConfig.apiToken}`).toString('base64'),
                                     'X-Atlassian-Token': 'no-check',
                                     'Content-Type': `multipart/form-data; boundary=${boundary}`,
                                 },
@@ -1128,6 +1296,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     return JSON.stringify({
                         success: successCount > 0,
                         ticketKey,
+                        sessionId: sessionResult.sessionId,
                         totalAttachments: attachments.length,
                         uploaded: successCount,
                         failed: attachments.length - successCount,
@@ -1164,13 +1333,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
             },
             handler: async ({ sessionId }) => {
                 try {
-                    const chatManager = deps.chatManager;
-                    if (!chatManager) {
-                        return JSON.stringify({ success: false, error: 'Chat manager not available' });
+                    const sessionResult = getActiveSessionEntry(sessionId, deps);
+                    if (sessionResult.error) {
+                        return JSON.stringify({ success: false, error: sessionResult.error });
                     }
 
-                    const entry = chatManager._sessions?.get(sessionId);
-                    const videoCtx = entry?.videoContext;
+                    const videoCtx = sessionResult.entry.videoContext;
 
                     if (!videoCtx || videoCtx.length === 0) {
                         return JSON.stringify({
@@ -1194,6 +1362,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
 
                     return JSON.stringify({
                         success: true,
+                        sessionId: sessionResult.sessionId,
                         videoCount: results.length,
                         videos: results,
                         instructions: 'The video frames are attached as images in chronological order. '
@@ -1240,18 +1409,21 @@ function createCustomTools(defineTool, agentName, deps = {}) {
             handler: async ({ ticketKey, sessionId, frameTimestamps }) => {
                 try {
                     loadEnvVars();
-                    const cloudId = (process.env.JIRA_CLOUD_ID || '').replace(/"/g, '');
-                    const baseUrl = process.env.JIRA_BASE_URL;
-                    const email = process.env.JIRA_EMAIL || process.env.ATLASSIAN_EMAIL || '';
-                    const apiToken = process.env.JIRA_API_TOKEN || process.env.ATLASSIAN_API_TOKEN || '';
-
-                    if (!email || !apiToken) {
-                        return JSON.stringify({ success: false, error: 'JIRA_EMAIL and JIRA_API_TOKEN required' });
+                    if (!isValidTicketKey(ticketKey)) {
+                        return JSON.stringify({ success: false, error: 'Invalid ticket key format. Expected values like AOTF-17300.' });
                     }
 
-                    const chatManager = deps.chatManager;
-                    const entry = chatManager?._sessions?.get(sessionId);
-                    const videoCtx = entry?.videoContext;
+                    const jiraConfig = getJiraAttachmentConfig();
+                    if (jiraConfig.error) {
+                        return JSON.stringify({ success: false, error: jiraConfig.error });
+                    }
+
+                    const sessionResult = getActiveSessionEntry(sessionId, deps);
+                    if (sessionResult.error) {
+                        return JSON.stringify({ success: false, error: sessionResult.error });
+                    }
+
+                    const videoCtx = sessionResult.entry.videoContext;
 
                     if (!videoCtx || videoCtx.length === 0) {
                         return JSON.stringify({ success: false, error: 'No video recordings found in session' });
@@ -1283,31 +1455,26 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         return JSON.stringify({ success: false, error: 'No matching frames found to upload' });
                     }
 
-                    let attachUrl;
-                    if (cloudId) {
-                        attachUrl = `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issue/${ticketKey}/attachments`;
-                    } else {
-                        attachUrl = `${baseUrl.replace(/\/$/, '')}/rest/api/3/issue/${ticketKey}/attachments`;
-                    }
+                    const attachUrl = buildJiraAttachmentUrl(ticketKey, jiraConfig);
 
                     const results = [];
                     for (let i = 0; i < framesToUpload.length; i++) {
                         const frame = framesToUpload[i];
                         const fileName = `bug-video-frame-${frame.timestamp}s.jpg`;
 
+                        if (!isNonEmptyString(frame?.path) || !fs.existsSync(frame.path)) {
+                            results.push({ fileName, success: false, error: 'Frame file is missing or no longer available.' });
+                            continue;
+                        }
+
                         try {
                             const buffer = fs.readFileSync(frame.path);
-                            const boundary = `----JiraVideoFrame${Date.now()}${i}`;
-                            const header = Buffer.from(
-                                `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: image/jpeg\r\n\r\n`
-                            );
-                            const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
-                            const body = Buffer.concat([header, buffer, footer]);
+                            const { boundary, body } = buildMultipartPayload(fileName, 'image/jpeg', buffer, 'JiraVideoFrame');
 
                             const resp = await fetch(attachUrl, {
                                 method: 'POST',
                                 headers: {
-                                    'Authorization': 'Basic ' + Buffer.from(`${email}:${apiToken}`).toString('base64'),
+                                    'Authorization': 'Basic ' + Buffer.from(`${jiraConfig.email}:${jiraConfig.apiToken}`).toString('base64'),
                                     'X-Atlassian-Token': 'no-check',
                                     'Content-Type': `multipart/form-data; boundary=${boundary}`,
                                 },
@@ -1330,8 +1497,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     // Upload original video recording(s) to Jira if available and under 50 MB
                     const videoRecordings = [];
                     for (const ctx of videoCtx) {
-                        if (!ctx.videoPath) continue;
+                        if (!isNonEmptyString(ctx?.videoPath)) continue;
                         try {
+                            if (!fs.existsSync(ctx.videoPath)) {
+                                videoRecordings.push({ fileName: ctx.filename || path.basename(ctx.videoPath), success: false, error: 'Original video file is missing or no longer available.' });
+                                continue;
+                            }
                             const stat = fs.statSync(ctx.videoPath);
                             if (stat.size > 50 * 1024 * 1024) {
                                 videoRecordings.push({ fileName: ctx.filename || path.basename(ctx.videoPath), success: false, error: 'File exceeds 50 MB Jira attachment limit' });
@@ -1340,18 +1511,14 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                             const videoBuf = fs.readFileSync(ctx.videoPath);
                             const videoFileName = ctx.filename || path.basename(ctx.videoPath);
                             const ext = path.extname(videoFileName).toLowerCase();
-                            const mimeType = { '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime' }[ext] || 'application/octet-stream';
-                            const boundary = `----JiraVideo${Date.now()}`;
-                            const header = Buffer.from(
-                                `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${videoFileName}"\r\nContent-Type: ${mimeType}\r\n\r\n`
-                            );
-                            const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
-                            const body = Buffer.concat([header, videoBuf, footer]);
+                            const detectedMimeType = { '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.avi': 'video/x-msvideo', '.mkv': 'video/x-matroska' }[ext] || 'application/octet-stream';
+                            const mimeType = VALID_VIDEO_MIME_TYPES.has(detectedMimeType) ? detectedMimeType : 'application/octet-stream';
+                            const { boundary, body } = buildMultipartPayload(videoFileName, mimeType, videoBuf, 'JiraVideo');
 
                             const resp = await fetch(attachUrl, {
                                 method: 'POST',
                                 headers: {
-                                    'Authorization': 'Basic ' + Buffer.from(`${email}:${apiToken}`).toString('base64'),
+                                    'Authorization': 'Basic ' + Buffer.from(`${jiraConfig.email}:${jiraConfig.apiToken}`).toString('base64'),
                                     'X-Atlassian-Token': 'no-check',
                                     'Content-Type': `multipart/form-data; boundary=${boundary}`,
                                 },
@@ -1372,6 +1539,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     return JSON.stringify({
                         success: successCount > 0 || videoRecordings.some(r => r.success),
                         ticketKey,
+                        sessionId: sessionResult.sessionId,
                         totalFrames: framesToUpload.length,
                         uploaded: successCount,
                         failed: framesToUpload.length - successCount,

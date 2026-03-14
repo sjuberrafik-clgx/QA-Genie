@@ -77,6 +77,8 @@ export class IntelligentRouter {
                 throw new Error(`Unknown tool source: ${source}`);
             }
 
+            result = await this._retryAfterBlockerRecovery(toolName, sourceToolName, args, category, result, source);
+
             // Update state after successful call
             this.state.lastToolUsed = toolName;
             this.state.lastBridgeUsed = source;
@@ -94,6 +96,89 @@ export class IntelligentRouter {
             // Try fallback routing if primary fails
             return await this.handleRoutingError(toolName, sourceToolName, args, category, error);
         }
+    }
+
+    _isBlockerRelatedError(error) {
+        const message = error?.message || '';
+        return /runtime blocker|blocked by|dialog|alert|beforeunload/i.test(message);
+    }
+
+    async _createBlockerErrorFromRuntimeState(toolName, error) {
+        if (!this.playwrightBridge?.getBlockingState) {
+            return null;
+        }
+
+        try {
+            const blockerState = await this.playwrightBridge.getBlockingState();
+            if (!blockerState?.present || !blockerState.blocker) {
+                return null;
+            }
+
+            const blocker = blockerState.blocker;
+            const details = blocker.kind === 'native-dialog'
+                ? `Blocked by native dialog${blocker.message ? `: ${blocker.message}` : ''}`
+                : `Blocked by modal/overlay${blocker.text ? `: ${blocker.text}` : ''}`;
+            const classifiedError = new Error(`${details} while executing ${toolName}`);
+            classifiedError.code = 'RUNTIME_BLOCKER';
+            classifiedError.blocker = blocker;
+            classifiedError.cause = error;
+            return classifiedError;
+        } catch {
+            return null;
+        }
+    }
+
+    _extractRecoverableBlocker(result) {
+        const blocker = result?.blockerState?.blocker || result?.blockerDetected || result?.blocker || null;
+        const classification = blocker?.classification || {};
+
+        if (!blocker) {
+            return null;
+        }
+
+        if (result?.requiresRecovery || result?.errorCode === 'RUNTIME_BLOCKER' || classification.autoRecoverable === true) {
+            return blocker;
+        }
+
+        return null;
+    }
+
+    async _retryAfterBlockerRecovery(unifiedToolName, sourceToolName, args, category, result, source) {
+        if (source === 'chromedevtools' || !this.playwrightBridge?.recoverCurrentBlocker) {
+            return result;
+        }
+
+        const blocker = this._extractRecoverableBlocker(result);
+        if (!blocker) {
+            return result;
+        }
+
+        const recovery = await this.playwrightBridge.recoverCurrentBlocker({
+            existingBlocker: blocker,
+            action: unifiedToolName,
+            target: args?.element || args?.selector || args?.ref || null,
+            targetSelector: args?.element || args?.selector || null,
+        });
+
+        if (!recovery?.recovered) {
+            return {
+                ...result,
+                routeRecovery: recovery,
+            };
+        }
+
+        const retriedResult = source === 'playwright'
+            ? await this.routeToPlaywright(sourceToolName, args, category)
+            : await this.routeHybrid(unifiedToolName, sourceToolName, args, category);
+
+        return {
+            ...retriedResult,
+            routeRecovery: {
+                attempted: true,
+                recovered: true,
+                recovery,
+            },
+        };
     }
 
     /**
@@ -180,6 +265,32 @@ export class IntelligentRouter {
      * Handle routing errors with fallback logic
      */
     async handleRoutingError(toolName, sourceToolName, args, category, error) {
+        const blockerError = await this._createBlockerErrorFromRuntimeState(toolName, error);
+        if (blockerError) {
+            if (blockerError.blocker?.classification?.autoRecoverable === true && this.playwrightBridge?.recoverCurrentBlocker) {
+                const recovery = await this.playwrightBridge.recoverCurrentBlocker({
+                    existingBlocker: blockerError.blocker,
+                    action: toolName,
+                    target: args?.element || args?.selector || args?.ref || null,
+                    targetSelector: args?.element || args?.selector || null,
+                });
+
+                if (recovery?.recovered) {
+                    const source = getToolSource(toolName);
+                    return source === 'chromedevtools'
+                        ? await this.routeToChromeDevTools(sourceToolName, args, category)
+                        : await this.routeToPlaywright(sourceToolName, args, category);
+                }
+
+                blockerError.recovery = recovery;
+            }
+            throw blockerError;
+        }
+
+        if (this._isBlockerRelatedError(error)) {
+            throw error;
+        }
+
         console.error(`[Router] Attempting fallback for ${toolName}`);
         this.stats.fallbacksUsed++;
 
@@ -529,6 +640,8 @@ export class ToolRecommendationEngine {
             upload: 'unified_file_upload',
             dialog: 'unified_handle_dialog',
             tabs: 'unified_tabs',
+            create_tab: 'unified_create_tab',
+            new_tab: 'unified_create_tab',
             close: 'unified_browser_close',
             // Advanced tools
             iframe: 'unified_list_frames',

@@ -2,6 +2,7 @@
 
 import { AgentBadge } from '@/components/AgentSelect';
 import { ConversationIcon, ChevronDoubleLeftIcon, PlusIcon, EmptyChatIcon, ChatBubbleIcon, TrashIcon } from '@/components/Icons';
+import RobotMascotLogo from '@/components/RobotMascotLogo';
 
 export default function SessionList({ sessions, activeSessionId, onSelect, onCreate, onDelete, isOpen, onToggle }) {
     return (
@@ -46,11 +47,15 @@ export default function SessionList({ sessions, activeSessionId, onSelect, onCre
                 <div className="flex-1 overflow-y-auto px-2.5 py-2 space-y-0.5 session-list-scroll">
                     {sessions.length === 0 ? (
                         <div className="text-center px-4 py-16">
-                            <div className="w-12 h-12 mx-auto mb-3 rounded-2xl bg-surface-50 flex items-center justify-center border border-surface-100">
-                                <EmptyChatIcon className="w-6 h-6 text-surface-300" />
+                            <div className="w-14 h-14 mx-auto mb-3 rounded-[20px] bg-[radial-gradient(circle_at_30%_20%,rgba(180,92,255,0.12),transparent_42%),radial-gradient(circle_at_70%_70%,rgba(31,158,171,0.14),transparent_46%),linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.92))] flex items-center justify-center border border-surface-100 shadow-sm">
+                                <RobotMascotLogo size={34} mood="minimal" />
                             </div>
                             <p className="text-[12px] text-surface-500 font-medium">No conversations yet</p>
                             <p className="text-[10px] text-surface-400 mt-1">Create a new chat to get started</p>
+                            <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-brand-100 bg-brand-50/70 px-2.5 py-1 text-[10px] font-medium text-brand-700">
+                                <EmptyChatIcon className="w-3.5 h-3.5" />
+                                Start with the AI chat workspace
+                            </div>
                         </div>
                     ) : (
                         sessions.map((session) => {
