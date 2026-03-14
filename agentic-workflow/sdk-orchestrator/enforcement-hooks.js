@@ -45,6 +45,8 @@ class SessionEnforcementState {
         this.toolCallCount = 0;
         this.deniedCalls = [];
         this.validationResults = [];
+        this.runtimeObservations = [];
+        this.lastRuntimeBlocker = null;
     }
 }
 
@@ -67,6 +69,76 @@ function getState(sessionId) {
         sessionStates.set(sessionId, new SessionEnforcementState());
     }
     return sessionStates.get(sessionId);
+}
+
+function parseToolResultPayload(result) {
+    if (!result) return null;
+    if (typeof result === 'object') return result;
+    if (typeof result !== 'string') return null;
+
+    const trimmed = result.trim();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+        return null;
+    }
+
+    try {
+        return JSON.parse(trimmed);
+    } catch {
+        return null;
+    }
+}
+
+function extractRuntimeObservation(toolName, result) {
+    const payload = parseToolResultPayload(result);
+
+    if (payload?.blockerState?.present && payload.blockerState.blocker) {
+        return { toolName, source: 'blockerState', blocker: payload.blockerState.blocker };
+    }
+
+    if (payload?.blockerDetected) {
+        return { toolName, source: 'blockerDetected', blocker: payload.blockerDetected };
+    }
+
+    if (payload?.errorCode === 'RUNTIME_BLOCKER' && payload?.blocker) {
+        return { toolName, source: 'runtimeError', blocker: payload.blocker };
+    }
+
+    if (typeof result === 'string' && /Tool execution failed \[RUNTIME_BLOCKER\]:/i.test(result)) {
+        return {
+            toolName,
+            source: 'runtimeErrorText',
+            blocker: {
+                kind: /native dialog/i.test(result) ? 'native-dialog' : 'unknown-blocker',
+                message: result,
+            },
+        };
+    }
+
+    return null;
+}
+
+function formatRuntimeObservationContext(observation) {
+    const blocker = observation.blocker || {};
+    const classification = blocker.classification || {};
+    const blockerKind = blocker.kind || 'runtime blocker';
+    const blockerLabel = blockerKind === 'native-dialog'
+        ? 'native browser dialog'
+        : blockerKind === 'dom-modal'
+            ? 'blocking modal/overlay'
+            : 'runtime blocker';
+    const detail = blocker.message || blocker.text || blocker.selectorHint || 'No blocker details available.';
+    const recovery = blockerKind === 'native-dialog'
+        ? 'Call unified_handle_dialog before retrying the blocked interaction.'
+        : classification.autoRecoverable === false
+            ? `Do NOT blindly retry. Resolve the blocker (${classification.category || blockerKind}) before continuing.`
+            : 'Use blocker recovery, re-check page state, then retry the interaction.';
+
+    return (
+        `🚨 RUNTIME BLOCKER OBSERVED during ${observation.toolName}: ${blockerLabel}\n` +
+        `Details: ${detail}\n\n` +
+        'Do NOT continue interacting with underlying elements until the blocker is cleared.\n' +
+        recovery
+    );
 }
 
 // ─── Hook Factory ───────────────────────────────────────────────────────────
@@ -441,6 +513,18 @@ function createEnforcementHooks(agentName, options = {}) {
     hooks.onPostToolUse = async (input, invocation) => {
         const state = getState(invocation.sessionId || stableFallbackId);
         const toolName = input.toolName;
+        let runtimeObservationContext = null;
+
+        const runtimeObservation = extractRuntimeObservation(toolName, input.result);
+        if (runtimeObservation) {
+            state.lastRuntimeBlocker = runtimeObservation;
+            state.runtimeObservations.push({
+                ...runtimeObservation,
+                timestamp: new Date().toISOString(),
+            });
+            log(`🚨 Runtime blocker observed via ${toolName}: ${runtimeObservation.blocker.kind || 'unknown'}`);
+            runtimeObservationContext = formatRuntimeObservationContext(runtimeObservation);
+        }
 
         // ── Context Engineering: Trim bloated tool results to save context budget ──
         // MCP snapshots, network requests, console messages can be 50K+ chars.
@@ -505,6 +589,7 @@ function createEnforcementHooks(agentName, options = {}) {
 
                 return {
                     additionalContext:
+                        (runtimeObservationContext ? `${runtimeObservationContext}\n\n` : '') +
                         `${severity} OODA SNAPSHOT QUALITY ${qualityAssessment.decision}:\n` +
                         qualityAssessment.warnings.map(w => `  • ${w}`).join('\n') + '\n\n' +
                         (qualityAssessment.recommendation || 'Consider re-snapshotting after page fully loads.') +
@@ -613,7 +698,9 @@ function createEnforcementHooks(agentName, options = {}) {
             }
         }
 
-        return {};
+        return runtimeObservationContext
+            ? { additionalContext: runtimeObservationContext }
+            : {};
     };
 
     // ─────────────────────────────────────────────────────────────────
@@ -622,8 +709,20 @@ function createEnforcementHooks(agentName, options = {}) {
     hooks.onErrorOccurred = async (input, invocation) => {
         const errorMsg = input.error || '';
         const context = input.errorContext || '';
+        const state = getState(invocation.sessionId || stableFallbackId);
 
         log(`Error in ${context}: ${errorMsg.substring(0, 100)}`);
+
+        if (errorMsg.includes('RUNTIME_BLOCKER') || errorMsg.includes('Blocked by native dialog') || errorMsg.includes('Blocked by modal')) {
+            const lastObservation = state.lastRuntimeBlocker;
+            const blockerClassification = lastObservation?.blocker?.classification || {};
+            return {
+                errorHandling: blockerClassification.autoRecoverable === false ? 'abort' : 'retry',
+                additionalContext: lastObservation
+                    ? formatRuntimeObservationContext(lastObservation)
+                    : 'Runtime blocker detected. Clear the blocking dialog/modal before retrying the previous action.',
+            };
+        }
 
         // MCP connection errors — retry
         if (errorMsg.includes('MCP') || errorMsg.includes('connection refused')) {
@@ -702,7 +801,6 @@ function createEnforcementHooks(agentName, options = {}) {
  * agent name prefix. Used by the `get_snapshot_quality` SDK tool.
  *
  * @param {string} agentNamePrefix  - Agent name to match (e.g. 'scriptgenerator')
- * @returns {Object|null} Snapshot quality summary or null if no data
  */
 function getSnapshotQualityData(agentNamePrefix) {
     // Find session matching the agent prefix (most recent wins)
@@ -729,6 +827,7 @@ function getSnapshotQualityData(agentNamePrefix) {
     return {
         totalSnapshots: snapshots.length,
         qualityAssessed: qualitySnapshots.length,
+        runtimeObservations: latestState.runtimeObservations.length,
         summary: { accepted: acceptCount, warned: warnCount, retryRecommended: retryCount },
         latestSnapshot: latestSnapshot.quality ? {
             decision: latestSnapshot.quality.decision,

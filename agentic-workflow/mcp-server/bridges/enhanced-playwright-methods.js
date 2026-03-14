@@ -162,6 +162,10 @@ export const EnhancedPlaywrightMethods = {
      */
     async getOuterHtml(args) {
         const selector = this._resolveSelector(args);
+        const blocked = await this._guardInteraction('get_outer_html', selector, { includeDom: true });
+        if (blocked) {
+            return blocked;
+        }
         // outerHTML requires evaluate
         const html = await this.page.locator(selector).evaluate(el => el.outerHTML);
         return {
@@ -221,6 +225,10 @@ export const EnhancedPlaywrightMethods = {
      */
     async isVisible(args) {
         const selector = this._resolveSelector(args);
+        const blocked = await this._guardInteraction('is_visible', selector, { includeDom: true });
+        if (blocked) {
+            return blocked;
+        }
         const visible = await this.page.locator(selector).isVisible();
         return {
             success: true,
@@ -304,7 +312,21 @@ export const EnhancedPlaywrightMethods = {
     async waitForElement(args) {
         const { state, timeout = 30000 } = args;
         const selector = this._resolveSelector(args);
-        await this.page.locator(selector).waitFor({ state, timeout });
+
+        const blocked = await this._guardInteraction('wait_for_element', selector, { includeDom: true });
+        if (blocked) {
+            return blocked;
+        }
+
+        try {
+            await this.page.locator(selector).waitFor({ state, timeout });
+        } catch (error) {
+            const blockerState = await this.getBlockingState();
+            if (blockerState.present) {
+                return this._buildBlockedResult('wait_for_element', blockerState.blocker, { target: selector });
+            }
+            throw error;
+        }
         return {
             success: true,
             state,
@@ -322,11 +344,35 @@ export const EnhancedPlaywrightMethods = {
     async check(args) {
         const { force = false } = args;
         const selector = this._resolveSelector(args);
+
+        const blocked = await this._guardInteraction('check', selector, { includeDom: true });
+        if (blocked) {
+            return blocked;
+        }
+
         await this.page.locator(selector).check({ force });
+
+        const postActionBlocker = await this._capturePostActionBlocker('check', selector);
+        const checked = await this.page.locator(selector).isChecked().catch(() => false);
+        if (!checked) {
+            return {
+                success: false,
+                error: 'Checkbox state did not change after check()',
+                errorCode: 'ACTION_VERIFICATION_FAILED',
+                selector,
+                blocker: postActionBlocker?.blocker || null,
+                recovery: {
+                    recommendedAction: postActionBlocker?.blocker?.kind === 'native-dialog' ? 'handle_dialog' : 're_snapshot_or_retry',
+                    retryable: true,
+                },
+            };
+        }
+
         return {
             success: true,
             checked: true,
-            selector
+            selector,
+            blockerDetected: postActionBlocker?.blocker || null,
         };
     },
 

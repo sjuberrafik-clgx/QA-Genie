@@ -214,6 +214,10 @@ function formatSize(bytes) {
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+function getActiveSessionId(deps) {
+    return deps?.getSessionId?.() || deps?.sessionContext?.sessionId || deps?.sessionId || 'default';
+}
+
 function getExtension(filePath) {
     return path.extname(filePath).toLowerCase();
 }
@@ -554,7 +558,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
                 }
 
                 // Derive sessionId from deps or use a default
-                const sessionId = deps.sessionId || 'default';
+                const sessionId = getActiveSessionId(deps);
                 setSessionRoot(sessionId, resolved);
 
                 // Quick stats about the directory
@@ -608,7 +612,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
         },
         handler: async ({ path: userPath = '.', recursive = false, maxDepth = 3 }) => {
             try {
-                const sessionId = deps.sessionId || 'default';
+                const sessionId = getActiveSessionId(deps);
                 const resolved = await resolveSandboxedReal(sessionId, userPath);
                 const root = getSessionRoot(sessionId);
 
@@ -662,7 +666,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
         },
         handler: async ({ path: userPath, startLine, endLine }) => {
             try {
-                const sessionId = deps.sessionId || 'default';
+                const sessionId = getActiveSessionId(deps);
                 const resolved = await resolveSandboxedReal(sessionId, userPath);
 
                 const stats = await stat(resolved);
@@ -728,7 +732,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
         },
         handler: async ({ path: userPath }) => {
             try {
-                const sessionId = deps.sessionId || 'default';
+                const sessionId = getActiveSessionId(deps);
                 const resolved = await resolveSandboxedReal(sessionId, userPath);
                 const stats = await stat(resolved);
 
@@ -772,7 +776,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
         },
         handler: async ({ path: userPath = '.' }) => {
             try {
-                const sessionId = deps.sessionId || 'default';
+                const sessionId = getActiveSessionId(deps);
                 const resolved = await resolveSandboxedReal(sessionId, userPath);
 
                 const typeBreakdown = {};
@@ -869,7 +873,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
         },
         handler: async ({ query, path: userPath = '.', contentSearch = false, extensions }) => {
             try {
-                const sessionId = deps.sessionId || 'default';
+                const sessionId = getActiveSessionId(deps);
                 const resolved = await resolveSandboxedReal(sessionId, userPath);
                 const root = getSessionRoot(sessionId);
                 const results = [];
@@ -992,7 +996,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
         },
         handler: async ({ path: userPath, maxChars, sheets, maxRows }) => {
             try {
-                const sessionId = deps.sessionId || 'default';
+                const sessionId = getActiveSessionId(deps);
                 const resolved = await resolveSandboxedReal(sessionId, userPath);
 
                 const options = {};
@@ -1033,7 +1037,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
         },
         handler: async ({ path: userPath }) => {
             try {
-                const sessionId = deps.sessionId || 'default';
+                const sessionId = getActiveSessionId(deps);
                 const resolved = await resolveSandboxedReal(sessionId, userPath);
                 const fstat = await stat(resolved);
 
@@ -1082,7 +1086,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
             },
             handler: async ({ path: userPath, content }) => {
                 try {
-                    const sessionId = deps.sessionId || 'default';
+                    const sessionId = getActiveSessionId(deps);
                     const resolved = resolveSandboxed(sessionId, userPath);
 
                     const exists = fs.existsSync(resolved);
@@ -1137,7 +1141,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
             },
             handler: async ({ path: userPath }) => {
                 try {
-                    const sessionId = deps.sessionId || 'default';
+                    const sessionId = getActiveSessionId(deps);
                     const resolved = resolveSandboxed(sessionId, userPath);
 
                     if (fs.existsSync(resolved)) {
@@ -1182,7 +1186,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
             },
             handler: async ({ sources: sourcesJson, destination }) => {
                 try {
-                    const sessionId = deps.sessionId || 'default';
+                    const sessionId = getActiveSessionId(deps);
                     let sources;
                     try {
                         sources = JSON.parse(sourcesJson);
@@ -1263,7 +1267,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
             },
             handler: async ({ sources: sourcesJson, destination }) => {
                 try {
-                    const sessionId = deps.sessionId || 'default';
+                    const sessionId = getActiveSessionId(deps);
                     let sources;
                     try {
                         sources = JSON.parse(sourcesJson);
@@ -1332,7 +1336,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
             },
             handler: async ({ path: userPath, newName }) => {
                 try {
-                    const sessionId = deps.sessionId || 'default';
+                    const sessionId = getActiveSessionId(deps);
                     const resolved = await resolveSandboxedReal(sessionId, userPath);
 
                     // Ensure newName doesn't contain path separators
@@ -1389,7 +1393,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
             },
             handler: async ({ paths: pathsJson }) => {
                 try {
-                    const sessionId = deps.sessionId || 'default';
+                    const sessionId = getActiveSessionId(deps);
                     let paths;
                     try {
                         paths = JSON.parse(pathsJson);
@@ -1496,7 +1500,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
         },
         handler: async ({ path: userPath }) => {
             try {
-                const sessionId = deps.sessionId || 'default';
+                const sessionId = getActiveSessionId(deps);
                 const resolved = await resolveSandboxedReal(sessionId, userPath);
 
                 // Verify it's a file — auto-search workspace if not found at given path
@@ -1601,7 +1605,7 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
         },
         handler: async ({ path: userPath }) => {
             try {
-                const sessionId = deps.sessionId || 'default';
+                const sessionId = getActiveSessionId(deps);
                 const resolved = await resolveSandboxedReal(sessionId, userPath);
 
                 // Auto-search workspace if not found at given path

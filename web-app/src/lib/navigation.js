@@ -4,6 +4,7 @@
  */
 
 import {
+    HomeIcon,
     DashboardIcon,
     ChatBubbleIcon,
     ClockIcon,
@@ -12,6 +13,7 @@ import {
 
 /** Primary navigation items shown in sidebar and mobile menu */
 export const NAV_ITEMS = [
+    { label: 'Home', to: '/', Icon: HomeIcon },
     { label: 'Dashboard', to: '/dashboard', Icon: DashboardIcon },
     { label: 'AI Chat', to: '/chat', Icon: ChatBubbleIcon },
     { label: 'History', to: '/history', Icon: ClockIcon },
@@ -23,10 +25,11 @@ export const FOOTER_NAV = [];
 
 /** Page title + subtitle map for the contextual header */
 export const PAGE_TITLES = {
-    '/dashboard': { title: 'Dashboard', subtitle: 'Overview & metrics' },
-    '/chat': { title: 'AI Chat', subtitle: 'Conversational test automation' },
-    '/history': { title: 'Chat History', subtitle: 'Previous sessions' },
-    '/reports': { title: 'Test Reports', subtitle: 'Execution results & analytics' },
+    '/': { title: 'Home', subtitle: 'Platform overview' },
+    '/dashboard': { title: 'Dashboard', subtitle: 'Operations and workflow status' },
+    '/chat': { title: 'AI Chat', subtitle: 'Conversation workspace' },
+    '/history': { title: 'Chat History', subtitle: 'Session archive' },
+    '/reports': { title: 'Test Reports', subtitle: 'Reporting and quality insights' },
     '/results': { title: 'Test Results', subtitle: 'Detailed run output' },
 };
 

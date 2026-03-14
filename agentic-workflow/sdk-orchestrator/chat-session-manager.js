@@ -123,6 +123,8 @@ const CHAT_EVENTS = {
     USER_INPUT_COMPLETE: 'chat_user_input_complete',
 };
 
+const MAX_ASSISTANT_IMAGE_BYTES = 6 * 1024 * 1024;
+
 // Default timeout for user-input requests (5 minutes).
 // If the user doesn't respond within this window, the agent receives
 // an auto-generated fallback answer so it doesn't hang forever.
@@ -197,6 +199,14 @@ class ChatSessionManager extends EventEmitter {
         'image/jpeg': '.jpg',
         'image/gif': '.gif',
         'image/webp': '.webp',
+    };
+
+    static _IMAGE_MIME_BY_EXT = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
     };
 
     /** MIME type → file extension mapping for document attachments. */
@@ -428,6 +438,7 @@ class ChatSessionManager extends EventEmitter {
                         '',
                         'RESPONSE FORMATTING — Rich Markdown:',
                         '- Use ## and ### headings to structure long responses into clear sections.',
+                        '- When the user explicitly asks to see a screenshot or visual proof in chat, save the screenshot to a file and call `publish_image_to_chat` so the image appears inline in the conversation.',
                         '- For flowcharts, process diagrams, decision trees, or architecture overviews, use mermaid fenced code blocks (```mermaid). The chat UI renders these as interactive SVG diagrams.',
                         '- IMPORTANT: In mermaid diagrams, always wrap node labels and edge labels in double quotes if they contain parentheses, slashes, commas, colons, or special characters. Example: A["Check config (v2)"] -->|"Already seen"| B["Skip"].',
                         '- Use markdown tables for structured comparisons, feature matrices, or data.',
@@ -541,6 +552,7 @@ class ChatSessionManager extends EventEmitter {
             '',
             'RESPONSE FORMATTING — Rich Markdown:',
             '- Use ## and ### headings to structure long responses into clear sections.',
+            '- When the user explicitly asks to see a screenshot or visual proof in chat, save the screenshot to a file and call `publish_image_to_chat` so the image appears inline in the conversation.',
             '- For flowcharts, process diagrams, decision trees, or architecture overviews, use mermaid fenced code blocks (```mermaid). The chat UI renders these as interactive SVG diagrams.',
             '- IMPORTANT: In mermaid diagrams, always wrap node labels and edge labels in double quotes if they contain parentheses, slashes, commas, colons, or special characters.',
             '- Use markdown tables for structured comparisons, feature matrices, or data.',
@@ -629,7 +641,7 @@ class ChatSessionManager extends EventEmitter {
      *
      * @param {string|null} agentMode
      */
-    _buildChatTools(agentMode) {
+    _buildChatTools(agentMode, sessionContext = null) {
         try {
             const { createCustomTools } = require('./custom-tools');
             const toolOpts = {
@@ -637,6 +649,8 @@ class ChatSessionManager extends EventEmitter {
                 config: this.config,
                 groundingStore: this._groundingStore || null,
                 chatManager: this,
+                sessionContext,
+                getSessionId: () => sessionContext?.sessionId || null,
             };
 
             let tools;
@@ -702,7 +716,8 @@ class ChatSessionManager extends EventEmitter {
             throw new Error(`Invalid agentMode: ${agentMode}. Valid: ${ChatSessionManager.VALID_AGENTS.join(', ')}`);
         }
 
-        const tools = this._buildChatTools(agentMode);
+        const sessionContext = { sessionId: null };
+        const tools = this._buildChatTools(agentMode, sessionContext);
         const systemPrompt = agentMode ? this._buildSystemPrompt(agentMode) : this._defaultSystemPrompt;
 
         console.log(`[ChatManager] Creating session — model: ${model}, agentMode: ${agentMode || 'TPM'}, tools: ${tools.length}`);
@@ -876,6 +891,7 @@ class ChatSessionManager extends EventEmitter {
             }
         }
         const sessionId = session.sessionId;
+        sessionContext.sessionId = sessionId;
         const createdAt = new Date().toISOString();
 
         // Store session metadata
@@ -888,6 +904,7 @@ class ChatSessionManager extends EventEmitter {
             messages: [],
             unsubscribers: [],
             archived: false,
+            sessionContext,
             pendingInputRequests: new Map(),  // requestId → { resolve, question, options, timer }
         });
 
@@ -1137,6 +1154,71 @@ class ChatSessionManager extends EventEmitter {
         }
     }
 
+    /**
+     * Publish a local image file into the chat transcript as an assistant message.
+     * The frontend already knows how to render message.attachments when provided
+     * with a data URL, so this bridges tool-generated screenshots back to chat.
+     *
+     * @param {string} sessionId
+     * @param {Object} options
+     * @param {string} options.filePath
+     * @param {string} [options.caption]
+     * @param {string} [options.altText]
+     * @returns {{ messageId: string, attachment: Object }}
+     */
+    publishAssistantImage(sessionId, options = {}) {
+        const entry = this._sessions.get(sessionId);
+        if (!entry) throw new Error(`Session ${sessionId} not found`);
+
+        const filePath = String(options.filePath || '').trim();
+        if (!filePath) throw new Error('filePath is required');
+        if (!fs.existsSync(filePath)) throw new Error(`Image file not found: ${filePath}`);
+
+        const ext = path.extname(filePath).toLowerCase();
+        const mimeType = ChatSessionManager._IMAGE_MIME_BY_EXT[ext];
+        if (!mimeType) {
+            throw new Error(`Unsupported image type: ${ext || 'unknown'}. Supported: png, jpg, jpeg, gif, webp.`);
+        }
+
+        const stat = fs.statSync(filePath);
+        if (stat.size > MAX_ASSISTANT_IMAGE_BYTES) {
+            throw new Error(`Image exceeds ${Math.round(MAX_ASSISTANT_IMAGE_BYTES / (1024 * 1024))} MB limit for inline chat display.`);
+        }
+
+        const buffer = fs.readFileSync(filePath);
+        const attachment = {
+            id: `assistant_img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            name: path.basename(filePath),
+            type: mimeType,
+            size: stat.size,
+            kind: 'image',
+            alt: String(options.altText || '').trim() || path.basename(filePath),
+            dataUrl: `data:${mimeType};base64,${buffer.toString('base64')}`,
+        };
+
+        const message = {
+            role: 'assistant',
+            content: String(options.caption || '').trim(),
+            timestamp: new Date().toISOString(),
+            attachments: [attachment],
+        };
+
+        entry.messages.push(message);
+        this._persistHistory();
+
+        this._broadcastToSSE(sessionId, CHAT_EVENTS.MESSAGE, {
+            content: message.content,
+            attachments: message.attachments,
+            reasoning: null,
+            messageId: attachment.id,
+        });
+
+        return {
+            messageId: attachment.id,
+            attachment,
+        };
+    }
+
     // ─── Auto-Progress Hints for MCP / Known Tools ──────────────────────────
 
     /**
@@ -1245,6 +1327,7 @@ class ChatSessionManager extends EventEmitter {
         'check_existing_coverage': { phase: 'grounding', message: 'Checking existing coverage...' },
         'get_snapshot_quality': { phase: 'validation', message: 'Analyzing snapshot quality...' },
         'analyze_test_failure': { phase: 'validation', message: 'Analyzing test failure...' },
+        'publish_image_to_chat': { phase: 'screenshot', message: 'Publishing image to chat...' },
     };
 
     /**
@@ -1694,6 +1777,7 @@ class ChatSessionManager extends EventEmitter {
             }
             const data = { content: msg.content, role: msg.role };
             if (msg.reasoning) data.reasoning = msg.reasoning;
+            if (Array.isArray(msg.attachments) && msg.attachments.length > 0) data.attachments = msg.attachments;
             const event = { type, sessionId, timestamp: msg.timestamp, data };
             try {
                 res.write(`event: ${type}\ndata: ${JSON.stringify(event)}\n\n`);

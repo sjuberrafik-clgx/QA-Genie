@@ -246,6 +246,9 @@ export class ScriptGenerator {
             case 'unified_handle_dialog':
                 return this.generateDialogCode(args);
 
+            case 'unified_create_tab':
+                return this.generateCreateTabCode(args);
+
             case 'unified_tabs':
                 return this.generateTabsCode(args);
 
@@ -354,17 +357,40 @@ export class ScriptGenerator {
     }
 
     /**
+     * Generate convenience tab-creation code.
+     */
+    generateCreateTabCode(args) {
+        const lines = ['const newPage = await context.newPage();'];
+
+        if (args.url) {
+            lines.push(`await newPage.goto('${args.url}');`);
+        }
+
+        if (args.activate !== false) {
+            lines.push('await newPage.bringToFront();');
+        }
+
+        return lines.join('\n  ');
+    }
+
+    /**
      * Generate tabs management code
      */
     generateTabsCode(args) {
         switch (args.action) {
             case 'create':
-                return 'const newPage = await context.newPage();';
+                return this.generateCreateTabCode(args);
             case 'close':
+                if (args.tabId) {
+                    return `// Close tab using stable tabId at runtime\n  await mcp.callTool('unified_tabs', { action: 'close', tabId: '${args.tabId}' });`;
+                }
                 return args.index !== undefined
                     ? `await pages[${args.index}].close();`
                     : 'await page.close();';
             case 'select':
+                if (args.tabId) {
+                    return `// Select tab using stable tabId at runtime\n  await mcp.callTool('unified_tabs', { action: 'select', tabId: '${args.tabId}' });`;
+                }
                 return `await pages[${args.index}].bringToFront();`;
             default:
                 return 'const pages = context.pages();';
@@ -567,26 +593,33 @@ export class LocatorGenerator {
      * Uses SelectorEngine.generateUniqueSelector for scoring.
      */
     static generateLocator(element) {
+        const normalizedElement = {
+            ...element,
+            computedLabel: element?.computedLabel || element?.accessibleName || element?.name || element?.label,
+        };
+
         // If element already has pre-computed selector data
-        if (element.selector && element.selector.primary) {
+        if (normalizedElement.selector && normalizedElement.selector.primary) {
             return {
-                type: element.selector.strategy || 'pre-computed',
-                code: element.selector.primary,
+                type: normalizedElement.selector.strategy?.includes('role') ? 'role' : (normalizedElement.selector.strategy || 'pre-computed'),
+                code: normalizedElement.selector.primary,
                 priority: 1,
-                stabilityScore: element.selector.stabilityScore || 10,
-                isUnique: element.selector.isUnique ?? true,
+                stabilityScore: normalizedElement.selector.stabilityScore || 10,
+                isUnique: normalizedElement.selector.isUnique ?? true,
+                strategyDetail: normalizedElement.selector.strategy || 'pre-computed',
             };
         }
 
         // Otherwise compute via SelectorEngine
-        const result = SelectorEngine.generateUniqueSelector(element, {});
+        const result = SelectorEngine.generateUniqueSelector(normalizedElement, {});
         return {
-            type: result.strategy,
+            type: result.strategy.includes('role') ? 'role' : result.strategy,
             code: result.primary,
             priority: 1,
             stabilityScore: result.stabilityScore,
             isUnique: result.isUnique,
             fallback: result.fallback,
+            strategyDetail: result.strategy,
         };
     }
 }

@@ -52,6 +52,31 @@ import { getTemplates } from './tools/exploration-templates.js';
 import { ServerConfig } from './config/server-config.js';
 import { EventManager } from './utils/event-manager.js';
 
+function classifyToolFailure(error) {
+    const blocker = error?.blocker || null;
+    const message = error?.message || 'Unknown tool execution error';
+
+    if (error?.code === 'RUNTIME_BLOCKER' || blocker) {
+        return {
+            code: 'RUNTIME_BLOCKER',
+            message,
+            blocker,
+        };
+    }
+
+    if (/timed out after/i.test(message)) {
+        return {
+            code: 'TOOL_TIMEOUT',
+            message,
+        };
+    }
+
+    return {
+        code: 'INTERNAL_TOOL_ERROR',
+        message,
+    };
+}
+
 /**
  * Unified Automation MCP Server
  * Combines Playwright and ChromeDevTools capabilities into a single MCP interface
@@ -128,169 +153,161 @@ class UnifiedAutomationServer {
      * Register the tools/list handler
      */
     registerToolListHandler() {
-        // Read tool profile from environment variable (set by SDK session manager).
-        // Profiles: 'core' (~65 tools), 'advanced' (~141 tools), 'full' (all 141).
-        // Default: 'full' for backward compatibility.
+        this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+            return await this.listToolsResponse();
+        });
+    }
+
+    /**
+     * Build the tools/list response payload.
+     * Exposed as a public method so integration tests can exercise the real
+     * list logic without going through a transport layer.
+     */
+    async listToolsResponse() {
         const toolProfile = process.env.MCP_TOOL_PROFILE || 'full';
         const allowedCategories = getProfileCategories(toolProfile);
-
-        // Deferred loading mode (Anthropic Technique 3: Tool Search).
-        // When enabled, only always-loaded tools + tool_search are exposed in tools/list.
-        // All other tools are discoverable via unified_tool_search and callable via tools/call.
-        // Set MCP_DEFERRED_LOADING=true to enable. Default: false for backward compatibility.
         const deferredLoading = process.env.MCP_DEFERRED_LOADING === 'true';
 
-        this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-            // Step 1: Start with all tools
-            let toolsToExpose = ALL_TOOLS;
+        let toolsToExpose = ALL_TOOLS;
 
-            // Step 2: Apply profile category filter (if a profile is active)
-            if (allowedCategories) {
-                toolsToExpose = toolsToExpose.filter(tool => {
-                    const category = tool._meta?.category || 'unknown';
-                    return allowedCategories.includes(category);
-                });
-            }
-
-            // Step 3: Apply deferred loading filter
-            // Only expose always-loaded tools — deferred tools discoverable via tool_search
-            if (deferredLoading) {
-                toolsToExpose = toolsToExpose.filter(tool => !isToolDeferred(tool.name));
-            }
-
-            const statsInfo = deferredLoading
-                ? `${toolsToExpose.length + 1}/${ALL_TOOLS.length} tools (profile: ${toolProfile}, deferred: ON)`
-                : allowedCategories
-                    ? `${toolsToExpose.length}/${ALL_TOOLS.length} tools (profile: ${toolProfile})`
-                    : `${toolsToExpose.length} tools (profile: full)`;
-            console.error(`[UnifiedMCP] Handling tools/list request - Exposing ${statsInfo}`);
-
-            // Sanitize tools for MCP protocol compliance:
-            // 1. Strip non-standard _meta field (used internally for routing)
-            // 2. Add additionalProperties:false to schemas with explicit properties
-            //    to catch LLM-hallucinated parameters early
-            const sanitizedTools = toolsToExpose.map(tool => {
-                const { _meta, ...cleanTool } = tool;
-                if (cleanTool.inputSchema &&
-                    cleanTool.inputSchema.properties &&
-                    Object.keys(cleanTool.inputSchema.properties).length > 0) {
-                    cleanTool.inputSchema = {
-                        ...cleanTool.inputSchema,
-                        additionalProperties: false,
-                    };
-                }
-                // Inject tool use examples (Anthropic Technique 4)
-                // Improves complex parameter accuracy ~72% → ~90%
-                const examples = getToolExamples(cleanTool.name);
-                if (examples) {
-                    cleanTool.examples = examples;
-                }
-                return cleanTool;
+        if (allowedCategories) {
+            toolsToExpose = toolsToExpose.filter(tool => {
+                const category = tool._meta?.category || 'unknown';
+                return allowedCategories.includes(category);
             });
+        }
 
-            // Append the tool_search meta-tool when deferred loading is active
-            if (deferredLoading) {
-                const { _meta, ...cleanSearch } = TOOL_SEARCH_DEFINITION;
-                cleanSearch.inputSchema = {
-                    ...cleanSearch.inputSchema,
+        if (deferredLoading) {
+            toolsToExpose = toolsToExpose.filter(tool => !isToolDeferred(tool.name));
+        }
+
+        const statsInfo = deferredLoading
+            ? `${toolsToExpose.length + 1}/${ALL_TOOLS.length} tools (profile: ${toolProfile}, deferred: ON)`
+            : allowedCategories
+                ? `${toolsToExpose.length}/${ALL_TOOLS.length} tools (profile: ${toolProfile})`
+                : `${toolsToExpose.length} tools (profile: full)`;
+        console.error(`[UnifiedMCP] Handling tools/list request - Exposing ${statsInfo}`);
+
+        const sanitizedTools = toolsToExpose.map(tool => {
+            const { _meta, ...cleanTool } = tool;
+            if (cleanTool.inputSchema &&
+                cleanTool.inputSchema.properties &&
+                Object.keys(cleanTool.inputSchema.properties).length > 0) {
+                cleanTool.inputSchema = {
+                    ...cleanTool.inputSchema,
                     additionalProperties: false,
                 };
-                sanitizedTools.push(cleanSearch);
             }
 
-            // Append execute_exploration meta-tool (always available — it's in ALWAYS_LOADED_TOOLS)
-            // Only append if not already present from ALL_TOOLS (it's a custom tool, not in definitions)
-            if (!sanitizedTools.some(t => t.name === 'unified_execute_exploration')) {
-                const { _meta, ...cleanExec } = EXECUTE_EXPLORATION_DEFINITION;
-                cleanExec.inputSchema = {
-                    ...cleanExec.inputSchema,
-                    additionalProperties: false,
-                };
-                const examples = getToolExamples('unified_execute_exploration');
-                if (examples) {
-                    cleanExec.examples = examples;
-                }
-                sanitizedTools.push(cleanExec);
+            const examples = getToolExamples(cleanTool.name);
+            if (examples) {
+                cleanTool.examples = examples;
             }
-
-            return {
-                tools: sanitizedTools,
-            };
+            return cleanTool;
         });
+
+        if (deferredLoading) {
+            const { _meta, ...cleanSearch } = TOOL_SEARCH_DEFINITION;
+            cleanSearch.inputSchema = {
+                ...cleanSearch.inputSchema,
+                additionalProperties: false,
+            };
+            sanitizedTools.push(cleanSearch);
+        }
+
+        if (!sanitizedTools.some(t => t.name === 'unified_execute_exploration')) {
+            const { _meta, ...cleanExec } = EXECUTE_EXPLORATION_DEFINITION;
+            cleanExec.inputSchema = {
+                ...cleanExec.inputSchema,
+                additionalProperties: false,
+            };
+            const examples = getToolExamples('unified_execute_exploration');
+            if (examples) {
+                cleanExec.examples = examples;
+            }
+            sanitizedTools.push(cleanExec);
+        }
+
+        return {
+            tools: sanitizedTools,
+        };
     }
 
     /**
      * Register the tools/call handler
      */
     registerToolCallHandler() {
-        // Per-tool-call timeout to prevent indefinite hangs when Playwright operations freeze.
-        // Without this, a stuck page.evaluate() or unresponsive navigation blocks the MCP
-        // server forever, and the SDK session hangs for its full 10-minute timeout.
-        const toolCallTimeout = this.config.playwright?.toolCallTimeout
-            ?? (parseInt(process.env.MCP_TOOL_TIMEOUT) || 120000); // Default: 2 minutes
-
         this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const { name, arguments: args } = request.params;
-            console.error(`[UnifiedMCP] Handling tool call: ${name}`);
+            return await this.callToolResponse(name, args || {});
+        });
+    }
 
-            try {
-                // Handle tool_search internally (no routing needed)
-                if (name === 'unified_tool_search') {
-                    const searchResult = handleToolSearch(args || {});
-                    return {
-                        content: [
-                            {
-                                type: 'text',
-                                text: JSON.stringify(searchResult, null, 2),
-                            },
-                        ],
-                    };
-                }
+    /**
+     * Build the tools/call response payload.
+     * Exposed as a public method so integration tests can exercise the real
+     * server call path without transport bootstrapping.
+     */
+    async callToolResponse(name, args = {}) {
+        const toolCallTimeout = this.config.playwright?.toolCallTimeout
+            ?? (parseInt(process.env.MCP_TOOL_TIMEOUT) || 120000);
 
-                // Handle execute_exploration internally (Anthropic Technique 1: Programmatic Tool Calling)
-                // Routes tool calls through the existing router — same timeout/routing as normal calls
-                if (name === 'unified_execute_exploration') {
-                    const routeToolCall = async (toolName, toolArgs) => {
-                        return await this.router.route(toolName, toolArgs);
-                    };
-                    const execResult = await executeExploration(args || {}, routeToolCall, getTemplates());
-                    return {
-                        content: [
-                            {
-                                type: 'text',
-                                text: JSON.stringify(execResult, null, 2),
-                            },
-                        ],
-                    };
-                }
+        console.error(`[UnifiedMCP] Handling tool call: ${name}`);
 
-                // Route the tool call with a timeout guard
-                // NOTE: tools/call accepts ANY valid tool name regardless of deferred status.
-                const result = await Promise.race([
-                    this.router.route(name, args || {}),
-                    new Promise((_, reject) =>
-                        setTimeout(() => reject(new Error(
-                            `Tool call '${name}' timed out after ${toolCallTimeout}ms. ` +
-                            'The page may be unresponsive or a selector was not found.'
-                        )), toolCallTimeout)
-                    ),
-                ]);
+        try {
+            if (name === 'unified_tool_search') {
+                const searchResult = handleToolSearch(args || {});
                 return {
                     content: [
                         {
                             type: 'text',
-                            text: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+                            text: JSON.stringify(searchResult, null, 2),
                         },
                     ],
                 };
-            } catch (error) {
-                console.error(`[UnifiedMCP] Tool call error: ${error.message}`);
-                throw new McpError(
-                    ErrorCode.InternalError,
-                    `Tool execution failed: ${error.message}`
-                );
             }
-        });
+
+            if (name === 'unified_execute_exploration') {
+                const routeToolCall = async (toolName, toolArgs) => {
+                    return await this.router.route(toolName, toolArgs);
+                };
+                const execResult = await executeExploration(args || {}, routeToolCall, getTemplates());
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify(execResult, null, 2),
+                        },
+                    ],
+                };
+            }
+
+            const result = await Promise.race([
+                this.router.route(name, args || {}),
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error(
+                        `Tool call '${name}' timed out after ${toolCallTimeout}ms. ` +
+                        'The page may be unresponsive or a selector was not found.'
+                    )), toolCallTimeout)
+                ),
+            ]);
+
+            return {
+                content: [
+                    {
+                        type: 'text',
+                        text: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+                    },
+                ],
+            };
+        } catch (error) {
+            const failure = classifyToolFailure(error);
+            console.error(`[UnifiedMCP] Tool call error [${failure.code}]: ${failure.message}`);
+            throw new McpError(
+                ErrorCode.InternalError,
+                `Tool execution failed [${failure.code}]: ${failure.message}`
+            );
+        }
     }
 
     /**
@@ -607,13 +624,23 @@ class UnifiedAutomationServer {
         }
 
         if (cleanupTasks.length > 0) {
-            await Promise.race([
-                Promise.allSettled(cleanupTasks),
-                new Promise(resolve => setTimeout(() => {
-                    console.error(`[UnifiedMCP] Shutdown timeout (${SHUTDOWN_TIMEOUT_MS}ms) — forcing exit`);
-                    resolve();
-                }, SHUTDOWN_TIMEOUT_MS)),
-            ]);
+            let shutdownTimer;
+
+            try {
+                await Promise.race([
+                    Promise.allSettled(cleanupTasks),
+                    new Promise(resolve => {
+                        shutdownTimer = setTimeout(() => {
+                            console.error(`[UnifiedMCP] Shutdown timeout (${SHUTDOWN_TIMEOUT_MS}ms) — forcing exit`);
+                            resolve();
+                        }, SHUTDOWN_TIMEOUT_MS);
+                    }),
+                ]);
+            } finally {
+                if (shutdownTimer) {
+                    clearTimeout(shutdownTimer);
+                }
+            }
         }
 
         console.error('[UnifiedMCP] Server shutdown complete');
@@ -640,52 +667,55 @@ function parseArgs() {
     return parsed;
 }
 
-const cliArgs = parseArgs();
-const transport = cliArgs.transport ?? process.env.MCP_TRANSPORT ?? 'stdio';
-const serverOptions = {
-    port: cliArgs.port ? parseInt(cliArgs.port) : undefined,
-    host: cliArgs.host ?? undefined,
-};
+async function startCli() {
+    const cliArgs = parseArgs();
+    const transport = cliArgs.transport ?? process.env.MCP_TRANSPORT ?? 'stdio';
+    const serverOptions = {
+        port: cliArgs.port ? parseInt(cliArgs.port) : undefined,
+        host: cliArgs.host ?? undefined,
+    };
 
-// ── Use ServerConfig.fromEnvironment() to read env vars (MCP_HEADLESS, MCP_TIMEOUT, etc.) ──
-const envConfig = ServerConfig.fromEnvironment();
-const server = new UnifiedAutomationServer(envConfig.config);
+    const envConfig = ServerConfig.fromEnvironment();
+    const server = new UnifiedAutomationServer(envConfig.config);
 
-// Handle process signals for graceful shutdown
-process.on('SIGINT', async () => {
-    await server.shutdown();
-    process.exit(0);
-});
+    process.on('SIGINT', async () => {
+        await server.shutdown();
+        process.exit(0);
+    });
 
-process.on('SIGTERM', async () => {
-    await server.shutdown();
-    process.exit(0);
-});
+    process.on('SIGTERM', async () => {
+        await server.shutdown();
+        process.exit(0);
+    });
 
-// ── Handle fatal errors to prevent orphaned browser processes ──
-process.on('uncaughtException', async (error) => {
-    console.error('[UnifiedMCP] FATAL uncaughtException:', error.message);
-    console.error(error.stack);
-    try { await server.shutdown(); } catch { /* best-effort cleanup */ }
-    process.exit(1);
-});
+    process.on('uncaughtException', async (error) => {
+        console.error('[UnifiedMCP] FATAL uncaughtException:', error.message);
+        console.error(error.stack);
+        try { await server.shutdown(); } catch { /* best-effort cleanup */ }
+        process.exit(1);
+    });
 
-process.on('unhandledRejection', async (reason) => {
-    console.error('[UnifiedMCP] FATAL unhandledRejection:', reason);
-    try { await server.shutdown(); } catch { /* best-effort cleanup */ }
-    process.exit(1);
-});
+    process.on('unhandledRejection', async (reason) => {
+        console.error('[UnifiedMCP] FATAL unhandledRejection:', reason);
+        try { await server.shutdown(); } catch { /* best-effort cleanup */ }
+        process.exit(1);
+    });
 
-// Ignore SIGPIPE — fired when SDK session kills the stdio pipe on timeout.
-// Without this handler, the MCP process crashes without cleanup, orphaning the browser.
-process.on('SIGPIPE', () => {
-    console.error('[UnifiedMCP] SIGPIPE received — stdio pipe closed by parent. Ignoring.');
-});
+    process.on('SIGPIPE', () => {
+        console.error('[UnifiedMCP] SIGPIPE received — stdio pipe closed by parent. Ignoring.');
+    });
 
-// Start the server
-server.start(transport, serverOptions).catch((error) => {
-    console.error('[UnifiedMCP] Failed to start server:', error);
-    process.exit(1);
-});
+    await server.start(transport, serverOptions);
+}
+
+const isDirectExecution = process.argv[1]
+    && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isDirectExecution) {
+    startCli().catch((error) => {
+        console.error('[UnifiedMCP] Failed to start server:', error);
+        process.exit(1);
+    });
+}
 
 export { UnifiedAutomationServer };

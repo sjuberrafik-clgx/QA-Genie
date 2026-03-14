@@ -530,8 +530,30 @@ export const UNIFIED_TOOLS = [
     // TAB MANAGEMENT (Primary: Playwright MCP)
     // ═══════════════════════════════════════════════════════════════════════════════
     {
+        name: 'unified_create_tab',
+        description: 'Create a new browser tab with optional URL navigation and activation. Returns stable tab metadata including tabId.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                url: {
+                    type: 'string',
+                    description: 'Optional URL to open in the new tab'
+                },
+                activate: {
+                    type: 'boolean',
+                    description: 'Whether to activate the newly created tab. Defaults to true.'
+                }
+            }
+        },
+        _meta: {
+            source: 'playwright',
+            category: 'tab',
+            readOnly: false
+        }
+    },
+    {
         name: 'unified_tabs',
-        description: 'Manage browser tabs: list, create, close, or select.',
+        description: 'Manage browser tabs: list, create, close, or select. Supports legacy index targeting and stable tabId targeting.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -543,6 +565,18 @@ export const UNIFIED_TOOLS = [
                 index: {
                     type: 'number',
                     description: 'Tab index for close/select operations'
+                },
+                tabId: {
+                    type: 'string',
+                    description: 'Stable tab identifier for close/select operations'
+                },
+                url: {
+                    type: 'string',
+                    description: 'Optional URL to open when action is create'
+                },
+                activate: {
+                    type: 'boolean',
+                    description: 'Whether the created tab should become active. Defaults to true.'
                 }
             },
             required: ['action']
@@ -1068,6 +1102,7 @@ export const TOOL_MAPPING = {
     unified_fill_form: 'browser_fill_form',
     unified_file_upload: 'browser_file_upload',
     unified_wait_for: 'browser_wait_for',
+    unified_create_tab: 'browser_create_tab',
     unified_tabs: 'browser_tabs',
     unified_handle_dialog: 'browser_handle_dialog',
     unified_evaluate: 'browser_evaluate',
@@ -1125,6 +1160,8 @@ export const ALWAYS_LOADED_TOOLS = new Set([
     // Navigation (must-have)
     'unified_navigate',
     'unified_navigate_back',
+    'unified_create_tab',
+    'unified_tabs',
     // Snapshot (must-have for MCP-first exploration)
     'unified_snapshot',
     'unified_screenshot',

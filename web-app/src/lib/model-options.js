@@ -1,6 +1,6 @@
 /**
  * AI Model Options — Shared constants for model selection dropdowns.
- * Single source of truth used by Dashboard and Chat pages.
+ * Frontend fallback catalog used until the backend runtime catalog loads.
  */
 
 export const MODEL_GROUPS = [
@@ -17,6 +17,8 @@ export const MODEL_GROUPS = [
             { value: 'gpt-5.1-codex-max', label: 'GPT-5.1-Codex-Max', vision: false },
             { value: 'gpt-5.1-codex-mini', label: 'GPT-5.1-Codex-Mini (Preview)', vision: false },
             { value: 'gpt-5.2', label: 'GPT-5.2', vision: true },
+            { value: 'gpt-5.3', label: 'GPT-5.3', vision: true },
+            { value: 'gpt-5.4', label: 'GPT-5.4', vision: true },
             { value: 'o3-mini', label: 'o3-mini', vision: false },
         ],
     },
@@ -43,22 +45,35 @@ export const MODEL_GROUPS = [
 /**
  * Flat list of all models for quick lookup.
  */
-export const ALL_MODELS = MODEL_GROUPS.flatMap(g => g.models);
+export function flattenModelGroups(groups = MODEL_GROUPS) {
+    return groups.flatMap(group => group.models || []);
+}
+
+export function hasModelValue(value, groups = MODEL_GROUPS) {
+    return flattenModelGroups(groups).some(model => model.value === value);
+}
+
+export const ALL_MODELS = flattenModelGroups();
 
 /**
  * Get display label for a model value.
  */
-export function getModelLabel(value) {
-    const model = ALL_MODELS.find(m => m.value === value);
+export function getModelLabel(value, groups = MODEL_GROUPS) {
+    const model = flattenModelGroups(groups).find(m => m.value === value);
     return model?.label || value;
 }
 
-export const DEFAULT_MODEL = 'gpt-4o';
+export function getDefaultModel(groups = MODEL_GROUPS, preferred = 'gpt-4o') {
+    if (preferred && hasModelValue(preferred, groups)) return preferred;
+    return flattenModelGroups(groups)[0]?.value || preferred;
+}
+
+export const DEFAULT_MODEL = getDefaultModel();
 
 /**
  * Check if a model supports vision/image input.
  */
-export function isVisionModel(value) {
-    const model = ALL_MODELS.find(m => m.value === value);
+export function isVisionModel(value, groups = MODEL_GROUPS) {
+    const model = flattenModelGroups(groups).find(m => m.value === value);
     return model?.vision ?? true; // default true for unknown models (safe assumption)
 }

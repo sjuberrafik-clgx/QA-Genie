@@ -394,6 +394,26 @@ async function startServer(options = {}) {
 
     const router = new Router();
 
+    async function resolveModelSelection(requestedModel) {
+        const catalog = await orchestrator.getModelCatalog();
+        const effectiveModel = requestedModel || catalog.defaultModel;
+        const supported = (catalog.availableModels || catalog.models || []).some(model => model.value === effectiveModel);
+
+        if (!supported) {
+            return {
+                ok: false,
+                catalog,
+                error: `Unsupported model: ${effectiveModel}`,
+            };
+        }
+
+        return {
+            ok: true,
+            catalog,
+            effectiveModel,
+        };
+    }
+
     // Parse CORS origins
     const corsOrigins = (process.env.CORS_ORIGINS || '*').split(',').map(s => s.trim());
     router.setCorsOrigins(corsOrigins);
@@ -446,6 +466,18 @@ async function startServer(options = {}) {
         });
     });
 
+    router.get('/api/models', async (req, res) => {
+        try {
+            const catalog = await orchestrator.getModelCatalog({ refresh: req.query.refresh === 'true' });
+            ok(res, {
+                ...catalog,
+                ready: orchestratorReady,
+            });
+        } catch (error) {
+            json(res, 500, { error: `Failed to load model catalog: ${error.message}` });
+        }
+    });
+
     // ═════════════════════════════════════════════════════════════════
     // PIPELINE EXECUTION
     // ═════════════════════════════════════════════════════════════════
@@ -474,18 +506,27 @@ async function startServer(options = {}) {
             return conflict(res, `Pipeline already running for ${ticketId} (runId: ${activeRun.runId})`);
         }
 
-        // Create run record
-        const run = runStore.createRun({
-            ticketId,
-            mode: mode || 'full',
-            environment: environment || 'UAT',
-            triggeredBy: triggeredBy || 'api',
-        });
+        resolveModelSelection(model)
+            .then(({ ok: valid, effectiveModel, error }) => {
+                if (!valid) {
+                    return badRequest(res, error);
+                }
 
-        // Start pipeline in background (non-blocking)
-        _executePipeline(run.runId, ticketId, mode || 'full', orchestrator, runStore, eventBridge, activePipelines, model);
+                const run = runStore.createRun({
+                    ticketId,
+                    mode: mode || 'full',
+                    environment: environment || 'UAT',
+                    triggeredBy: triggeredBy || 'api',
+                    model: effectiveModel,
+                });
 
-        accepted(res, { runId: run.runId, status: run.status, ticketId });
+                _executePipeline(run.runId, ticketId, mode || 'full', orchestrator, runStore, eventBridge, activePipelines, effectiveModel);
+
+                accepted(res, { runId: run.runId, status: run.status, ticketId, model: effectiveModel });
+            })
+            .catch(error => {
+                json(res, 500, { error: `Failed to validate model: ${error.message}` });
+            });
     });
 
     /**
@@ -1408,7 +1449,12 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         }
         try {
             const { model, agentMode } = req.body;
-            const session = await chatManager.createSession({ model, agentMode });
+            const selection = await resolveModelSelection(model);
+            if (!selection.ok) {
+                return badRequest(res, selection.error);
+            }
+
+            const session = await chatManager.createSession({ model: selection.effectiveModel, agentMode });
             ok(res, session);
         } catch (error) {
             json(res, 500, { error: `Failed to create chat session: ${error.message}` });
@@ -1740,6 +1786,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         log(`    GET  /api/analytics/selectors    — Selector stability`);
         log(`    GET  /api/analytics/runs         — Run trends`);
         log(`    POST /api/webhooks/jira          — Jira webhook`);
+        log(`    GET  /api/models                  — Runtime model catalog`);
         log(`    POST /api/chat/sessions           — Create chat session`);
         log(`    GET  /api/chat/sessions           — List chat sessions`);
         log(`    POST /api/chat/sessions/:id/messages — Send message`);

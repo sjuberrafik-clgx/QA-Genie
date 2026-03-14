@@ -2,15 +2,16 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useSSE } from '@/hooks/useSSE';
+import useModelCatalog from '@/hooks/useModelCatalog';
 import apiClient from '@/lib/api-client';
-import { DEFAULT_MODEL, isVisionModel } from '@/lib/model-options';
+import { getDefaultModel, hasModelValue, isVisionModel } from '@/lib/model-options';
 import { truncateTitle } from '@/lib/constants';
 import ChatMessage from '@/components/ChatMessage';
 import ChatInput from '@/components/ChatInput';
 import SessionList from '@/components/SessionList';
 import ModelSelect from '@/components/ModelSelect';
 import AgentSelect from '@/components/AgentSelect';
-import { getAgentConfig } from '@/lib/agent-options';
+import { AGENT_MODES, getAgentConfig } from '@/lib/agent-options';
 import { DocumentIcon, CodeIcon, GlobeIcon, PlayIcon, SparkleIcon, MenuIcon, ChatBubbleIcon, WrenchIcon, CheckIcon, XIcon, FileIcon } from '@/components/Icons';
 import DirectoryPicker from '@/components/DirectoryPicker';
 import ErrorBanner from '@/components/ErrorBanner';
@@ -18,15 +19,66 @@ import FollowupChips from '@/components/FollowupChips';
 import UserInputPrompt from '@/components/UserInputPrompt';
 import ReasoningPanel from '@/components/ReasoningPanel';
 import ToolCallCard from '@/components/ToolCallCard';
+import RobotMascotLogo from '@/components/RobotMascotLogo';
+import useResetScrollOnRouteChange from '@/hooks/useResetScrollOnRouteChange';
 
-const CAPABILITY_CARDS = [
-    { icon: <DocumentIcon />, title: 'Generate Test Cases', desc: 'From Jira tickets to structured test steps with Excel export' },
-    { icon: <CodeIcon />, title: 'Create Automation Scripts', desc: 'Playwright test scripts with MCP-validated selectors' },
-    { icon: <GlobeIcon />, title: 'Explore Pages via MCP', desc: 'Live browser snapshots for real selector discovery' },
-    { icon: <PlayIcon />, title: 'Execute & Report', desc: 'Run tests and view results on the Reports dashboard' },
-];
+const AGENT_ICON_MAP = {
+    tpm: SparkleIcon,
+    document: DocumentIcon,
+    code: CodeIcon,
+    bug: WrenchIcon,
+    task: CheckIcon,
+    file: FileIcon,
+};
+
+const AGENT_WELCOME_COPY = {
+    null: 'Unified command mode for planning, test generation, automation, bugs, tasks, and file workflows.',
+    testgenie: 'Turn Jira context into optimized manual test cases and Excel-ready test steps.',
+    scriptgenerator: 'Generate Playwright automation with MCP-backed exploration and stable selector discovery.',
+    buggenie: 'Convert failures and evidence into structured Jira defect tickets.',
+    taskgenie: 'Create linked testing tasks with assignment-ready Jira details.',
+    filegenie: 'Browse, organize, and inspect local files in the directory you explicitly choose for that chat.',
+};
+
+const WELCOME_AGENT_CARDS = AGENT_MODES.map((agent) => ({
+    ...agent,
+    desc: AGENT_WELCOME_COPY[String(agent.value)] || agent.description,
+    Icon: AGENT_ICON_MAP[agent.icon] || SparkleIcon,
+}));
+
+function hasRenderableMessageContent(message) {
+    const content = message?.content || message?.data?.content || '';
+    const attachments = message?.attachments || message?.data?.attachments || [];
+    return (typeof content === 'string' && content.trim().length > 0)
+        || (Array.isArray(attachments) && attachments.length > 0);
+}
+
+function mapChatMessage(message) {
+    const mapped = {
+        role: message?.role || message?.data?.role || 'assistant',
+        content: message?.content || message?.data?.content || '',
+        timestamp: message?.timestamp,
+    };
+    const attachments = message?.attachments || message?.data?.attachments;
+    if (Array.isArray(attachments) && attachments.length > 0) {
+        mapped.attachments = attachments;
+    }
+    if (message?.reasoning || message?.data?.reasoning) {
+        mapped.reasoning = message.reasoning || message.data.reasoning;
+    }
+    return mapped;
+}
 
 export default function ChatPage() {
+    const {
+        groups: modelGroups,
+        defaultModel,
+        source: modelCatalogSource,
+        warnings: modelCatalogWarnings,
+        error: modelCatalogError,
+        loading: modelCatalogLoading,
+    } = useModelCatalog();
+
     const [sessions, setSessions] = useState([]);
     const [activeSessionId, setActiveSessionId] = useState(null);
     const [messages, setMessages] = useState([]);           // { role, content, timestamp }
@@ -35,7 +87,8 @@ export default function ChatPage() {
     const [streamingReasoning, setStreamingReasoning] = useState('');
     const [isProcessing, setIsProcessing] = useState(false);
     const [error, setError] = useState(null);
-    const [model, setModel] = useState(DEFAULT_MODEL);
+    const [model, setModelState] = useState('');
+    const [modelTouched, setModelTouched] = useState(false);
     const [agentMode, setAgentMode] = useState(null);       // null = TPM (all agent capabilities), 'testgenie', 'scriptgenerator', 'buggenie', 'taskgenie'
     const [sidebarOpen, setSidebarOpen] = useState(true);
     const [followups, setFollowups] = useState([]);         // [{ label, prompt, category, icon, prefill? }]
@@ -44,9 +97,17 @@ export default function ChatPage() {
     const [filegenieRoot, setFilegenieRoot] = useState(null); // current workspace root for FileGenie
 
     const messagesEndRef = useRef(null);
+    const messageScrollRef = useRef(null);
     const streamingContentRef = useRef('');
     const streamingReasoningRef = useRef('');
     const currentToolGroupRef = useRef(null);               // tracks the active tool group ID
+
+    useResetScrollOnRouteChange([messageScrollRef]);
+
+    const setModel = useCallback((nextModel) => {
+        setModelTouched(true);
+        setModelState(nextModel);
+    }, []);
 
     // SSE connection for active chat session
     const streamUrl = activeSessionId ? apiClient.getChatStreamUrl(activeSessionId) : null;
@@ -65,11 +126,13 @@ export default function ChatPage() {
                 const finalContent = data.content || streamingContentRef.current;
                 // Capture reasoning: prefer persisted reasoning from server, fall back to streamed
                 const messageReasoning = data.reasoning || streamingReasoningRef.current || null;
-                if (finalContent && finalContent.trim()) {
+                const hasAttachments = Array.isArray(data.attachments) && data.attachments.length > 0;
+                if ((finalContent && finalContent.trim()) || hasAttachments) {
                     setMessages(prev => {
-                        if (prev.some(m => m.content === finalContent && m.role === 'assistant')) return prev;
+                        if (!hasAttachments && prev.some(m => m.content === finalContent && m.role === 'assistant')) return prev;
                         const msg = { role: 'assistant', content: finalContent, timestamp: ts };
                         if (messageReasoning) msg.reasoning = messageReasoning;
+                        if (hasAttachments) msg.attachments = data.attachments;
                         return [...prev, msg];
                     });
                 }
@@ -208,9 +271,10 @@ export default function ChatPage() {
             case 'user_message':
                 if (data.role === 'assistant') {
                     setMessages(prev => {
-                        if (prev.some(m => m.content === data.content && m.role === 'assistant')) return prev;
+                        if ((!data.attachments || data.attachments.length === 0) && prev.some(m => m.content === data.content && m.role === 'assistant')) return prev;
                         const msg = { role: 'assistant', content: data.content, timestamp: ts };
                         if (data.reasoning) msg.reasoning = data.reasoning;
+                        if (Array.isArray(data.attachments) && data.attachments.length > 0) msg.attachments = data.attachments;
                         return [...prev, msg];
                     });
                 }
@@ -229,6 +293,18 @@ export default function ChatPage() {
     useEffect(() => {
         loadSessions();
     }, []);
+
+    useEffect(() => {
+        if (!modelTouched && defaultModel && model !== defaultModel) {
+            setModelState(defaultModel);
+        }
+    }, [defaultModel, model, modelTouched]);
+
+    useEffect(() => {
+        if (model && !hasModelValue(model, modelGroups)) {
+            setModelState(getDefaultModel(modelGroups, defaultModel));
+        }
+    }, [defaultModel, model, modelGroups]);
 
     const loadSessions = async () => {
         try {
@@ -269,7 +345,8 @@ export default function ChatPage() {
         try {
             setError(null);
             setIsProcessing(false);
-            const session = await apiClient.createChatSession(model, agentForSession);
+            const selectedModel = model || defaultModel || getDefaultModel(modelGroups);
+            const session = await apiClient.createChatSession(selectedModel, agentForSession);
             applyNewSession(session);
             // Show welcome followup suggestions from the server
             if (Array.isArray(session.followups) && session.followups.length > 0) {
@@ -280,7 +357,8 @@ export default function ChatPage() {
             if (err.message && (err.message.includes('abort') || err.message.includes('signal'))) {
                 console.warn('[Chat] Session creation aborted, retrying...', err.message);
                 try {
-                    const session = await apiClient.createChatSession(model, agentForSession);
+                    const selectedModel = model || defaultModel || getDefaultModel(modelGroups);
+                    const session = await apiClient.createChatSession(selectedModel, agentForSession);
                     applyNewSession(session);
                     if (Array.isArray(session.followups) && session.followups.length > 0) {
                         setFollowups(session.followups);
@@ -334,15 +412,8 @@ export default function ChatPage() {
             if (Array.isArray(history)) {
                 setMessages(
                     history
-                        .filter(m => {
-                            const text = m.content || m.data?.content || '';
-                            return text && text.trim().length > 0;
-                        })
-                        .map(m => ({
-                            role: m.role || 'assistant',
-                            content: m.content || m.data?.content || '',
-                            timestamp: m.timestamp,
-                        }))
+                        .filter(hasRenderableMessageContent)
+                        .map(mapChatMessage)
                 );
             }
         } catch { /* ignore */ }
@@ -567,13 +638,24 @@ export default function ChatPage() {
                             <p className="text-[11px] text-surface-500 truncate max-w-[280px]">
                                 {activeSessionId
                                     ? (sessions.find(s => s.sessionId === activeSessionId)?.title || `Session ${activeSessionId.substring(0, 8)}`)
-                                    : 'Create a session to start'}
+                                    : 'Conversation workspace'}
                             </p>
                         </div>
                     </div>
                     <div className="flex items-center gap-3 min-w-0 overflow-visible">
                         <AgentSelect value={agentMode} onChange={handleAgentChange} disabled={isProcessing} />
-                        <ModelSelect value={model} onChange={setModel} className="w-[170px] flex-shrink-0" />
+                        <ModelSelect value={model} onChange={setModel} groups={modelGroups} loading={modelCatalogLoading} className="w-[170px] flex-shrink-0" />
+                        <span
+                            title={modelCatalogError || modelCatalogWarnings[0] || (modelCatalogSource === 'sdk-discovered' ? 'Using runtime SDK model catalog' : 'Using fallback model catalog')}
+                            className={`px-2 py-1 rounded-full text-[10px] font-semibold border flex-shrink-0 ${modelCatalogError
+                                ? 'bg-red-50 text-red-600 border-red-200'
+                                : modelCatalogSource === 'sdk-discovered'
+                                    ? 'bg-accent-50 text-accent-700 border-accent-200'
+                                    : 'bg-amber-50 text-amber-700 border-amber-200'
+                                }`}
+                        >
+                            {modelCatalogSource === 'sdk-discovered' ? 'Runtime' : 'Fallback'}
+                        </span>
                         <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100/80 border border-surface-200/50 flex-shrink-0 whitespace-nowrap">
                             <span className={`w-2 h-2 rounded-full transition-colors flex-shrink-0 ${sseStatus === 'connected' ? 'bg-accent-400 shadow-sm shadow-accent-400/40' :
                                 sseStatus === 'reconnecting' ? 'bg-amber-400 animate-pulse' :
@@ -592,37 +674,80 @@ export default function ChatPage() {
                 )}
 
                 {/* Messages area */}
-                <div className="flex-1 overflow-y-auto">
+                <div ref={messageScrollRef} className="flex-1 overflow-y-auto">
                     <div className="max-w-4xl mx-auto px-6 py-5 space-y-5">
                         {/* Empty state — capability cards */}
                         {!activeSessionId && (
-                            <div className="flex items-center justify-center min-h-[60vh]">
-                                <div className="text-center w-full max-w-lg">
-                                    <div className="w-14 h-14 mx-auto mb-5 rounded-2xl gradient-brand flex items-center justify-center shadow-lg shadow-brand-500/20">
-                                        <SparkleIcon className="w-7 h-7 text-white" />
-                                    </div>
-                                    <h2 className="text-xl font-bold text-surface-900 mb-1.5">QA Automation Assistant</h2>
-                                    <p className="text-sm text-surface-500 mb-8 leading-relaxed">
-                                        Your AI-powered testing companion. Generate test cases, create automation scripts,
-                                        explore live pages, and execute tests — all in one place.
-                                    </p>
-
-                                    <div className="grid grid-cols-2 gap-3 mb-8">
-                                        {CAPABILITY_CARDS.map((card, i) => (
-                                            <div key={i} className="text-left p-4 rounded-xl bg-white border border-surface-200/80 hover:border-brand-200 hover:shadow-sm transition-all group cursor-default">
-                                                <div className="w-9 h-9 rounded-lg bg-brand-50 text-brand-600 flex items-center justify-center mb-2.5 group-hover:bg-brand-100 transition-colors">
-                                                    {card.icon}
+                            <div className="flex min-h-full items-center justify-center py-2 xl:py-4">
+                                <div className="w-full max-w-6xl">
+                                    <div className="grid gap-5 xl:grid-cols-[minmax(280px,0.82fr)_minmax(0,1.18fr)] xl:items-center">
+                                        <div className="rounded-[28px] border border-surface-200/80 bg-[radial-gradient(circle_at_24%_18%,rgba(180,92,255,0.16),transparent_32%),radial-gradient(circle_at_78%_78%,rgba(31,158,171,0.14),transparent_42%),linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.94))] px-6 py-6 text-center shadow-[0_22px_55px_rgba(15,23,42,0.08)] xl:px-7 xl:py-7 xl:text-left">
+                                            <div className="flex items-center justify-center xl:justify-start">
+                                                <div className="relative rounded-[28px] border border-surface-200/70 bg-white/70 px-4 py-3 shadow-[0_18px_40px_rgba(15,23,42,0.08)]">
+                                                    <div className="absolute inset-x-8 bottom-2 h-4 rounded-full bg-[radial-gradient(circle,rgba(124,58,237,0.18),rgba(31,158,171,0.12),transparent_72%)] blur-lg" />
+                                                    <RobotMascotLogo size={108} emphasis="hero" mood="glossy" className="relative z-[1]" />
                                                 </div>
-                                                <h3 className="text-[13px] font-semibold text-surface-800 mb-0.5">{card.title}</h3>
-                                                <p className="text-[11px] text-surface-500 leading-relaxed">{card.desc}</p>
                                             </div>
-                                        ))}
-                                    </div>
+                                            <div className="mt-5 inline-flex items-center gap-2 rounded-full border border-brand-200/70 bg-brand-50/80 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-brand-600">
+                                                <SparkleIcon className="w-3.5 h-3.5" />
+                                                Conversation workspace
+                                            </div>
+                                            <h2 className="mt-3 text-[1.65rem] font-bold tracking-tight text-surface-900">QA Automation Assistant</h2>
+                                            <p className="mt-2 text-sm leading-7 text-surface-500 xl:max-w-md">
+                                                Start a new session from the primary action below, then stay with TPM for full workflow coverage or switch to a specialist agent for focused work.
+                                            </p>
 
-                                    <button onClick={() => createSession()}
-                                        className="gradient-brand text-white rounded-xl px-6 py-2.5 text-sm font-semibold shadow-md shadow-brand-500/20 hover:shadow-lg hover:shadow-brand-500/30 transition-all">
-                                        Start New Chat
-                                    </button>
+                                            <div className="mt-5 flex flex-wrap items-center justify-center gap-2.5 xl:justify-start">
+                                                <span className="inline-flex items-center rounded-full border border-surface-200 bg-white/80 px-3 py-1 text-[11px] font-medium text-surface-600">
+                                                    6 agent modes ready
+                                                </span>
+                                                <span className="inline-flex items-center rounded-full border border-surface-200 bg-white/80 px-3 py-1 text-[11px] font-medium text-surface-600">
+                                                    TPM selected by default
+                                                </span>
+                                            </div>
+
+                                            <div className="mt-6 flex flex-col items-center gap-3 xl:items-start">
+                                                <button
+                                                    onClick={() => createSession()}
+                                                    className="gradient-brand text-white rounded-xl px-6 py-3 text-sm font-semibold shadow-md shadow-brand-500/20 hover:shadow-lg hover:shadow-brand-500/30 transition-all"
+                                                >
+                                                    Start New Chat
+                                                </button>
+                                                <p className="text-[12px] leading-6 text-surface-500 xl:max-w-sm">
+                                                    A new session opens the composer immediately so users can start asking questions without extra setup.
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <div className="rounded-[28px] border border-surface-200/80 bg-white/92 p-4 shadow-[0_20px_48px_rgba(15,23,42,0.06)] xl:p-5">
+                                            <div className="mb-4 flex items-center justify-between gap-3">
+                                                <div className="text-left">
+                                                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-surface-400">Agent modes</p>
+                                                    <h3 className="mt-1 text-lg font-semibold tracking-tight text-surface-900">Pick the mode that matches the work.</h3>
+                                                </div>
+                                                <div className="hidden rounded-full border border-brand-100 bg-brand-50/70 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-brand-600 sm:inline-flex">
+                                                    No scroll needed
+                                                </div>
+                                            </div>
+
+                                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                                                {WELCOME_AGENT_CARDS.map((card) => (
+                                                    <div key={card.value ?? 'default'} className="text-left rounded-2xl border border-surface-200/80 bg-surface-50/60 p-3.5 transition-all hover:border-brand-200 hover:bg-white hover:shadow-sm group cursor-default">
+                                                        <div className={`mb-2 flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${card.bgClass} ${card.textClass}`}>
+                                                            <card.Icon className="w-4 h-4" />
+                                                        </div>
+                                                        <div className="flex items-center gap-1.5 mb-1">
+                                                            <h3 className="text-[13px] font-semibold text-surface-800 leading-tight">{card.label}</h3>
+                                                            <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${card.badgeBg} ${card.badgeText}`}>
+                                                                {card.shortLabel}
+                                                            </span>
+                                                        </div>
+                                                        <p className="text-[11px] leading-5 text-surface-500">{card.desc}</p>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         )}
@@ -759,7 +884,7 @@ export default function ChatPage() {
                         disabled={!activeSessionId}
                         placeholder={activeAgentConfig.placeholder}
                         prefillText={prefillText}
-                        supportsImages={isVisionModel(model)}
+                        supportsImages={isVisionModel(model, modelGroups)}
                     />
                 )}
             </div>

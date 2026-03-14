@@ -6,6 +6,7 @@ import DonutChart from './DonutChart';
 import { sortSpecs, sortSuites, SORT_OPTIONS } from './SortDropdown';
 import { countAllSpecs, filterSuiteTree } from '@/lib/report-utils';
 import { ChevronRightIcon, SearchIcon, RetryIcon, LightningIcon, BarChartIcon, ShieldCheckIcon, PaperclipIcon, EmptyDocumentIcon } from './Icons';
+import RobotMascotLogo from './RobotMascotLogo';
 
 /**
  * ConsolidatedReport — Allure-style consolidated view.
@@ -29,7 +30,7 @@ function SuiteRow({ suite, depth = 0, sortMode }) {
                 className="flex items-center gap-2.5 w-full text-left py-3 px-4 rpt-suite-btn rounded-lg transition-colors"
             >
                 <ChevronRightIcon className={`w-3 h-3 rpt-text-muted transition-transform flex-shrink-0 ${open ? 'rotate-90' : ''}`} />
-                <span className="text-[13px] font-medium rpt-text-primary flex-1 truncate">
+                <span className="font-display text-[13px] font-bold tracking-[-0.02em] rpt-text-primary flex-1 truncate">
                     {suite.title || 'Root Suite'}
                 </span>
                 <span className="rpt-count-badge">{totalCount}</span>
@@ -70,7 +71,7 @@ function SpecItem({ spec, index }) {
             <div className="flex items-center gap-2.5 py-2 px-4">
                 <span className={`w-2 h-2 rounded-full flex-shrink-0 ${dotColor}`} />
                 <span className="text-[11px] rpt-text-muted font-mono w-5 text-right flex-shrink-0">{index}</span>
-                <span className={`text-[13px] font-normal flex-1 ${isFailed ? 'text-red-500' : isBroken ? 'text-orange-500' : 'rpt-text-primary'}`}>
+                <span className={`text-[13px] font-medium tracking-[-0.012em] flex-1 ${isFailed ? 'text-red-500' : isBroken ? 'text-orange-500' : 'rpt-text-primary'}`}>
                     {spec.title}
                 </span>
                 {spec.isFlaky && (
@@ -200,8 +201,14 @@ export default function ConsolidatedReport({ since = null }) {
     if (!data || data.total === 0) {
         return (
             <div className="text-center py-16">
-                <EmptyDocumentIcon className="w-12 h-12 mx-auto rpt-text-muted mb-3" />
+                <div className="mx-auto mb-3 flex h-16 w-16 items-center justify-center rounded-[24px] border border-surface-100 bg-[radial-gradient(circle_at_30%_20%,rgba(180,92,255,0.14),transparent_42%),radial-gradient(circle_at_70%_70%,rgba(31,158,171,0.14),transparent_46%),linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.94))] shadow-sm">
+                    <RobotMascotLogo size={40} mood="minimal" />
+                </div>
                 <p className="text-sm rpt-text-secondary">No test results found. Run tests to generate a report.</p>
+                <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-brand-100 bg-brand-50/70 px-2.5 py-1 text-[10px] font-medium text-brand-700">
+                    <EmptyDocumentIcon className="w-3.5 h-3.5" />
+                    Reports will appear here after the first execution
+                </div>
             </div>
         );
     }
@@ -232,8 +239,8 @@ export default function ConsolidatedReport({ since = null }) {
                             <BarChartIcon className="w-6 h-6" strokeWidth={1.5} />
                         </div>
                         <div>
-                            <h2 className="text-xl font-bold rpt-text-primary">Test Report</h2>
-                            <p className="text-xs rpt-text-secondary mt-0.5">{formattedDate}</p>
+                            <h2 className="font-display text-[1.35rem] font-bold tracking-[-0.04em] rpt-text-primary">Test Report</h2>
+                            <p className="mt-0.5 text-[12px] font-medium tracking-[-0.01em] rpt-text-secondary">{formattedDate}</p>
                         </div>
                     </div>
                     <DonutChart
@@ -272,8 +279,8 @@ export default function ConsolidatedReport({ since = null }) {
                     <div className="rpt-stats-strip rounded-xl px-5 py-4">
                         <div className="flex items-center gap-6 text-xs">
                             <div className="flex flex-col">
-                                <span className="rpt-text-secondary font-medium">Total</span>
-                                <span className="text-lg font-bold rpt-text-primary">{data.total}</span>
+                                <span className="type-meta-label rpt-text-secondary">Total</span>
+                                <span className="font-display text-[1.2rem] font-bold tracking-[-0.03em] rpt-text-primary">{data.total}</span>
                             </div>
                             {data.retried > 0 && (
                                 <>
@@ -281,8 +288,8 @@ export default function ConsolidatedReport({ since = null }) {
                                     <div className="flex items-center gap-2">
                                         <RetryIcon className="w-4 h-4 rpt-text-muted" />
                                         <div className="flex flex-col">
-                                            <span className="rpt-text-secondary font-medium">Retried tests</span>
-                                            <span className="text-sm font-bold rpt-text-primary">{data.retried}</span>
+                                            <span className="type-meta-label rpt-text-secondary">Retried tests</span>
+                                            <span className="font-display text-[15px] font-bold tracking-[-0.03em] rpt-text-primary">{data.retried}</span>
                                         </div>
                                     </div>
                                 </>

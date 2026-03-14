@@ -9,7 +9,8 @@
     "start:stdio": "node server.js --transport=stdio",
     "start:http": "node server.js --transport=http --port=3000",
     "dev": "node --watch server.js",
-    "test": "node test-server.js"
+    "test": "node test-server.js",
+    "test:integration": "node test-server-integration.js"
   },
   "keywords": [
     "mcp",

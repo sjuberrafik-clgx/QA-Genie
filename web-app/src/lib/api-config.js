@@ -10,6 +10,7 @@ export const API_CONFIG = {
         // Health
         health: '/health',
         ready: '/ready',
+        models: '/api/models',
 
         // Pipeline
         pipelineRun: '/api/pipeline/run',

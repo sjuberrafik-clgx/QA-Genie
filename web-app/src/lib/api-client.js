@@ -12,15 +12,69 @@ const { endpoints: EP } = API_CONFIG;
 const ERROR_MAP = {
     'Failed to fetch': `Backend unreachable — check if the server is running at ${API_CONFIG.baseUrl}`,
     'NetworkError': 'Network error — check your connection',
+    'TimeoutError': 'Request timed out — the server may be busy processing',
     'AbortError': 'Request timed out — the server may be busy processing',
     'Load failed': `Backend unreachable — check if the server is running at ${API_CONFIG.baseUrl}`,
 };
 
 function friendlyError(err) {
     for (const [key, msg] of Object.entries(ERROR_MAP)) {
-        if (err.message?.includes(key)) return new Error(msg);
+        if (err.name === key || err.message?.includes(key)) return new Error(msg);
     }
     return err;
+}
+
+function isAbortError(err) {
+    return err?.name === 'AbortError'
+        || err?.name === 'TimeoutError'
+        || err?.code === 20
+        || /aborted|abort/i.test(err?.message || '');
+}
+
+function createCombinedSignal(timeoutSignal, externalSignal) {
+    if (!externalSignal) {
+        return { signal: timeoutSignal, cleanup: () => { } };
+    }
+
+    if (timeoutSignal.aborted) {
+        return { signal: timeoutSignal, cleanup: () => { } };
+    }
+
+    if (externalSignal.aborted) {
+        return { signal: externalSignal, cleanup: () => { } };
+    }
+
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') {
+        return {
+            signal: AbortSignal.any([timeoutSignal, externalSignal]),
+            cleanup: () => { },
+        };
+    }
+
+    const controller = new AbortController();
+
+    const forwardAbort = (event) => {
+        const source = event?.target;
+        const reason = source?.reason
+            || (source === timeoutSignal
+                ? new DOMException('Request timed out', 'TimeoutError')
+                : new DOMException('Request aborted', 'AbortError'));
+
+        if (!controller.signal.aborted) {
+            controller.abort(reason);
+        }
+    };
+
+    timeoutSignal.addEventListener('abort', forwardAbort);
+    externalSignal.addEventListener('abort', forwardAbort);
+
+    return {
+        signal: controller.signal,
+        cleanup: () => {
+            timeoutSignal.removeEventListener('abort', forwardAbort);
+            externalSignal.removeEventListener('abort', forwardAbort);
+        },
+    };
 }
 
 class ApiClient {
@@ -30,21 +84,29 @@ class ApiClient {
 
     async _fetch(endpoint, options = {}) {
         const url = `${this.baseUrl}${endpoint}`;
-        const timeout = options.timeout || TIMEOUTS.DEFAULT;
-        const maxRetries = options.retries ?? RETRY.DEFAULT_RETRIES;
+        const {
+            timeout = TIMEOUTS.DEFAULT,
+            retries = RETRY.DEFAULT_RETRIES,
+            signal: externalSignal,
+            headers,
+            ...fetchOptions
+        } = options;
+        const maxRetries = retries;
 
         let lastError;
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), timeout);
+            const timeoutController = new AbortController();
+            const timer = setTimeout(() => {
+                timeoutController.abort(new DOMException('Request timed out', 'TimeoutError'));
+            }, timeout);
+            const { signal, cleanup } = createCombinedSignal(timeoutController.signal, externalSignal);
 
             try {
                 const res = await fetch(url, {
-                    headers: { 'Content-Type': 'application/json', ...options.headers },
-                    ...options,
-                    signal: controller.signal,
+                    headers: { 'Content-Type': 'application/json', ...headers },
+                    ...fetchOptions,
+                    signal,
                 });
-                clearTimeout(timer);
 
                 if (!res.ok) {
                     const body = await res.json().catch(() => ({}));
@@ -52,12 +114,29 @@ class ApiClient {
                 }
                 return res.json();
             } catch (err) {
-                clearTimeout(timer);
-                lastError = err;
                 if (err.message?.startsWith('HTTP ')) throw err;
-                if (attempt < maxRetries) {
+
+                if (externalSignal?.aborted) {
+                    throw err;
+                }
+
+                const timedOut = timeoutController.signal.aborted && !externalSignal?.aborted;
+                lastError = timedOut
+                    ? new DOMException('Request timed out', 'TimeoutError')
+                    : err;
+
+                if (attempt < maxRetries && !isAbortError(err)) {
                     await new Promise(r => setTimeout(r, RETRY.DELAY_MS));
                 }
+                if (attempt < maxRetries && timedOut) {
+                    await new Promise(r => setTimeout(r, RETRY.DELAY_MS));
+                }
+                if (isAbortError(err) && !timedOut) {
+                    throw err;
+                }
+            } finally {
+                clearTimeout(timer);
+                cleanup();
             }
         }
         throw friendlyError(lastError);
@@ -66,6 +145,14 @@ class ApiClient {
     // ─── Health ─────────────────────────────────────────────────
     async health() { return this._fetch(EP.health, { retries: 0, timeout: TIMEOUTS.HEALTH }); }
     async ready() { return this._fetch(EP.ready, { retries: 0, timeout: TIMEOUTS.HEALTH }); }
+    async getModelCatalog(refresh = false, options = {}) {
+        const query = refresh ? '?refresh=true' : '';
+        return this._fetch(`${EP.models}${query}`, {
+            retries: 0,
+            timeout: TIMEOUTS.HEALTH,
+            ...options,
+        });
+    }
 
     // ─── Pipeline ───────────────────────────────────────────────
     async startPipeline(ticketId, mode = 'full', environment = 'UAT', model = 'gpt-4o') {
@@ -207,4 +294,5 @@ class ApiClient {
 
 // Singleton instance
 export const apiClient = new ApiClient();
+export { isAbortError };
 export default apiClient;

@@ -121,6 +121,7 @@ npx playwright test tests/specs/{ticket-id}/ --workers=1
 | `unified_click` | Click element by ref |
 | `unified_type` | Type text into element |
 | `unified_wait_for` | Wait for text/time |
+| `unified_create_tab` | Open a new tab and optionally navigate it |
 | `unified_tabs` | List/close/create browser tabs |
 | `unified_evaluate` | Execute JavaScript on page |
 | `unified_evaluate_cdp` | Execute JavaScript (Chrome DevTools) |
@@ -141,6 +142,8 @@ for (let i = tabs.length - 1; i >= 0; i--) {
 }
 // Now ready for fresh exploration
 ```
+
+If you need a new working tab during exploration, prefer `unified_create_tab({ url, activate })`. The returned `tabId` can then be used with `unified_tabs({ action: 'select', tabId })` or `unified_tabs({ action: 'close', tabId })`.
 
 **Why?** Old tabs from previous sessions can:
 - Show cached/stale content
