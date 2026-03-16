@@ -113,18 +113,18 @@ export default function HistoryPage() {
                 subtitle="Review archived and active sessions from one archive workspace."
                 Icon={ClockIcon}
                 actions={(
-                    <div className="flex flex-wrap items-center gap-2">
-                        <div className="page-header-panel rounded-xl px-3 py-2 text-left">
-                            <p className="page-header-panel-subtle type-meta-label">Sessions</p>
-                            <p className="type-metric-value mt-0.5 text-slate-900">{sessions.length}</p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                        <div className="page-header-panel rounded-xl px-2.5 py-1.5 text-left">
+                            <p className="page-header-panel-subtle text-[0.5rem] font-semibold uppercase tracking-[0.16em]">Sessions</p>
+                            <p className="text-[0.82rem] font-bold tracking-[-0.02em] text-white mt-0.5">{sessions.length}</p>
                         </div>
-                        <div className="page-header-panel rounded-xl px-3 py-2 text-left">
-                            <p className="page-header-panel-subtle type-meta-label">Active</p>
-                            <p className="type-metric-value mt-0.5 text-slate-900">{activeCount}</p>
+                        <div className="page-header-panel rounded-xl px-2.5 py-1.5 text-left">
+                            <p className="page-header-panel-subtle text-[0.5rem] font-semibold uppercase tracking-[0.16em]">Active</p>
+                            <p className="text-[0.82rem] font-bold tracking-[-0.02em] text-white mt-0.5">{activeCount}</p>
                         </div>
-                        <div className="page-header-panel rounded-xl px-3 py-2 text-left">
-                            <p className="page-header-panel-subtle type-meta-label">Archived</p>
-                            <p className="type-metric-value mt-0.5 text-slate-900">{archivedCount}</p>
+                        <div className="page-header-panel rounded-xl px-2.5 py-1.5 text-left">
+                            <p className="page-header-panel-subtle text-[0.5rem] font-semibold uppercase tracking-[0.16em]">Archived</p>
+                            <p className="text-[0.82rem] font-bold tracking-[-0.02em] text-white mt-0.5">{archivedCount}</p>
                         </div>
                     </div>
                 )}

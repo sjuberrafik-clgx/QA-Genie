@@ -112,31 +112,49 @@ const agentStyleMap = {
         accent: 'from-sky-500/16 via-blue-500/10 to-white',
         badge: 'from-sky-600 to-blue-600',
         text: 'text-sky-800',
+        glow: 'rgba(14, 116, 144, 0.15)',
+        orbColor: 'rgba(14, 116, 144, 0.18)',
+        hoverBorder: 'hover:border-sky-200/70',
     },
     document: {
         accent: 'from-blue-500/14 via-cyan-400/10 to-white',
         badge: 'from-blue-500 to-cyan-500',
         text: 'text-blue-700',
+        glow: 'rgba(37, 99, 235, 0.15)',
+        orbColor: 'rgba(37, 99, 235, 0.18)',
+        hoverBorder: 'hover:border-blue-200/70',
     },
     code: {
         accent: 'from-emerald-500/14 via-teal-400/10 to-white',
         badge: 'from-emerald-500 to-teal-500',
         text: 'text-emerald-700',
+        glow: 'rgba(16, 185, 129, 0.15)',
+        orbColor: 'rgba(16, 185, 129, 0.18)',
+        hoverBorder: 'hover:border-emerald-200/70',
     },
     bug: {
         accent: 'from-rose-500/14 via-red-400/10 to-white',
         badge: 'from-rose-500 to-red-500',
         text: 'text-rose-700',
+        glow: 'rgba(225, 29, 72, 0.12)',
+        orbColor: 'rgba(225, 29, 72, 0.16)',
+        hoverBorder: 'hover:border-rose-200/70',
     },
     task: {
         accent: 'from-amber-400/16 via-orange-300/10 to-white',
         badge: 'from-amber-500 to-orange-500',
         text: 'text-amber-700',
+        glow: 'rgba(245, 158, 11, 0.15)',
+        orbColor: 'rgba(245, 158, 11, 0.18)',
+        hoverBorder: 'hover:border-amber-200/70',
     },
     file: {
         accent: 'from-cyan-500/14 via-sky-400/10 to-white',
         badge: 'from-cyan-500 to-sky-500',
         text: 'text-cyan-700',
+        glow: 'rgba(6, 182, 212, 0.15)',
+        orbColor: 'rgba(6, 182, 212, 0.18)',
+        hoverBorder: 'hover:border-cyan-200/70',
     },
 };
 
@@ -151,8 +169,8 @@ const agentHighlights = {
 
 function SurfaceBadge({ Icon, badgeClassName }) {
     return (
-        <div className={`flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br ${badgeClassName} text-white shadow-[0_14px_24px_rgba(15,23,42,0.12)]`}>
-            <Icon className="h-5 w-5" strokeWidth={1.75} />
+        <div className={`flex h-[3.25rem] w-[3.25rem] items-center justify-center rounded-2xl bg-gradient-to-br ${badgeClassName} text-white shadow-[0_8px_24px_rgba(15,23,42,0.18),0_2px_6px_rgba(15,23,42,0.08)] ring-1 ring-white/20`}>
+            <Icon className="h-[1.35rem] w-[1.35rem]" strokeWidth={1.75} />
         </div>
     );
 }
@@ -193,9 +211,9 @@ export default function HomePage() {
 
                         <div className="grid gap-3 sm:grid-cols-2">
                             {heroHighlights.map(({ title, detail, Icon }) => (
-                                <div key={title} className="rounded-2xl border border-surface-200/80 bg-white/80 p-4 shadow-sm">
+                                <div key={title} className="glass-premium gradient-border group rounded-2xl p-4">
                                     <div className="mb-3 flex items-center gap-3">
-                                        <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[linear-gradient(135deg,rgba(15,118,110,0.16),rgba(37,99,235,0.14))] text-brand-700">
+                                        <div className="icon-glass flex h-11 w-11 items-center justify-center rounded-full text-brand-700 transition-transform duration-300 group-hover:scale-110">
                                             <Icon className="h-5 w-5" strokeWidth={1.75} />
                                         </div>
                                         <span className="type-kicker text-surface-500">{title}</span>
@@ -223,13 +241,16 @@ export default function HomePage() {
                             </div>
                             <div className="mt-6 grid w-full gap-3 sm:grid-cols-3">
                                 {routeCards.map(({ title, detail, href, cta, Icon }) => (
-                                    <Link key={title} href={href} className="group flex h-full flex-col rounded-2xl border border-white/75 bg-white/82 p-4 text-left shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-brand-200/70 hover:shadow-[0_14px_30px_rgba(15,23,42,0.08)]">
-                                        <div className="flex items-center gap-2 text-brand-700">
-                                            <Icon className="h-4 w-4" strokeWidth={1.8} />
-                                            <span className="type-kicker text-brand-700">{title}</span>
+                                    <Link key={title} href={href} className="card-glow shimmer-sweep group flex h-full flex-col rounded-2xl p-4 text-left transition-all duration-300 ease-out glass-premium">
+                                        <div className="icon-glass mb-3 flex h-10 w-10 items-center justify-center rounded-xl text-brand-700 transition-transform duration-300 group-hover:scale-105">
+                                            <Icon className="h-5 w-5" strokeWidth={1.75} />
                                         </div>
-                                        <p className="mt-3 text-[13.5px] font-medium leading-6 tracking-[-0.01em] text-surface-700">{detail}</p>
-                                        <span className="mt-auto inline-flex pt-4 text-xs font-semibold text-brand-600 transition-transform duration-200 group-hover:translate-x-0.5">{cta}</span>
+                                        <span className="type-kicker text-brand-700">{title}</span>
+                                        <p className="mt-2 text-[13.5px] font-medium leading-6 tracking-[-0.01em] text-surface-700">{detail}</p>
+                                        <span className="mt-auto inline-flex items-center gap-1 pt-4 text-xs font-semibold text-brand-600">
+                                            {cta}
+                                            <svg className="h-3 w-3 transition-transform duration-300 group-hover:translate-x-1" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth="2"><path d="M2.5 6h7M6.5 3l3 3-3 3" /></svg>
+                                        </span>
                                     </Link>
                                 ))}
                             </div>
@@ -251,29 +272,50 @@ export default function HomePage() {
                             </div>
                         </div>
 
-                        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                             {AGENT_MODES.map((agent) => {
                                 const agentKey = agent.value ?? 'tpm';
                                 const Icon = agentIconMap[agent.icon ?? agentKey] ?? SparkleIcon;
                                 const style = agentStyleMap[agent.icon ?? agentKey] ?? agentStyleMap.tpm;
 
                                 return (
-                                    <article key={agent.label} className={`mascot-motion-surface flex h-full flex-col rounded-[24px] border border-surface-200/80 bg-gradient-to-br ${style.accent} p-4 shadow-sm transition-transform duration-200 hover:-translate-y-0.5`}>
-                                        <div className="flex items-start justify-between gap-3">
-                                            <SurfaceBadge Icon={Icon} badgeClassName={style.badge} />
-                                            <div className="inline-flex items-center gap-2 rounded-full border border-white/80 bg-white/82 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-surface-500 shadow-sm">
-                                                <RobotMascotLogo size={20} mood="minimal" interactive />
-                                                Agent mode
+                                    <article
+                                        key={agent.label}
+                                        className={`card-glow group relative flex h-full flex-col overflow-hidden rounded-[24px] p-[1px] transition-all duration-300 ease-out hover:-translate-y-1 ${style.hoverBorder}`}
+                                        style={{ '--glow-color': style.glow }}
+                                    >
+                                        {/* Animated gradient border layer */}
+                                        <div className="absolute inset-0 rounded-[24px] bg-gradient-to-br from-white/50 via-surface-200/40 to-white/50 transition-opacity duration-300 group-hover:opacity-0" />
+                                        <div className="absolute inset-0 rounded-[24px] bg-[linear-gradient(135deg,rgba(15,118,110,0.2),rgba(37,99,235,0.2),rgba(15,118,110,0.2))] bg-[length:300%_300%] opacity-0 transition-opacity duration-300 group-hover:opacity-100" style={{ animation: 'border-flow 4s linear infinite' }} />
+
+                                        {/* Card inner */}
+                                        <div className="glass-premium-static relative flex h-full flex-col rounded-[23px] p-5">
+                                            {/* Decorative gradient orb */}
+                                            <div
+                                                className="pointer-events-none absolute -right-6 -top-6 h-28 w-28 rounded-full opacity-60 blur-2xl transition-opacity duration-500 group-hover:opacity-90"
+                                                style={{ background: `radial-gradient(circle, ${style.orbColor}, transparent 70%)` }}
+                                            />
+
+                                            <div className="relative flex items-start justify-between gap-3">
+                                                <SurfaceBadge Icon={Icon} badgeClassName={style.badge} />
+                                                <div className="icon-glass inline-flex items-center gap-2 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-surface-500">
+                                                    <RobotMascotLogo size={20} mood="minimal" interactive />
+                                                    Agent
+                                                </div>
                                             </div>
-                                        </div>
-                                        <div className="mt-4 space-y-2">
-                                            <h3 className="type-card-title text-[1.02rem]">{agent.label}</h3>
-                                            <p className="type-card-body">{agent.description}</p>
-                                        </div>
-                                        <div className="mt-auto pt-4">
-                                            <div className="rounded-2xl border border-white/80 bg-white/84 px-3 py-3 shadow-sm">
-                                                <p className={`type-kicker ${style.text}`}>Best used for</p>
-                                                <p className="mt-2 text-[13.5px] font-medium leading-6 tracking-[-0.01em] text-surface-700">{agentHighlights[agent.label] ?? 'Focused assistance within the QA workflow.'}</p>
+
+                                            <div className="relative mt-4 space-y-2">
+                                                <h3 className="type-card-title text-[1.05rem]">{agent.label}</h3>
+                                                <p className="type-card-body">{agent.description}</p>
+                                            </div>
+
+                                            <div className="relative mt-auto pt-4">
+                                                <div className="accent-stripe-left rounded-xl pl-4 py-2.5">
+                                                    <p className={`type-kicker ${style.text}`}>Best used for</p>
+                                                    <p className="mt-1.5 text-[13.5px] font-medium leading-6 tracking-[-0.01em] text-surface-700">
+                                                        {agentHighlights[agent.label] ?? 'Focused assistance within the QA workflow.'}
+                                                    </p>
+                                                </div>
                                             </div>
                                         </div>
                                     </article>
@@ -292,12 +334,12 @@ export default function HomePage() {
                             </span>
                             <h2 className="type-section-title mt-3 text-[1.34rem]">Automation stages users can understand at a glance.</h2>
                             <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                                {pipelineStages.map(({ step, name, detail }) => (
-                                    <div key={step} className="rounded-2xl border border-surface-200/80 bg-white/85 p-4 shadow-sm">
-                                        <div className="flex items-start gap-3">
-                                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-[linear-gradient(135deg,rgba(15,118,110,0.18),rgba(37,99,235,0.16))] text-sm font-bold text-surface-800">
+                                {pipelineStages.map(({ step, name, detail }, idx) => (
+                                    <div key={step} className="glass-premium group rounded-2xl p-4 accent-stripe-left">
+                                        <div className="flex items-start gap-3 pl-2">
+                                            <span className="gradient-text shrink-0 text-2xl font-extrabold leading-none tracking-[-0.04em] transition-transform duration-300 group-hover:scale-110" style={{ fontFamily: 'var(--font-display)' }}>
                                                 {step}
-                                            </div>
+                                            </span>
                                             <div>
                                                 <h3 className="type-kicker text-surface-500">{name}</h3>
                                                 <p className="mt-1 text-[13.5px] font-medium leading-6 tracking-[-0.01em] text-surface-700">{detail}</p>
@@ -320,14 +362,14 @@ export default function HomePage() {
                             </div>
                             <div className="space-y-3">
                                 {platformPillars.map(({ title, detail, Icon }) => (
-                                    <div key={title} className="rounded-2xl border border-surface-200/80 bg-white/85 p-4 shadow-sm">
-                                        <div className="flex items-start gap-3">
-                                            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[linear-gradient(135deg,rgba(15,118,110,0.18),rgba(37,99,235,0.14))] text-brand-700">
-                                                <Icon className="h-5 w-5" strokeWidth={1.75} />
+                                    <div key={title} className="glass-premium accent-bar-top group rounded-2xl p-4">
+                                        <div className="flex items-start gap-4">
+                                            <div className="icon-glass flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl text-brand-700 transition-transform duration-300 group-hover:scale-110">
+                                                <Icon className="h-5.5 w-5.5" strokeWidth={1.75} />
                                             </div>
                                             <div>
-                                                <h3 className="type-kicker text-surface-500">{title}</h3>
-                                                <p className="mt-1 text-[13.5px] font-medium leading-6 tracking-[-0.01em] text-surface-700">{detail}</p>
+                                                <h3 className="gradient-text text-[11px] font-bold uppercase tracking-[0.18em]" style={{ fontFamily: 'var(--font-display)' }}>{title}</h3>
+                                                <p className="mt-1.5 text-[13.5px] font-medium leading-6 tracking-[-0.01em] text-surface-700">{detail}</p>
                                             </div>
                                         </div>
                                     </div>

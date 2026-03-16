@@ -271,23 +271,23 @@ export default function DashboardPage() {
 function StatusBadge({ status, sseStatus, retryCount, activeRunId }) {
     const ready = status?.ready;
     return (
-        <div className="flex flex-wrap items-center gap-2.5">
-            <div className={`page-header-panel flex items-center gap-2 rounded-xl px-3 py-2 text-[11px] font-semibold ${ready
-                ? 'text-slate-800'
-                : 'text-red-700'
+        <div className="flex flex-wrap items-center gap-1.5">
+            <div className={`page-header-panel flex items-center gap-2 rounded-xl px-2.5 py-1.5 text-[0.68rem] font-semibold ${ready
+                ? 'text-white'
+                : 'text-red-300'
                 }`}>
                 <span className={`status-dot ${ready ? 'status-dot-online' : 'status-dot-offline'}`} />
                 {ready ? 'System Ready' : 'Offline'}
             </div>
             {sseStatus === 'reconnecting' && (
-                <div className="page-header-panel flex items-center gap-2 rounded-xl px-3 py-1.5 text-[11px] font-semibold text-amber-700">
+                <div className="page-header-panel flex items-center gap-2 rounded-xl px-2.5 py-1.5 text-[0.68rem] font-semibold text-amber-300">
                     <span className="status-dot status-dot-connecting" />
                     Reconnecting ({retryCount}/10)
                 </div>
             )}
             {sseStatus === 'connected' && activeRunId && (
-                <div className="page-header-panel flex items-center gap-2 rounded-xl px-3 py-1.5 text-[11px] font-semibold text-slate-800">
-                    <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
+                <div className="page-header-panel flex items-center gap-2 rounded-xl px-2.5 py-1.5 text-[0.68rem] font-semibold text-white">
+                    <span className="h-1.5 w-1.5 rounded-full bg-brand-400" />
                     Live Feed
                 </div>
             )}

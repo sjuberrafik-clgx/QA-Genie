@@ -3,8 +3,8 @@
 import { memo } from 'react';
 
 /**
- * DonutChart — Pure SVG donut chart showing test pass rate.
- * Segments: passed (green), broken (orange), failed (red), skipped (amber).
+ * DonutChart — Allure Report 3.1.0 style ring chart.
+ * Single green ring for 100% pass rate, segmented for mixed results.
  * Center text: pass rate percentage.
  */
 function DonutChart({
@@ -23,9 +23,9 @@ function DonutChart({
     const circumference = 2 * Math.PI * radius;
     const center = size / 2;
 
-    // Segment data in draw order
+    // Segment data in draw order (Allure green: #66bb6a)
     const segments = [
-        { value: passed, color: '#10b981' },   // accent-500 green
+        { value: passed, color: '#66bb6a' },   // Allure green
         { value: broken, color: '#f97316' },    // orange-500
         { value: failed, color: '#ef4444' },    // red-500
         { value: skipped, color: '#f59e0b' },   // amber-500
@@ -42,9 +42,9 @@ function DonutChart({
         return { ...seg, dashLength, gap, offset };
     });
 
-    // Determine pass-rate color
+    // Determine pass-rate color — Allure green when ≥90%
     const rateColor = passRate >= 90
-        ? 'text-accent-500'
+        ? 'text-[#66bb6a]'
         : passRate >= 70
             ? 'text-amber-500'
             : 'text-red-500';
@@ -59,7 +59,7 @@ function DonutChart({
                     r={radius}
                     fill="none"
                     strokeWidth={strokeWidth}
-                    className="rpt-donut-track"
+                    className="allure-donut-track"
                 />
                 {/* Segment arcs */}
                 {arcs.map((arc, i) => (
@@ -78,16 +78,11 @@ function DonutChart({
                     />
                 ))}
             </svg>
-            {/* Center label */}
-            <div className="absolute inset-0 flex flex-col items-center justify-center">
-                <span className={`font-bold rpt-donut-value ${rateColor} ${size >= 100 ? 'text-2xl' : size >= 60 ? 'text-lg' : 'text-sm'}`}>
+            {/* Center label — just the percentage (Allure style, no sublabel) */}
+            <div className="absolute inset-0 flex items-center justify-center">
+                <span className={`font-bold ${rateColor} ${size >= 100 ? 'text-[1.65rem]' : size >= 60 ? 'text-lg' : 'text-sm'}`}>
                     {passRate}%
                 </span>
-                {size >= 80 && (
-                    <span className="text-[9px] rpt-text-muted font-medium uppercase tracking-wider mt-0.5">
-                        pass rate
-                    </span>
-                )}
             </div>
         </div>
     );

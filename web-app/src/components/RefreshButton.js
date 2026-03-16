@@ -14,7 +14,7 @@ import { RetryIcon } from '@/components/Icons';
 export default function RefreshButton({ onClick, loading = false, label = 'Refresh', variant = 'header' }) {
     const styles = variant === 'card'
         ? 'flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-brand-600 hover:text-brand-700 bg-brand-50 hover:bg-brand-100 rounded-lg transition-all duration-200'
-        : 'page-header-button flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-[11px] font-semibold';
+        : 'page-header-button flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-[0.68rem] font-semibold';
 
     return (
         <button

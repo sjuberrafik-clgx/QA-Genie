@@ -99,11 +99,20 @@ export default function RobotMascotLogo({
                         <stop offset="0.45" stopColor="white" stopOpacity="0.1" />
                         <stop offset="1" stopColor="white" stopOpacity="0" />
                     </radialGradient>
+                    <radialGradient id={`${svgId}-irisGrad`} cx="0.45" cy="0.38" r="0.55" gradientUnits="objectBoundingBox">
+                        <stop offset="0" stopColor="#67E8F9" />
+                        <stop offset="0.55" stopColor={pupilFill} />
+                        <stop offset="1" stopColor="#1E3A5F" />
+                    </radialGradient>
+                    <radialGradient id={`${svgId}-irisShine`} cx="0.3" cy="0.25" r="0.45" gradientUnits="objectBoundingBox">
+                        <stop offset="0" stopColor="white" stopOpacity="0.38" />
+                        <stop offset="1" stopColor="white" stopOpacity="0" />
+                    </radialGradient>
                     <clipPath id={`${svgId}-eyeLeftClip`}>
-                        <rect x="40" y="26" width="13" height="8" rx="4" />
+                        <ellipse cx="46.5" cy="31" rx="7" ry="6" />
                     </clipPath>
                     <clipPath id={`${svgId}-eyeRightClip`}>
-                        <rect x="56" y="26" width="13" height="8" rx="4" />
+                        <ellipse cx="62.5" cy="31" rx="7" ry="6" />
                     </clipPath>
                 </defs>
 
@@ -125,46 +134,35 @@ export default function RobotMascotLogo({
                         <g className={animated ? 'mascot-face' : ''}>
                             <g className={animated ? 'mascot-eye mascot-eye-left' : ''}>
                                 <g clipPath={`url(#${svgId}-eyeLeftClip)`}>
-                                    <rect x="40" y="26" width="13" height="8" rx="4" fill="#F8FAFC" />
-                                    <circle cx="46.25" cy="30" r="2.8" fill="none" stroke={pupilFill} strokeWidth="0.5" opacity="0.22" />
-                                    <circle className={animated ? 'mascot-pupil' : ''} cx="46.25" cy="30" r="1.85" fill={pupilFill} />
-                                    <ellipse className={animated ? 'mascot-cornea' : ''} cx="45.8" cy="29.2" rx="5.2" ry="3.2" fill={`url(#${svgId}-cornea)`} />
-                                    <circle className={animated ? 'mascot-glint' : ''} cx="44.5" cy="28.6" r="0.65" fill="white" />
-                                    <circle cx="47.7" cy="31.2" r="0.28" fill="white" opacity="0.4" />
-                                    <rect className={animated ? 'mascot-eyelid mascot-eyelid-top' : ''} x="39.6" y="18" width="13.8" height="8" rx="4" fill="#101728" />
-                                    <rect className={animated ? 'mascot-eyelid mascot-eyelid-bottom' : ''} x="39.6" y="34" width="13.8" height="8" rx="4" fill="#101728" />
-                                </g>
-                                {/* Eyelashes — outside clip so they sit above the eye socket */}
-                                <g className={animated ? 'mascot-lash mascot-lash-left' : ''} opacity="0.7">
-                                    <path d="M42.2 26.2C41.5 25.1 41.1 24.0 41.2 22.8" stroke="#1A2030" strokeWidth="0.7" strokeLinecap="round" fill="none" />
-                                    <path d="M44.6 25.6C44.3 24.4 44.4 23.2 44.9 22.1" stroke="#1A2030" strokeWidth="0.7" strokeLinecap="round" fill="none" />
-                                    <path d="M47.2 25.5C47.3 24.3 47.6 23.1 48.3 22.2" stroke="#1A2030" strokeWidth="0.7" strokeLinecap="round" fill="none" />
-                                    <path d="M49.8 25.8C50.3 24.7 51.0 23.8 51.8 23.1" stroke="#1A2030" strokeWidth="0.7" strokeLinecap="round" fill="none" />
-                                    <path d="M51.6 26.5C52.4 25.6 53.3 24.9 54.3 24.5" stroke="#1A2030" strokeWidth="0.6" strokeLinecap="round" fill="none" />
+                                    <ellipse cx="46.5" cy="31" rx="7" ry="6" fill="#F0F6FF" />
+                                    <circle cx="46.5" cy="31" r="4.8" fill={`url(#${svgId}-irisGrad)`} />
+                                    <circle cx="46.5" cy="31" r="4.8" fill={`url(#${svgId}-irisShine)`} />
+                                    <circle className={animated ? 'mascot-pupil' : ''} cx="46.5" cy="31" r="2.1" fill="#0A1628" />
+                                    <ellipse className={animated ? 'mascot-cornea' : ''} cx="45.8" cy="29.5" rx="5.8" ry="4.2" fill={`url(#${svgId}-cornea)`} />
+                                    <circle className={animated ? 'mascot-glint' : ''} cx="44.2" cy="28.8" r="1.5" fill="white" opacity="0.92" />
+                                    <circle cx="48.4" cy="32.8" r="0.7" fill="white" opacity="0.45" />
+                                    <ellipse className={animated ? 'mascot-eyelid mascot-eyelid-top' : ''} cx="46.5" cy="19" rx="7.4" ry="6" fill="#101728" />
+                                    <ellipse className={animated ? 'mascot-eyelid mascot-eyelid-bottom' : ''} cx="46.5" cy="43" rx="7.4" ry="6" fill="#101728" />
                                 </g>
                             </g>
+
                             <g className={animated ? 'mascot-eye mascot-eye-right' : ''}>
                                 <g clipPath={`url(#${svgId}-eyeRightClip)`}>
-                                    <rect x="56" y="26" width="13" height="8" rx="4" fill="#F8FAFC" />
-                                    <circle cx="62.25" cy="30" r="2.8" fill="none" stroke={pupilFill} strokeWidth="0.5" opacity="0.22" />
-                                    <circle className={animated ? 'mascot-pupil' : ''} cx="62.25" cy="30" r="1.85" fill={pupilFill} />
-                                    <ellipse className={animated ? 'mascot-cornea' : ''} cx="61.8" cy="29.2" rx="5.2" ry="3.2" fill={`url(#${svgId}-cornea)`} />
-                                    <circle className={animated ? 'mascot-glint' : ''} cx="60.5" cy="28.6" r="0.65" fill="white" />
-                                    <circle cx="63.7" cy="31.2" r="0.28" fill="white" opacity="0.4" />
-                                    <rect className={animated ? 'mascot-eyelid mascot-eyelid-top' : ''} x="55.6" y="18" width="13.8" height="8" rx="4" fill="#101728" />
-                                    <rect className={animated ? 'mascot-eyelid mascot-eyelid-bottom' : ''} x="55.6" y="34" width="13.8" height="8" rx="4" fill="#101728" />
-                                </g>
-                                {/* Eyelashes — mirrored for right eye */}
-                                <g className={animated ? 'mascot-lash mascot-lash-right' : ''} opacity="0.7">
-                                    <path d="M57.4 26.5C56.6 25.6 55.7 24.9 54.7 24.5" stroke="#1A2030" strokeWidth="0.6" strokeLinecap="round" fill="none" />
-                                    <path d="M59.2 25.8C58.7 24.7 58.0 23.8 57.2 23.1" stroke="#1A2030" strokeWidth="0.7" strokeLinecap="round" fill="none" />
-                                    <path d="M61.8 25.5C61.7 24.3 61.4 23.1 60.7 22.2" stroke="#1A2030" strokeWidth="0.7" strokeLinecap="round" fill="none" />
-                                    <path d="M64.4 25.6C64.7 24.4 64.6 23.2 64.1 22.1" stroke="#1A2030" strokeWidth="0.7" strokeLinecap="round" fill="none" />
-                                    <path d="M66.8 26.2C67.5 25.1 67.9 24.0 67.8 22.8" stroke="#1A2030" strokeWidth="0.7" strokeLinecap="round" fill="none" />
+                                    <ellipse cx="62.5" cy="31" rx="7" ry="6" fill="#F0F6FF" />
+                                    <circle cx="62.5" cy="31" r="4.8" fill={`url(#${svgId}-irisGrad)`} />
+                                    <circle cx="62.5" cy="31" r="4.8" fill={`url(#${svgId}-irisShine)`} />
+                                    <circle className={animated ? 'mascot-pupil' : ''} cx="62.5" cy="31" r="2.1" fill="#0A1628" />
+                                    <ellipse className={animated ? 'mascot-cornea' : ''} cx="61.8" cy="29.5" rx="5.8" ry="4.2" fill={`url(#${svgId}-cornea)`} />
+                                    <circle className={animated ? 'mascot-glint' : ''} cx="60.2" cy="28.8" r="1.5" fill="white" opacity="0.92" />
+                                    <circle cx="64.4" cy="32.8" r="0.7" fill="white" opacity="0.45" />
+                                    <ellipse className={animated ? 'mascot-eyelid mascot-eyelid-top' : ''} cx="62.5" cy="19" rx="7.4" ry="6" fill="#101728" />
+                                    <ellipse className={animated ? 'mascot-eyelid mascot-eyelid-bottom' : ''} cx="62.5" cy="43" rx="7.4" ry="6" fill="#101728" />
                                 </g>
                             </g>
-                            <path d="M39 40.5C42.8 37.833 47.2 36.5 52.2 36.5" stroke="rgba(255,255,255,0.14)" strokeWidth="1.8" strokeLinecap="round" />
-                            <path d="M56 36.5C59.6 36.5 63 37.833 66.2 40.5" stroke="rgba(255,255,255,0.14)" strokeWidth="1.8" strokeLinecap="round" />
+
+                            {/* Smile — tech-style segmented arc with glow */}
+                            <path d="M44 42 L47.5 44.5 L54.5 44.5 L58 42" stroke={pupilFill} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" fill="none" opacity="0.85" />
+                            <path d="M44 42 L47.5 44.5 L54.5 44.5 L58 42" stroke={pupilFill} strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" fill="none" opacity="0.15" />
                         </g>
 
                         <path d="M34 14.5C34 11.462 36.462 9 39.5 9C42.538 9 45 11.462 45 14.5V16H34V14.5Z" fill="#F1F5F9" opacity="0.92" />
