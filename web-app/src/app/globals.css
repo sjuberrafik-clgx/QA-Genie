@@ -110,6 +110,185 @@ h2 {
     box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04), 0 1px 2px rgba(91, 33, 182, 0.06);
 }
 
+/* ─── Premium Glassmorphism Cards ────────────────────────────────── */
+.glass-premium {
+    background: rgba(255, 255, 255, 0.58);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    box-shadow:
+        0 4px 16px rgba(15, 23, 42, 0.04),
+        0 1px 3px rgba(15, 23, 42, 0.03),
+        inset 0 1px 0 rgba(255, 255, 255, 0.7);
+    transition: all 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.glass-premium:hover {
+    background: rgba(255, 255, 255, 0.72);
+    border-color: rgba(255, 255, 255, 0.65);
+    box-shadow:
+        0 20px 40px rgba(15, 23, 42, 0.08),
+        0 8px 16px rgba(15, 23, 42, 0.04),
+        inset 0 1px 0 rgba(255, 255, 255, 0.85);
+    transform: translateY(-3px);
+}
+
+.glass-premium-static {
+    background: rgba(255, 255, 255, 0.55);
+    backdrop-filter: blur(20px) saturate(170%);
+    -webkit-backdrop-filter: blur(20px) saturate(170%);
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    box-shadow:
+        0 4px 16px rgba(15, 23, 42, 0.04),
+        0 1px 3px rgba(15, 23, 42, 0.03),
+        inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+/* Icon glass orb */
+.icon-glass {
+    background: rgba(255, 255, 255, 0.55);
+    backdrop-filter: blur(12px) saturate(160%);
+    -webkit-backdrop-filter: blur(12px) saturate(160%);
+    box-shadow:
+        0 4px 12px rgba(15, 23, 42, 0.06),
+        inset 0 1px 0 rgba(255, 255, 255, 0.8),
+        inset 0 -1px 2px rgba(15, 23, 42, 0.04);
+}
+
+/* Animated gradient border */
+.gradient-border {
+    position: relative;
+    isolation: isolate;
+}
+
+.gradient-border::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    margin: -1px;
+    border-radius: inherit;
+    background: linear-gradient(135deg, rgba(15, 118, 110, 0.25), rgba(37, 99, 235, 0.25), rgba(15, 118, 110, 0.25));
+    background-size: 300% 300%;
+    animation: border-flow 4s linear infinite;
+    opacity: 0;
+    transition: opacity 400ms ease;
+}
+
+.gradient-border:hover::before {
+    opacity: 1;
+}
+
+/* Soft glow effect behind cards */
+.card-glow {
+    position: relative;
+}
+
+.card-glow::after {
+    content: '';
+    position: absolute;
+    inset: 4px;
+    z-index: -1;
+    border-radius: inherit;
+    background: radial-gradient(ellipse at 50% 10%, var(--glow-color, rgba(15, 118, 110, 0.12)), transparent 70%);
+    opacity: 0;
+    transition: opacity 400ms ease;
+    filter: blur(20px);
+}
+
+.card-glow:hover::after {
+    opacity: 1;
+}
+
+/* Shimmer sweep overlay */
+.shimmer-sweep {
+    position: relative;
+    overflow: hidden;
+}
+
+.shimmer-sweep::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 50%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.25), transparent);
+    transition: left 600ms ease;
+    z-index: 1;
+    pointer-events: none;
+}
+
+.shimmer-sweep:hover::before {
+    left: 100%;
+}
+
+/* Pipeline connector line */
+.pipeline-connector {
+    position: relative;
+}
+
+.pipeline-connector::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    bottom: -12px;
+    width: 2px;
+    height: 12px;
+    background: linear-gradient(180deg, rgba(15, 118, 110, 0.25), rgba(37, 99, 235, 0.15));
+    border-radius: 1px;
+}
+
+/* Gradient top accent bar */
+.accent-bar-top {
+    position: relative;
+    overflow: hidden;
+}
+
+.accent-bar-top::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, #0f766e, #2563eb, #0f766e);
+    background-size: 200% 100%;
+    animation: border-flow 3s linear infinite;
+    border-radius: inherit;
+    opacity: 0.7;
+}
+
+/* Gradient left accent stripe */
+.accent-stripe-left {
+    position: relative;
+}
+
+.accent-stripe-left::before {
+    content: '';
+    position: absolute;
+    top: 12px;
+    bottom: 12px;
+    left: 0;
+    width: 3px;
+    background: linear-gradient(180deg, #0f766e, #2563eb);
+    border-radius: 0 2px 2px 0;
+}
+
+@keyframes border-flow {
+    0% {
+        background-position: 0% 50%;
+    }
+
+    50% {
+        background-position: 100% 50%;
+    }
+
+    100% {
+        background-position: 0% 50%;
+    }
+}
+
 .glass-sidebar {
     background: rgba(255, 255, 255, 0.82);
     backdrop-filter: blur(20px) saturate(180%);
@@ -183,44 +362,56 @@ h2 {
 }
 
 .page-header-panel {
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(241, 245, 249, 0.92));
-    box-shadow: 0 14px 34px rgba(15, 23, 42, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.72);
-    color: #0f172a;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(16px) saturate(160%);
+    -webkit-backdrop-filter: blur(16px) saturate(160%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
+    color: #ffffff;
+    transition: background 200ms ease, border-color 200ms ease;
+}
+
+.page-header-panel:hover {
+    background: rgba(255, 255, 255, 0.16);
+    border-color: rgba(255, 255, 255, 0.2);
 }
 
 .page-header-panel-subtle {
-    color: rgba(51, 65, 85, 0.76);
+    color: rgba(203, 213, 225, 0.72);
 }
 
 .page-header-button {
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(241, 245, 249, 0.92));
-    box-shadow: 0 12px 28px rgba(15, 23, 42, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.72);
-    color: #0f172a;
-    transition: transform 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(16px) saturate(160%);
+    -webkit-backdrop-filter: blur(16px) saturate(160%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 1px 3px rgba(0, 0, 0, 0.06);
+    color: #ffffff;
+    transition: all 200ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .page-header-button:hover {
+    background: rgba(255, 255, 255, 0.18);
+    border-color: rgba(255, 255, 255, 0.22);
     transform: translateY(-1px);
-    box-shadow: 0 16px 32px rgba(15, 23, 42, 0.13), inset 0 1px 0 rgba(255, 255, 255, 0.78);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 4px 12px rgba(0, 0, 0, 0.1);
 }
 
 .page-header-button:disabled {
-    opacity: 0.55;
+    opacity: 0.45;
     transform: none;
-    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .page-header-select {
     appearance: none;
     -webkit-appearance: none;
     -moz-appearance: none;
-    padding-right: 2.6rem;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%230f172a'%3E%3Cpath fill-rule='evenodd' d='M5.22 7.97a.75.75 0 0 1 1.06 0L10 11.69l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.03a.75.75 0 0 1 0-1.06Z' clip-rule='evenodd'/%3E%3C/svg%3E");
+    padding-right: 2.2rem;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%23ffffff'%3E%3Cpath fill-rule='evenodd' d='M5.22 7.97a.75.75 0 0 1 1.06 0L10 11.69l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.03a.75.75 0 0 1 0-1.06Z' clip-rule='evenodd'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
-    background-position: right 0.9rem center;
-    background-size: 1rem 1rem;
+    background-position: right 0.7rem center;
+    background-size: 0.85rem 0.85rem;
 }
 
 .gradient-text {
@@ -637,7 +828,7 @@ h2 {
 
 @keyframes mascotLashBlink {
 
-    /* Resting — lashes fanned upward */
+    /* Open — lashes at natural fan-up position above eye */
     0%,
     26%,
     34%,
@@ -646,101 +837,82 @@ h2 {
     67%,
     75%,
     100% {
-        transform: translate3d(0, 0, 0) scaleY(1);
-        opacity: 0.7;
+        transform: translateY(0);
     }
 
-    /* Primary blink — lashes sweep down and compress */
+    /* Primary blink — lashes sweep down with eyelid */
     28% {
-        transform: translate3d(0, 1.2px, 0) scaleY(0.7);
-        opacity: 0.55;
+        transform: translateY(3px);
     }
 
     29% {
-        transform: translate3d(0, 2.8px, 0) scaleY(0.3);
-        opacity: 0.35;
+        transform: translateY(5.5px);
     }
 
     29.5% {
-        transform: translate3d(0, 3.4px, 0) scaleY(0.08);
-        opacity: 0.2;
+        transform: translateY(6.5px);
     }
 
     30.5% {
-        transform: translate3d(0, 3.4px, 0) scaleY(0.08);
-        opacity: 0.2;
+        transform: translateY(6.5px);
     }
 
     31% {
-        transform: translate3d(0, 2px, 0) scaleY(0.45);
-        opacity: 0.4;
+        transform: translateY(4px);
     }
 
     32% {
-        transform: translate3d(0, 0.5px, 0) scaleY(0.85);
-        opacity: 0.62;
+        transform: translateY(1px);
     }
 
     33% {
-        transform: translate3d(0, -0.15px, 0) scaleY(1.04);
-        opacity: 0.72;
+        transform: translateY(-0.3px);
     }
 
     /* Micro double-blink */
     47% {
-        transform: translate3d(0, 1.6px, 0) scaleY(0.5);
-        opacity: 0.4;
+        transform: translateY(4px);
     }
 
     47.5% {
-        transform: translate3d(0, 3px, 0) scaleY(0.1);
-        opacity: 0.22;
+        transform: translateY(6px);
     }
 
     48% {
-        transform: translate3d(0, 1.6px, 0) scaleY(0.5);
-        opacity: 0.4;
+        transform: translateY(4px);
     }
 
     48.5% {
-        transform: translate3d(0, 0, 0) scaleY(1);
-        opacity: 0.7;
+        transform: translateY(0);
     }
 
     /* Secondary blink */
     70% {
-        transform: translate3d(0, 1.5px, 0) scaleY(0.6);
-        opacity: 0.5;
+        transform: translateY(3.5px);
     }
 
     71% {
-        transform: translate3d(0, 2.8px, 0) scaleY(0.25);
-        opacity: 0.3;
+        transform: translateY(5.5px);
     }
 
     71.5% {
-        transform: translate3d(0, 3.4px, 0) scaleY(0.08);
-        opacity: 0.2;
+        transform: translateY(6.5px);
     }
 
     72% {
-        transform: translate3d(0, 3.4px, 0) scaleY(0.08);
-        opacity: 0.2;
+        transform: translateY(6.5px);
     }
 
     72.5% {
-        transform: translate3d(0, 1.8px, 0) scaleY(0.5);
-        opacity: 0.45;
+        transform: translateY(3.5px);
     }
 
     73.5% {
-        transform: translate3d(0, 0.4px, 0) scaleY(0.9);
-        opacity: 0.65;
+        transform: translateY(0.8px);
     }
 
     74% {
-        transform: translate3d(0, -0.1px, 0) scaleY(1.02);
-        opacity: 0.7;
+        transform: translateY(-0.2px);
     }
 }
 
@@ -837,10 +1009,12 @@ h2 {
 }
 
 .mascot-lash {
-    animation: mascotLashBlink var(--mascot-blink-duration, 8.5s) linear infinite;
-    transform-box: fill-box;
-    transform-origin: 50% 100%;
-    will-change: transform, opacity;
+    animation: mascotBlinkTopLid var(--mascot-blink-duration, 8.5s) linear infinite;
+    will-change: transform;
+}
+
+.mascot-lash-right {
+    animation-delay: 0.08s;
 }
 
 .mascot-cornea {
@@ -866,10 +1040,6 @@ h2 {
 
 .mascot-eye-right .mascot-pupil {
     animation-delay: 0.12s;
-}
-
-.mascot-eye-right .mascot-lash {
-    animation-delay: 0.08s;
 }
 
 .mascot-eye-right .mascot-cornea {
@@ -1478,144 +1648,642 @@ h2 {
 }
 
 /* ═════════════════════════════════════════════════════════════════════
-   Report Theme System (rpt-* classes) — Scoped via #report-container
-   Light mode (default) + Dark mode ([data-theme="dark"])
+   Allure Report Theme System — Pixel-perfect Allure 3.1.0 replica
+   Scoped via #report-container. Dark theme is primary (matches screenshot).
+   Old rpt-* classes kept for any external references, mapped to allure-* equivalents.
    ═════════════════════════════════════════════════════════════════════ */
 
 /* ─── Page background ─── */
-.rpt-page-bg {
-    background: #f8fafc;
+.allure-page-bg {
+    background: #1a1b2e;
     transition: background 0.3s ease;
 }
 
-/* ─── Text ─── */
+/* Legacy alias */
+.rpt-page-bg {
+    background: #1a1b2e;
+    transition: background 0.3s ease;
+}
+
+/* ─── Navigation Bar ─── */
+.allure-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 20px;
+    background: #282940;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    position: sticky;
+    top: 0;
+    z-index: 40;
+}
+
+.allure-nav-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px;
+    border-radius: 6px;
+    color: rgba(255, 255, 255, 0.55);
+    transition: color 0.15s, background 0.15s;
+    cursor: pointer;
+    background: transparent;
+    border: none;
+}
+
+.allure-nav-btn:hover {
+    color: rgba(255, 255, 255, 0.9);
+    background: rgba(255, 255, 255, 0.06);
+}
+
+/* ─── Text colors ─── */
+.allure-text-primary {
+    color: #e2e8f0;
+}
+
+.allure-text-secondary {
+    color: #94a3b8;
+}
+
+.allure-text-muted {
+    color: #64748b;
+}
+
+/* Legacy aliases */
 .rpt-text-primary {
-    @apply text-surface-800;
+    color: #e2e8f0;
 }
 
 .rpt-text-secondary {
-    @apply text-surface-600;
+    color: #94a3b8;
 }
 
 .rpt-text-muted {
-    @apply text-surface-400;
+    color: #64748b;
 }
 
-/* ─── Divider ─── */
-.rpt-divider {
-    @apply bg-surface-200;
+/* ─── Border / Divider ─── */
+.allure-border {
+    border-color: #2e2f45;
+}
+
+.allure-divider {
+    background: #334155;
 }
 
 .rpt-border {
-    @apply border-surface-200;
+    border-color: #2e2f45;
 }
 
-/* ─── Report header card ─── */
+.rpt-divider {
+    background: #334155;
+}
+
+/* ─── Header Card ─── */
+.allure-header-card {
+    background: #1e1f35;
+    border: 1px solid #2e2f45;
+    border-left: 3px solid #66bb6a;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+/* Legacy alias */
 .rpt-report-header {
-    @apply bg-white border border-surface-200 shadow-card;
+    background: #1e1f35;
+    border: 1px solid #2e2f45;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 
-.rpt-header-icon {
-    @apply bg-brand-100 text-brand-600;
+/* ─── Tab bar — Allure green underline ─── */
+.allure-tab-active {
+    border-color: #66bb6a;
+    color: #e2e8f0;
+    border-bottom-width: 3px;
 }
 
-/* ─── Tab bar (underline style) ─── */
 .rpt-tab-underline-active {
-    @apply border-brand-500 text-brand-700;
+    border-color: #66bb6a;
+    color: #e2e8f0;
 }
 
 /* ─── Stats strip ─── */
+.allure-stats-strip {
+    border-bottom: 1px solid #2e2f45;
+}
+
 .rpt-stats-strip {
-    @apply bg-white border border-surface-200;
+    background: transparent;
+    border-color: transparent;
 }
 
-/* ─── Search box (standalone) ─── */
+/* ─── Search box ─── */
+.allure-search-box {
+    background: #24253a;
+    border: 1px solid #2e2f45;
+}
+
+.allure-search-box input {
+    color: #e2e8f0;
+}
+
+.allure-search-box input::placeholder {
+    color: #64748b;
+}
+
 .rpt-search-box {
-    @apply bg-white border border-surface-200;
+    background: #24253a;
+    border: 1px solid #2e2f45;
 }
 
-/* ─── Toggle buttons (Retry/Flaky inactive) ─── */
+/* ─── Toggle buttons (Retry / Flaky / Transition) ─── */
+.allure-toggle-btn {
+    border-color: #475569;
+    color: #94a3b8;
+    background: transparent;
+    cursor: pointer;
+}
+
+.allure-toggle-btn:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: #e2e8f0;
+}
+
 .rpt-toggle-inactive {
-    @apply border-surface-300 text-surface-500 bg-transparent;
+    border-color: #475569;
+    color: #94a3b8;
+    background: transparent;
 }
 
 .rpt-toggle-inactive:hover {
-    @apply bg-surface-50 text-surface-700;
+    background: rgba(255, 255, 255, 0.05);
+    color: #e2e8f0;
 }
 
-/* ─── Sort select ─── */
-.rpt-sort-select {
-    @apply bg-transparent border border-surface-200 text-surface-700;
+/* ─── Filter pills (inactive) ─── */
+.allure-pill-inactive {
+    background: transparent;
+    border: 1px solid #475569;
+    color: #94a3b8;
+}
+
+.allure-pill-inactive:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.rpt-pill {
+    border-color: #475569 !important;
+}
+
+.rpt-pill:hover {
+    background: rgba(255, 255, 255, 0.05) !important;
+}
+
+/* ─── Sort select — Allure green text for active sort ─── */
+.allure-sort-select {
+    background-color: transparent;
+    border: 1px solid #475569;
+    color: #66bb6a;
     appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%2364748b'%3E%3Cpath fill-rule='evenodd' d='M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z' clip-rule='evenodd'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%2366bb6a'%3E%3Cpath fill-rule='evenodd' d='M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z' clip-rule='evenodd'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.4rem center;
+    background-size: 1rem 1rem;
+    font-weight: 600;
+}
+
+.allure-sort-select option {
+    background: #24253a;
+    color: #e2e8f0;
+}
+
+.rpt-sort-select {
+    background-color: transparent;
+    border: 1px solid #475569;
+    color: #66bb6a;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%2366bb6a'%3E%3Cpath fill-rule='evenodd' d='M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z' clip-rule='evenodd'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 0.4rem center;
     background-size: 1rem 1rem;
 }
 
 /* ─── Suite list container ─── */
-.rpt-suite-list {
-    @apply bg-white border border-surface-200;
+.allure-suite-list {
+    background: transparent;
+    border: none;
 }
 
-/* ─── Suite row separator ─── */
+.rpt-suite-list {
+    background: transparent;
+    border: none;
+}
+
+/* ─── Suite row ─── */
+.allure-suite-row {
+    border-bottom: 1px solid #2e2f45;
+}
+
+.allure-suite-row:last-child {
+    border-bottom: 0;
+}
+
 .rpt-suite-row {
-    @apply border-b border-surface-100;
+    border-bottom: 1px solid #2e2f45;
 }
 
 .rpt-suite-row:last-child {
-    @apply border-b-0;
+    border-bottom: 0;
+}
+
+/* ─── Suite child (nested sub-suite) ─── */
+.allure-suite-child {
+    margin-left: 0;
+    margin-top: 2px;
 }
 
 /* ─── Suite button ─── */
+.allure-suite-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    text-align: left;
+    padding: 12px 16px;
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    transition: background 0.15s;
+    cursor: pointer;
+}
+
+.allure-suite-btn:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
 .rpt-suite-btn {
-    @apply bg-transparent;
+    background: transparent;
 }
 
 .rpt-suite-btn:hover {
-    @apply bg-surface-50;
+    background: rgba(255, 255, 255, 0.04);
 }
 
-/* ─── Count badge (Allure green) ─── */
+/* ─── Suite title ─── */
+.allure-suite-title {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: #e2e8f0;
+}
+
+/* ─── Proportional count bar (Allure-style) ─── */
+.allure-count-bar {
+    position: relative;
+    height: 22px;
+    border-radius: 4px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    transition: width 0.4s ease;
+}
+
+.allure-count-bar-inner {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.allure-bar-passed {
+    background: #66bb6a;
+    height: 100%;
+}
+
+.allure-bar-failed {
+    background: #ef4444;
+    height: 100%;
+}
+
+.allure-bar-broken {
+    background: #f97316;
+    height: 100%;
+}
+
+.allure-bar-skipped {
+    background: #f59e0b;
+    height: 100%;
+}
+
+.allure-count-label {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    text-align: right;
+    padding-right: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #fff;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+/* Legacy count badge (fallback) */
 .rpt-count-badge {
-    @apply px-2.5 py-1 text-[11px] font-bold rounded-md bg-accent-500 text-white;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px 10px;
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: 6px;
+    background: #66bb6a;
+    color: #fff;
     min-width: 28px;
     text-align: center;
 }
 
 /* ─── Spec item ─── */
+.allure-spec-item {
+    transition: background 0.15s;
+}
+
+.allure-spec-item:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
+
 .rpt-spec-item {
-    @apply transition-colors;
+    transition: background 0.15s;
 }
 
 .rpt-spec-item:hover {
-    @apply bg-surface-50;
+    background: rgba(255, 255, 255, 0.03);
 }
 
 /* ─── Error panels ─── */
+.allure-error-panel {
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.2);
+    color: #fca5a5;
+}
+
+.allure-error-broken {
+    background: rgba(249, 115, 22, 0.08);
+    border: 1px solid rgba(249, 115, 22, 0.2);
+    color: #fdba74;
+}
+
 .rpt-error-panel {
-    @apply text-red-700 bg-red-50/80 border border-red-200;
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.2);
+    color: #fca5a5;
 }
 
 .rpt-error-broken {
-    @apply text-orange-700 bg-orange-50/80 border border-orange-200;
+    background: rgba(249, 115, 22, 0.08);
+    border: 1px solid rgba(249, 115, 22, 0.2);
+    color: #fdba74;
 }
 
-/* ─── Donut chart ─── */
+/* ─── Donut chart track ─── */
+.allure-donut-track {
+    stroke: #2e2f45;
+}
+
 .rpt-donut-track {
-    stroke: #e2e8f0;
+    stroke: #2e2f45;
+}
+
+/* ─── Footer ─── */
+.allure-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 4px;
+    margin-top: 20px;
+    border-top: 1px solid #2e2f45;
+}
+
+/* ─── Theme-aware status text colors ─── */
+.allure-status-failed {
+    color: #f87171;
+}
+
+.allure-status-broken {
+    color: #fb923c;
+}
+
+.allure-status-passed {
+    color: #66bb6a;
+}
+
+.allure-status-skipped {
+    color: #fbbf24;
+}
+
+/* ─── Theme-aware pill "Total" active bg ─── */
+.allure-pill-total-active {
+    background: #3a3b52;
+}
+
+/* ─── Theme-aware badges ─── */
+.allure-badge-flaky {
+    background: rgba(168, 85, 247, 0.2);
+    color: #c084fc;
+}
+
+.allure-badge-retry {
+    background: rgba(245, 158, 11, 0.2);
+    color: #fbbf24;
 }
 
 /* ═════════════════════════════════════════════════════════════════════
-   DARK THEME — Scoped to [data-theme="dark"]
+   LIGHT THEME — [data-theme="light"] overrides
+   NOTE: .allure-page-bg is on the SAME element as data-theme, so we
+   use [data-theme="light"].allure-page-bg (NO space = same-element).
+   All other classes are on DESCENDANT elements → use space (descendant).
    ═════════════════════════════════════════════════════════════════════ */
 
-[data-theme="dark"] .rpt-page-bg {
-    background: #1a1b26;
+[data-theme="light"].allure-page-bg,
+[data-theme="light"].rpt-page-bg,
+[data-theme="light"] .allure-page-bg,
+[data-theme="light"] .rpt-page-bg {
+    background: #f8fafc;
 }
 
-[data-theme="dark"] {
-    --gradient-hero: linear-gradient(135deg, #102a33 0%, #183f4d 40%, #244a7a 100%);
+[data-theme="light"] .allure-nav {
+    background: #1e293b;
+}
+
+[data-theme="light"] .allure-text-primary,
+[data-theme="light"] .rpt-text-primary {
+    color: #1e293b;
+}
+
+[data-theme="light"] .allure-text-secondary,
+[data-theme="light"] .rpt-text-secondary {
+    color: #475569;
+}
+
+[data-theme="light"] .allure-text-muted,
+[data-theme="light"] .rpt-text-muted {
+    color: #94a3b8;
+}
+
+[data-theme="light"] .allure-border,
+[data-theme="light"] .rpt-border {
+    border-color: #e2e8f0;
+}
+
+[data-theme="light"] .allure-divider,
+[data-theme="light"] .rpt-divider {
+    background: #e2e8f0;
+}
+
+[data-theme="light"] .allure-header-card,
+[data-theme="light"] .rpt-report-header {
+    background: #fff;
+    border-color: #e2e8f0;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+[data-theme="light"] .allure-tab-active,
+[data-theme="light"] .rpt-tab-underline-active {
+    border-color: #66bb6a;
+    color: #1e293b;
+}
+
+[data-theme="light"] .allure-stats-strip {
+    border-bottom-color: #e2e8f0;
+}
+
+[data-theme="light"] .allure-search-box,
+[data-theme="light"] .rpt-search-box {
+    background: #fff;
+    border-color: #e2e8f0;
+}
+
+[data-theme="light"] .allure-search-box input {
+    color: #1e293b;
+}
+
+[data-theme="light"] .allure-search-box input::placeholder {
+    color: #94a3b8;
+}
+
+[data-theme="light"] .allure-toggle-btn,
+[data-theme="light"] .rpt-toggle-inactive {
+    border-color: #cbd5e1;
+    color: #64748b;
+}
+
+[data-theme="light"] .allure-toggle-btn:hover,
+[data-theme="light"] .rpt-toggle-inactive:hover {
+    background: #f1f5f9;
+    color: #1e293b;
+}
+
+[data-theme="light"] .allure-pill-inactive {
+    border-color: #cbd5e1;
+    color: #475569;
+}
+
+[data-theme="light"] .allure-pill-inactive:hover {
+    background: #f1f5f9;
+}
+
+[data-theme="light"] .allure-sort-select,
+[data-theme="light"] .rpt-sort-select {
+    border-color: #cbd5e1;
+    color: #66bb6a;
+}
+
+[data-theme="light"] .allure-sort-select option {
+    background: #fff;
+    color: #1e293b;
+}
+
+[data-theme="light"] .allure-suite-row,
+[data-theme="light"] .rpt-suite-row {
+    border-bottom-color: #e2e8f0;
+}
+
+[data-theme="light"] .allure-suite-btn:hover,
+[data-theme="light"] .rpt-suite-btn:hover {
+    background: #f8fafc;
+}
+
+[data-theme="light"] .allure-suite-title {
+    color: #1e293b;
+}
+
+[data-theme="light"] .allure-spec-item:hover,
+[data-theme="light"] .rpt-spec-item:hover {
+    background: #f8fafc;
+}
+
+[data-theme="light"] .allure-error-panel,
+[data-theme="light"] .rpt-error-panel {
+    background: rgba(239, 68, 68, 0.06);
+    border-color: rgba(239, 68, 68, 0.15);
+    color: #b91c1c;
+}
+
+[data-theme="light"] .allure-error-broken,
+[data-theme="light"] .rpt-error-broken {
+    background: rgba(249, 115, 22, 0.06);
+    border-color: rgba(249, 115, 22, 0.15);
+    color: #c2410c;
+}
+
+[data-theme="light"] .allure-donut-track,
+[data-theme="light"] .rpt-donut-track {
+    stroke: #e2e8f0;
+}
+
+[data-theme="light"] .allure-footer {
+    border-top-color: #e2e8f0;
+}
+
+[data-theme="light"] .allure-count-label {
+    text-shadow: none;
+}
+
+/* ─── Light mode: status text colors (darker for readability) ─── */
+[data-theme="light"] .allure-status-failed {
+    color: #dc2626;
+}
+
+[data-theme="light"] .allure-status-broken {
+    color: #ea580c;
+}
+
+[data-theme="light"] .allure-status-passed {
+    color: #16a34a;
+}
+
+[data-theme="light"] .allure-status-skipped {
+    color: #d97706;
+}
+
+/* ─── Light mode: pill "Total" active bg ─── */
+[data-theme="light"] .allure-pill-total-active {
+    background: #475569;
+}
+
+/* ─── Light mode: badges ─── */
+[data-theme="light"] .allure-badge-flaky {
+    background: rgba(168, 85, 247, 0.12);
+    color: #7c3aed;
+}
+
+[data-theme="light"] .allure-badge-retry {
+    background: rgba(245, 158, 11, 0.12);
+    color: #b45309;
+}
+
+/* Legacy dark-mode selectors kept for backward compat */
+[data-theme="dark"] .rpt-page-bg {
+    background: #1a1b2e;
 }
 
 [data-theme="dark"] .rpt-text-primary {
@@ -1630,110 +2298,9 @@ h2 {
     color: #64748b;
 }
 
-[data-theme="dark"] .rpt-divider {
-    background: #334155;
-}
-
-[data-theme="dark"] .rpt-border {
-    border-color: #334155;
-}
-
-[data-theme="dark"] .rpt-report-header {
-    background: #24253a;
-    border-color: #2e2f45;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-}
-
-[data-theme="dark"] .rpt-header-icon {
-    background: rgba(28, 128, 144, 0.2);
-    color: #3abac6;
-}
-
-[data-theme="dark"] .rpt-tab-underline-active {
-    border-color: #3abac6;
-    color: #e2e8f0;
-}
-
-[data-theme="dark"] .rpt-stats-strip {
-    background: transparent;
-    border-color: transparent;
-}
-
-[data-theme="dark"] .rpt-search-box {
-    background: #24253a;
-    border-color: #2e2f45;
-}
-
-[data-theme="dark"] .rpt-search-box input {
-    color: #e2e8f0;
-}
-
-[data-theme="dark"] .rpt-search-box input::placeholder {
-    color: #64748b;
-}
-
-[data-theme="dark"] .rpt-toggle-inactive {
-    border-color: #475569;
-    color: #94a3b8;
-    background: transparent;
-}
-
-[data-theme="dark"] .rpt-toggle-inactive:hover {
-    background: rgba(255, 255, 255, 0.05);
-    color: #e2e8f0;
-}
-
-[data-theme="dark"] .rpt-pill {
-    border-color: #475569 !important;
-}
-
-[data-theme="dark"] .rpt-pill:hover {
-    background: rgba(255, 255, 255, 0.05) !important;
-}
-
-[data-theme="dark"] .rpt-sort-select {
-    background-color: transparent;
-    border-color: #475569;
-    color: #94a3b8;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%2394a3b8'%3E%3Cpath fill-rule='evenodd' d='M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z' clip-rule='evenodd'/%3E%3C/svg%3E");
-}
-
-[data-theme="dark"] .rpt-suite-list {
-    background: #24253a;
-    border-color: #2e2f45;
-}
-
-[data-theme="dark"] .rpt-suite-row {
-    border-bottom-color: #2e2f45;
-}
-
-[data-theme="dark"] .rpt-suite-btn:hover {
-    background: rgba(255, 255, 255, 0.04);
-}
-
 [data-theme="dark"] .rpt-count-badge {
-    background: #10b981;
+    background: #66bb6a;
     color: #fff;
-}
-
-[data-theme="dark"] .rpt-spec-item:hover {
-    background: rgba(255, 255, 255, 0.03);
-}
-
-[data-theme="dark"] .rpt-error-panel {
-    background: rgba(239, 68, 68, 0.08);
-    border-color: rgba(239, 68, 68, 0.2);
-    color: #fca5a5;
-}
-
-[data-theme="dark"] .rpt-error-broken {
-    background: rgba(249, 115, 22, 0.08);
-    border-color: rgba(249, 115, 22, 0.2);
-    color: #fdba74;
-}
-
-[data-theme="dark"] .rpt-donut-track {
-    stroke: #334155;
 }
 
 /* ═════════════════════════════════════════════════════════════════════

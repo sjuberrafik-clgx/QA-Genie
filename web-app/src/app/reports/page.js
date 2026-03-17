@@ -5,10 +5,8 @@ import apiClient from '@/lib/api-client';
 import { useSSE } from '@/hooks/useSSE';
 import ConsolidatedReport from '@/components/ConsolidatedReport';
 import ThemeToggle from '@/components/ThemeToggle';
-import PageHeader from '@/components/PageHeader';
+import AllureNavBar from '@/components/AllureNavBar';
 import ErrorBanner from '@/components/ErrorBanner';
-import RefreshButton from '@/components/RefreshButton';
-import { BarChartIcon } from '@/components/Icons';
 
 /* ─── Time-window filter presets ─── */
 const TIME_FILTERS = [
@@ -28,35 +26,19 @@ function getSinceTimestamp(filterValue) {
 }
 
 export default function ReportsPage() {
-    const [reportCount, setReportCount] = useState(0);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [refreshKey, setRefreshKey] = useState(0);
     const [timeFilter, setTimeFilter] = useState('latest');
     const pollTimerRef = useRef(null);
 
-    const fetchCount = useCallback(async () => {
-        try {
-            const data = await apiClient.listReports();
-            setReportCount(Array.isArray(data) ? data.length : 0);
-            setError(null);
-        } catch {
-            setError('Failed to load report count');
-        }
-    }, []);
-
-    useEffect(() => { fetchCount(); }, [fetchCount]);
-
     const handleRefresh = useCallback(() => {
         setLoading(true);
         setRefreshKey(k => k + 1);
-        fetchCount().finally(() => setLoading(false));
-    }, [fetchCount]);
+        setTimeout(() => setLoading(false), 600);
+    }, []);
 
     // ─── SSE: Real-time report updates ──────────────────────────
-    // Subscribe to the global event stream. When a 'report_saved' event
-    // arrives (emitted by execute_test or pipeline-runner after saving a
-    // report), auto-refresh the report list and consolidated view.
     const { status: sseStatus } = useSSE(apiClient.getGlobalStreamUrl(), {
         onEvent: useCallback((eventType, _data) => {
             if (eventType === 'report_saved') {
@@ -74,7 +56,6 @@ export default function ReportsPage() {
 
         if (sseStatus !== 'connected') {
             pollTimerRef.current = setInterval(() => {
-                fetchCount();
                 setRefreshKey(k => k + 1);
             }, 30000);
         }
@@ -85,36 +66,22 @@ export default function ReportsPage() {
                 pollTimerRef.current = null;
             }
         };
-    }, [sseStatus, fetchCount]);
+    }, [sseStatus]);
 
     return (
-        <div id="report-container" className="rpt-page-bg min-h-screen">
-            <div className="mx-auto max-w-6xl space-y-6 px-6 py-6">
-                {/* ─── Header ─── */}
-                <PageHeader
-                    title="Test Reports"
-                    subtitle={`${reportCount} ${reportCount === 1 ? 'report' : 'reports'} in the reporting workspace, with live summaries and consolidated run detail.`}
-                    Icon={BarChartIcon}
-                    actions={
-                        <>
-                            <ThemeToggle containerId="report-container" />
-                            <select
-                                value={timeFilter}
-                                onChange={(e) => { setTimeFilter(e.target.value); setRefreshKey(k => k + 1); }}
-                                className="page-header-button page-header-select cursor-pointer rounded-xl px-3 py-2 text-[11px] font-semibold outline-none"
-                                aria-label="Filter reports by time range"
-                            >
-                                {TIME_FILTERS.map(f => (
-                                    <option key={f.value} value={f.value} className="text-surface-900 bg-white">{f.label}</option>
-                                ))}
-                            </select>
-                            <RefreshButton onClick={handleRefresh} loading={loading} />
-                        </>
-                    }
-                />
+        <div id="report-container" data-theme="dark" className="allure-page-bg min-h-screen">
+            {/* ─── Allure Top Nav Bar ─── */}
+            <AllureNavBar
+                timeFilter={timeFilter}
+                onTimeFilterChange={(v) => { setTimeFilter(v); setRefreshKey(k => k + 1); }}
+                onRefresh={handleRefresh}
+                refreshLoading={loading}
+                themeToggle={<ThemeToggle containerId="report-container" />}
+                timeFilters={TIME_FILTERS}
+            />
 
+            <div className="mx-auto max-w-5xl space-y-0 px-6 py-6">
                 <ErrorBanner error={error} onDismiss={() => setError(null)} />
-                {/* ─── Allure-style Consolidated Report ─── */}
                 <ConsolidatedReport key={refreshKey} since={getSinceTimestamp(timeFilter)} />
             </div>
         </div>
