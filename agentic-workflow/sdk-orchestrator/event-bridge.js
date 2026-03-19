@@ -26,6 +26,9 @@
  */
 
 const { EventEmitter } = require('events');
+const fs = require('fs');
+const path = require('path');
+const { ensureDir } = require('./utils');
 
 // ─── Event Types ────────────────────────────────────────────────────────────
 
@@ -50,7 +53,7 @@ const EVENT_TYPES = {
 // ─── Event Bridge ───────────────────────────────────────────────────────────
 
 class EventBridge extends EventEmitter {
-    constructor() {
+    constructor(options = {}) {
         super();
         // Increase max listeners — each SSE client adds listeners
         this.setMaxListeners(100);
@@ -58,6 +61,12 @@ class EventBridge extends EventEmitter {
         // Per-run event buffers for late-joining clients
         this._runBuffers = new Map();
         this._maxBufferSize = 200;
+        this.persist = options.persist !== false;
+        this.persistDir = options.persistDir || path.join(__dirname, '..', 'test-artifacts', 'events');
+
+        if (this.persist) {
+            ensureDir(this.persistDir);
+        }
     }
 
     /**
@@ -83,6 +92,10 @@ class EventBridge extends EventEmitter {
         buffer.push(event);
         if (buffer.length > this._maxBufferSize) {
             buffer.shift(); // Evict oldest
+        }
+
+        if (this.persist) {
+            this._persistEvent(event);
         }
 
         // Emit to general listeners
@@ -187,6 +200,45 @@ class EventBridge extends EventEmitter {
     }
 
     /**
+     * Read durable JSONL events for a run.
+     *
+     * @param {string} runId
+     * @param {Object} [options]
+     * @param {number} [options.limit=200]
+     * @returns {Object[]}
+     */
+    getPersistedRunEvents(runId, options = {}) {
+        const limit = options.limit || 200;
+        const eventPath = this.getRunEventLogPath(runId);
+        if (!fs.existsSync(eventPath)) {
+            return [];
+        }
+
+        try {
+            const lines = fs.readFileSync(eventPath, 'utf-8')
+                .split(/\r?\n/)
+                .filter(Boolean);
+
+            return lines
+                .slice(-limit)
+                .map(line => {
+                    try {
+                        return JSON.parse(line);
+                    } catch {
+                        return null;
+                    }
+                })
+                .filter(Boolean);
+        } catch {
+            return [];
+        }
+    }
+
+    getRunEventLogPath(runId) {
+        return path.join(this.persistDir, `${runId}.jsonl`);
+    }
+
+    /**
      * Clean up event buffer for a completed run.
      * Call after run completion + a grace period.
      *
@@ -194,6 +246,15 @@ class EventBridge extends EventEmitter {
      */
     cleanupRun(runId) {
         this._runBuffers.delete(runId);
+    }
+
+    _persistEvent(event) {
+        try {
+            ensureDir(this.persistDir);
+            fs.appendFileSync(this.getRunEventLogPath(event.runId), `${JSON.stringify(event)}\n`, 'utf-8');
+        } catch {
+            // Event persistence is best-effort. Live event delivery should still continue.
+        }
     }
 
     /**

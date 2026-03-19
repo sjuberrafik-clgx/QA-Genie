@@ -27,6 +27,7 @@ const { getContextStoreManager } = require('./shared-context-store');
 const { AgentCoordinator, ROUTE } = require('./agent-coordinator');
 const { SupervisorSession } = require('./supervisor-session');
 const { getEventBridge } = require('./event-bridge');
+const { EvidenceStore } = require('./evidence-store');
 const { EnvironmentHealthCheck, DECISION: OODA_DECISION } = require('./ooda-loop');
 
 // ─── Pipeline Stage Definitions ─────────────────────────────────────────────
@@ -84,6 +85,7 @@ class PipelineRunner {
         this.projectRoot = path.join(__dirname, '..', '..');
         this._contextStoreManager = getContextStoreManager();
         this._eventBridge = options.eventBridge || getEventBridge();
+        this.evidenceStore = options.evidenceStore || new EvidenceStore({ projectRoot: this.projectRoot });
 
         // Grounding store — pull from options or from session factory's internal store
         this.groundingStore = options.groundingStore || options.sessionFactory?._groundingStore || null;
@@ -102,13 +104,17 @@ class PipelineRunner {
         const mode = options.mode || 'full';
         const onProgress = options.onProgress || (() => { });
         const stages = MODE_STAGES[mode] || MODE_STAGES.full;
+        const scenario = options.scenario || null;
+        const scenarioId = scenario?.id || options.scenarioId || null;
+        const authState = options.authState || scenario?.authState || 'unspecified';
 
         const startTime = Date.now();
         const runId = options.runId || `run_${ticketId}_${Date.now()}`;
+        const contextRunId = options.contextRunId || (scenarioId ? `${runId}__${scenarioId}` : runId);
 
         // Initialize shared context store for this run
-        const contextStore = this._contextStoreManager.getStore(runId);
-        contextStore.addNote('coordinator', `Pipeline started: ${ticketId} [mode: ${mode}]`);
+        const contextStore = this._contextStoreManager.getStore(contextRunId);
+        contextStore.addNote('coordinator', `Pipeline started: ${ticketId} [mode: ${mode}]${scenarioId ? ` [scenario: ${scenarioId}]` : ''}`);
 
         // Initialize agent coordinator for smart routing
         const coordinator = new AgentCoordinator({
@@ -140,6 +146,12 @@ class PipelineRunner {
             mode,
             startTime,
             runId,
+            contextRunId,
+            scenario,
+            scenarioId,
+            scenarioName: scenario?.name || null,
+            authState,
+            scenarioSlug: this._getScenarioSlug(scenarioId, authState),
             // Shared context store — agents read/write decisions here
             contextStore,
             // Agent coordinator — handles routing and collaboration
@@ -156,12 +168,14 @@ class PipelineRunner {
             specPath: null,
             testResults: null,
             healingResult: null,
+            evidenceManifestPath: null,
+            reportPath: null,
             // Stage results
             stageResults: {},
         };
 
         this._log(`\n${'═'.repeat(60)}`);
-        this._log(`  PIPELINE: ${ticketId} [mode: ${mode}]`);
+        this._log(`  PIPELINE: ${ticketId} [mode: ${mode}]${scenarioId ? ` [scenario: ${scenarioId}/${authState}]` : ''}`);
         this._log(`  Stages: ${stages.join(' → ')}`);
         this._log(`${'═'.repeat(60)}`);
 
@@ -506,7 +520,7 @@ class PipelineRunner {
         // Save context store, clean up run data, and get coordinator stats
         contextStore.save();
         if (this._contextStoreManager && typeof this._contextStoreManager.cleanup === 'function') {
-            this._contextStoreManager.cleanup(runId);
+            this._contextStoreManager.cleanup(contextRunId);
         }
         const coordinatorStats = coordinator.getStats();
 
@@ -514,6 +528,11 @@ class PipelineRunner {
             ticketId,
             mode,
             runId,
+            scenario: scenarioId ? {
+                id: scenarioId,
+                name: context.scenarioName,
+                authState: context.authState,
+            } : null,
             success: !pipelineError,
             duration: `${duration}s`,
             lastCompletedStage,
@@ -524,6 +543,8 @@ class PipelineRunner {
                 spec: context.specPath,
                 testResults: context.testResults,
                 healingResult: context.healingResult,
+                evidenceManifest: context.evidenceManifestPath,
+                report: context.reportPath,
             },
             orchestration: {
                 routingDecisions: coordinatorStats.routingDecisions,
@@ -646,10 +667,15 @@ class PipelineRunner {
             // Create TestGenie session
             const sessionInfo = await this.sessionFactory.createAgentSession('testgenie', {
                 ticketId: context.ticketId,
+                runId: context.runId,
+                scenarioId: context.scenarioId,
+                authState: context.authState,
                 ticketContext: `Generate test cases for Jira ticket ${context.ticketId}. ` +
-                    'Use the fetch_jira_ticket tool to get ticket details, then ' +
+                    `${this._buildScenarioPrompt(context)} ` +
+                    'Use the fetch_jira_ticket tool to get ticket details, then assess whether the Jira summary, description, and acceptance criteria are sufficient. ' +
+                    'If the ticket is sparse or ambiguous, search the knowledge base for requirements, user story context, and business rules before finalizing coverage, then ' +
                     'use the generate_test_case_excel tool to create the Excel file.',
-                taskDescription: `Generate test cases for ticket ${context.ticketId}`,
+                taskDescription: `Generate test cases and gather requirements context for Jira ticket ${context.ticketId}${context.scenarioId ? ` (${context.scenarioName || context.scenarioId})` : ''}`,
                 contextStore: context.contextStore,
             });
             session = sessionInfo.session;
@@ -661,20 +687,28 @@ class PipelineRunner {
             // Custom tools: fetch_jira_ticket, generate_test_case_excel
             const prompt =
                 `Generate test cases for Jira ticket ${context.ticketId}.\n\n` +
+                (context.scenarioId
+                    ? `MISSION SCENARIO:\n- Scenario ID: ${context.scenarioId}\n- Scenario Name: ${context.scenarioName || context.scenarioId}\n- Auth State: ${context.authState}\n- Generate test cases ONLY for this scenario branch.\n- If auth state is authenticated, include login-required coverage.\n- If auth state is unauthenticated, avoid login and validate guest or access-control behavior.\n\n`
+                    : '') +
                 'Steps:\n' +
                 `1. Use the fetch_jira_ticket tool with ticketId "${context.ticketId}" to get full ticket details.\n` +
                 '   (This is a custom tool available to you — call it directly by name.)\n' +
-                '2. Analyze the ticket summary, description, and acceptance criteria\n' +
-                '3. Generate optimized test cases following the required format:\n' +
+                '2. Analyze the ticket summary, description, acceptance criteria, labels, components, and any linked business context in the ticket.\n' +
+                '3. If the Jira details are sparse, ambiguous, or insufficient for strong test coverage, call search_knowledge_base with the feature name plus terms like "acceptance criteria", "requirements", or "user story".\n' +
+                '   - Use the ticket summary, labels, components, and acceptance criteria terms to form the KB query.\n' +
+                '   - If KB search returns relevant pages, use get_knowledge_base_page for the top result when you need more detail.\n' +
+                '   - Use KB findings to expand coverage, but do not invent behavior that conflicts with Jira.\n' +
+                '4. Generate optimized test cases following the required format:\n' +
                 '   - Pre-Conditions row\n' +
                 '   - Test Step ID | Specific Activity or Action | Expected Results | Actual Results\n' +
                 '   - First step must be launching the application\n' +
                 '   - Combine repetitive steps, keep it concise\n' +
-                '4. Use the generate_test_case_excel tool to save test cases as Excel\n' +
+                '5. Use the generate_test_case_excel tool to save test cases as Excel\n' +
                 '   - Pass testSteps as a JSON array string with objects: { stepId, action, expected, actual }\n' +
-                '5. Display the test cases in a markdown table\n\n' +
+                '6. Display the test cases in a markdown table\n\n' +
                 'IMPORTANT: Use the fetch_jira_ticket custom tool to get ticket data. ' +
-                'Do NOT use shell scripts or try to call external APIs directly.';
+                'Do NOT use shell scripts or try to call external APIs directly. ' +
+                'When Jira details are weak, you are expected to enrich coverage using the knowledge base tools before finalizing the test cases.';
 
             onProgress(STAGES.TESTGENIE, 'Generating test cases...');
             const responseText = await this.sessionFactory.sendAndWait(session, prompt, {
@@ -701,6 +735,7 @@ class PipelineRunner {
 
             if (excelFiles.length > 0) {
                 context.testCasesPath = path.join(testCasesDir, excelFiles[excelFiles.length - 1]);
+                context.testCasesPath = this._copyArtifactForScenario(context.testCasesPath, context);
                 // Register artifact in shared context
                 if (context.contextStore) {
                     context.contextStore.registerArtifact('testgenie', 'testCases', context.testCasesPath, {
@@ -709,7 +744,7 @@ class PipelineRunner {
                 }
             } else if (responseText && responseText.length > 50) {
                 // Fallback: save the agent's response as markdown test cases
-                const fallbackPath = path.join(testCasesDir, `${context.ticketId}-testcases.md`);
+                const fallbackPath = path.join(testCasesDir, `${this._getScenarioFileStem(context, 'testcases')}.md`);
                 try {
                     fs.writeFileSync(fallbackPath, responseText, 'utf-8');
                     context.testCasesPath = fallbackPath;
@@ -792,6 +827,10 @@ class PipelineRunner {
 
             const result = await cognitive.generate({
                 ticketId: context.ticketId,
+                runId: context.runId,
+                scenarioId: context.scenarioId,
+                scenarioName: context.scenarioName,
+                authState: context.authState,
                 testCases: context.testCasesPath
                     ? `Test cases at: ${context.testCasesPath}`
                     : '',
@@ -804,8 +843,8 @@ class PipelineRunner {
 
             // Map cognitive result to pipeline stage result
             if (result.success && result.specPath) {
-                context.specPath = result.specPath;
-                context.explorationPath = result.explorationPath;
+                context.specPath = this._copyArtifactForScenario(result.specPath, context);
+                context.explorationPath = this._copyArtifactForScenario(result.explorationPath, context);
 
                 // Register artifacts
                 if (context.contextStore) {
@@ -875,14 +914,18 @@ class PipelineRunner {
             if (context.testCasesPath && fs.existsSync(context.testCasesPath)) {
                 testCaseContext = `Test cases Excel file is at: ${context.testCasesPath}`;
             }
+            const scenarioPrompt = this._buildScenarioPrompt(context);
 
             // Create session
             const sessionInfo = await this.sessionFactory.createAgentSession('scriptgenerator', {
                 ticketId: context.ticketId,
+                runId: context.runId,
+                scenarioId: context.scenarioId,
+                authState: context.authState,
                 frameworkInventory,
                 historicalContext,
-                ticketContext: testCaseContext,
-                taskDescription: `Generate Playwright automation script for ticket ${context.ticketId}`,
+                ticketContext: [testCaseContext, scenarioPrompt].filter(Boolean).join('\n'),
+                taskDescription: `Generate Playwright automation script for ticket ${context.ticketId}${context.scenarioId ? ` (${context.scenarioName || context.scenarioId})` : ''}`,
                 contextStore: context.contextStore,
             });
             session = sessionInfo.session;
@@ -894,6 +937,9 @@ class PipelineRunner {
             // unified_snapshot (NOT mcp_unified-autom_unified_snapshot)
             const prompt =
                 `Generate a Playwright automation script for ticket ${context.ticketId}.\n\n` +
+                (context.scenarioId
+                    ? `MISSION SCENARIO:\n- Scenario ID: ${context.scenarioId}\n- Scenario Name: ${context.scenarioName || context.scenarioId}\n- Auth State: ${context.authState}\n- Generate and validate ONLY this scenario branch.\n- Authenticated branch: use existing framework login/business functions and validate post-login behavior.\n- Unauthenticated branch: do not perform login unless the application redirects to an auth wall that must be asserted.\n\n`
+                    : '') +
                 'MANDATORY STEPS (in this exact order):\n' +
                 '0. FIRST: Call get_framework_inventory to discover reusable code (page objects, business functions, PopupHandler, test data)\n' +
                 '1. Navigate to the application using the unified_navigate MCP tool\n' +
@@ -1012,6 +1058,8 @@ class PipelineRunner {
                 }
             }
 
+            context.specPath = this._copyArtifactForScenario(context.specPath, context);
+
             // Register artifacts in shared context
             if (context.contextStore && context.specPath) {
                 context.contextStore.registerArtifact('scriptgenerator', 'specFile', context.specPath, {
@@ -1024,9 +1072,9 @@ class PipelineRunner {
                 __dirname, '..', 'exploration-data', `${context.ticketId}-exploration.json`
             );
             if (fs.existsSync(explorationFile)) {
-                context.explorationPath = explorationFile;
+                context.explorationPath = this._copyArtifactForScenario(explorationFile, context);
                 if (context.contextStore) {
-                    context.contextStore.registerArtifact('scriptgenerator', 'exploration', explorationFile, {
+                    context.contextStore.registerArtifact('scriptgenerator', 'exploration', context.explorationPath, {
                         summary: `MCP exploration data for ${context.ticketId}`,
                     });
                 }
@@ -1037,7 +1085,7 @@ class PipelineRunner {
                 this._log(`⚠️ ScriptGenerator responded (${scriptResponse.length} chars) but no .spec.js file was created on disk`);
                 const debugDir = path.join(__dirname, '..', 'test-artifacts');
                 if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
-                const debugPath = path.join(debugDir, `${context.ticketId}-scriptgen-response.md`);
+                const debugPath = path.join(debugDir, `${this._getScenarioFileStem(context, 'scriptgen-response')}.md`);
                 try {
                     fs.writeFileSync(debugPath, scriptResponse, 'utf-8');
                     this._log(`📝 Saved ScriptGenerator response to ${debugPath}`);
@@ -1159,6 +1207,14 @@ class PipelineRunner {
                     stdio: 'pipe',
                     cwd: this.projectRoot,
                     timeout: executionTimeout,
+                    env: {
+                        ...process.env,
+                        SDK_RUN_ID: context.runId,
+                        SDK_TICKET_ID: context.ticketId,
+                        SDK_SCENARIO_ID: context.scenarioId || '',
+                        SDK_AUTH_STATE: context.authState || 'unspecified',
+                        QA_EVIDENCE_ENABLED: process.env.QA_EVIDENCE_ENABLED || 'true',
+                    },
                 }
             );
 
@@ -1178,6 +1234,8 @@ class PipelineRunner {
                 failedTests: failed.map(s => s.title),
                 rawResultsFile: rawResultsPath,
             };
+
+            this._refreshEvidenceManifest(context, { phase: STAGES.EXECUTE });
 
             return {
                 success: failed.length === 0,
@@ -1208,6 +1266,8 @@ class PipelineRunner {
                     rawResultsFile: rawResultsPath,
                 };
 
+                this._refreshEvidenceManifest(context, { phase: STAGES.EXECUTE });
+
                 return {
                     success: context.testResults.passed,
                     blocking: false,
@@ -1230,6 +1290,8 @@ class PipelineRunner {
                 failedCount: 0,
                 rawResultsFile: rawErrorPath,
             };
+
+            this._refreshEvidenceManifest(context, { phase: STAGES.EXECUTE });
 
             return {
                 success: false,
@@ -1294,6 +1356,7 @@ class PipelineRunner {
                             rawResultsFile: healedPath,
                             healedAfterIterations: healResult.iterations,
                         };
+                        this._refreshEvidenceManifest(context, { phase: STAGES.SELF_HEAL });
                     }
                 } catch { /* extractJSON failed — skip */ }
             }
@@ -1337,8 +1400,12 @@ class PipelineRunner {
         try {
             const sessionInfo = await this.sessionFactory.createAgentSession('buggenie', {
                 ticketId: context.ticketId,
+                runId: context.runId,
+                scenarioId: context.scenarioId,
+                authState: context.authState,
                 ticketContext: [
                     `Ticket: ${context.ticketId}`,
+                    context.scenarioId ? `Scenario: ${context.scenarioName || context.scenarioId} (${context.authState})` : '',
                     `Spec: ${context.specPath || 'unknown'}`,
                     `Failed tests: ${context.testResults?.failedTests?.join(', ') || 'unknown'}`,
                     `Error: ${(context.testResults?.error || '').substring(0, 1000)}`,
@@ -1416,6 +1483,11 @@ class PipelineRunner {
         const report = {
             ticketId: context.ticketId,
             mode: context.mode,
+            scenario: context.scenarioId ? {
+                id: context.scenarioId,
+                name: context.scenarioName,
+                authState: context.authState,
+            } : null,
             duration: `${duration}s`,
             stages,
             artifacts: {
@@ -1436,8 +1508,10 @@ class PipelineRunner {
         if (!fs.existsSync(reportsDir)) {
             fs.mkdirSync(reportsDir, { recursive: true });
         }
-        const reportFile = path.join(reportsDir, `${context.ticketId}-pipeline-report.json`);
+        const reportFile = path.join(reportsDir, `${this._getScenarioFileStem(context, 'pipeline-report')}.json`);
         fs.writeFileSync(reportFile, JSON.stringify(report, null, 2), 'utf-8');
+        context.reportPath = reportFile;
+        this._refreshEvidenceManifest(context, { phase: STAGES.REPORT, reportPath: reportFile });
 
         return {
             success: true,
@@ -1461,7 +1535,7 @@ class PipelineRunner {
             if (!fs.existsSync(reportsDir)) {
                 fs.mkdirSync(reportsDir, { recursive: true });
             }
-            const fileName = `${context.ticketId}-${context.runId}-test-results.json`;
+            const fileName = `${this._getScenarioFileStem(context, `${context.runId}-test-results`)}.json`;
             const filePath = path.join(reportsDir, fileName);
             const payload = {
                 ticketId: context.ticketId,
@@ -1493,12 +1567,41 @@ class PipelineRunner {
         }
     }
 
+    _refreshEvidenceManifest(context, options = {}) {
+        try {
+            if (!this.evidenceStore) return null;
+
+            const { manifestPath, manifest } = this.evidenceStore.saveManifest(context, options);
+            context.evidenceManifestPath = manifestPath;
+
+            if (context.contextStore) {
+                context.contextStore.registerArtifact('pipeline-runner', 'evidenceManifest', manifestPath, {
+                    summary: `Evidence manifest with ${manifest.summary.totalArtifacts} artifacts`,
+                    screenshots: manifest.summary.screenshots,
+                    videos: manifest.summary.videos,
+                    traces: manifest.summary.traces,
+                    phase: options.phase || null,
+                });
+            }
+
+            return manifestPath;
+        } catch (error) {
+            this._log(`⚠️ Failed to refresh evidence manifest: ${error.message}`);
+            return null;
+        }
+    }
+
     _resolveExistingArtifacts(context) {
         const ticketId = context.ticketId;
+        const scenarioSlug = context.scenarioSlug;
 
         // Check for existing spec file
         const specsDir = path.join(this.projectRoot, 'tests', 'specs');
         const variations = [
+            ...(scenarioSlug ? [
+                path.join(specsDir, ticketId.toLowerCase(), `${ticketId}-${scenarioSlug}.spec.js`),
+                path.join(specsDir, ticketId.toLowerCase(), `${ticketId.toUpperCase()}-${scenarioSlug}.spec.js`),
+            ] : []),
             path.join(specsDir, ticketId.toLowerCase(), `${ticketId}.spec.js`),
             path.join(specsDir, ticketId.toLowerCase(), `${ticketId.toUpperCase()}.spec.js`),
             path.join(specsDir, `${ticketId.toLowerCase()}`, `${ticketId.toUpperCase()}.spec.js`),
@@ -1513,10 +1616,17 @@ class PipelineRunner {
 
         // Check for existing exploration data
         const explorationFile = path.join(
-            __dirname, '..', 'exploration-data', `${ticketId}-exploration.json`
+            __dirname, '..', 'exploration-data', `${this._getScenarioFileStem(context, 'exploration')}.json`
         );
         if (fs.existsSync(explorationFile)) {
             context.explorationPath = explorationFile;
+        } else {
+            const fallbackExplorationFile = path.join(
+                __dirname, '..', 'exploration-data', `${ticketId}-exploration.json`
+            );
+            if (fs.existsSync(fallbackExplorationFile)) {
+                context.explorationPath = this._copyArtifactForScenario(fallbackExplorationFile, context);
+            }
         }
     }
 
@@ -1536,6 +1646,52 @@ class PipelineRunner {
         } catch { /* ignore */ }
 
         return results;
+    }
+
+    _getScenarioSlug(scenarioId, authState) {
+        const raw = scenarioId || authState || '';
+        return String(raw)
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '') || '';
+    }
+
+    _getScenarioFileStem(context, suffix) {
+        const parts = [context.ticketId];
+        if (context.scenarioSlug) parts.push(context.scenarioSlug);
+        if (suffix) parts.push(suffix);
+        return parts.join('-');
+    }
+
+    _buildScenarioPrompt(context) {
+        if (!context.scenarioId) return '';
+
+        return [
+            `Mission scenario: ${context.scenarioName || context.scenarioId}`,
+            `Auth state: ${context.authState}`,
+            context.scenario?.persona ? `Persona: ${context.scenario.persona}` : '',
+            context.scenario?.credentialsRef ? `Credentials ref: ${context.scenario.credentialsRef}` : '',
+        ].filter(Boolean).join('\n');
+    }
+
+    _copyArtifactForScenario(sourcePath, context) {
+        if (!sourcePath || !context.scenarioSlug || !fs.existsSync(sourcePath)) {
+            return sourcePath;
+        }
+
+        const parsed = path.parse(sourcePath);
+        if (parsed.name.toLowerCase().includes(context.scenarioSlug)) {
+            return sourcePath;
+        }
+
+        const targetPath = path.join(parsed.dir, `${parsed.name}-${context.scenarioSlug}${parsed.ext}`);
+        try {
+            fs.copyFileSync(sourcePath, targetPath);
+            return targetPath;
+        } catch (error) {
+            this._log(`⚠️ Failed to isolate scenario artifact ${path.basename(sourcePath)}: ${error.message}`);
+            return sourcePath;
+        }
     }
 
     // ─── Cognitive Inference-Time Scaling ──────────────────────────

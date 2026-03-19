@@ -9,6 +9,7 @@ import ModelSelect from '@/components/ModelSelect';
 import PageHeader from '@/components/PageHeader';
 import ErrorBanner from '@/components/ErrorBanner';
 import CognitiveInsights from '@/components/CognitiveInsights';
+import MissionEvidenceSummary from '@/components/MissionEvidenceSummary';
 import apiClient from '@/lib/api-client';
 import { getDefaultModel, hasModelValue } from '@/lib/model-options';
 import { ClockIcon, RetryIcon, DashboardIcon } from '@/components/Icons';
@@ -36,6 +37,10 @@ export default function DashboardPage() {
     const [model, setModelState] = useState('');
     const [modelTouched, setModelTouched] = useState(false);
     const [backendStatus, setBackendStatus] = useState(null);
+    const [selectedEvidenceRunId, setSelectedEvidenceRunId] = useState(null);
+    const [evidenceSummary, setEvidenceSummary] = useState(null);
+    const [evidenceLoading, setEvidenceLoading] = useState(false);
+    const [evidenceError, setEvidenceError] = useState(null);
 
     const setModel = useCallback((nextModel) => {
         setModelTouched(true);
@@ -60,6 +65,51 @@ export default function DashboardPage() {
             setModelState(getDefaultModel(modelGroups, defaultModel));
         }
     }, [defaultModel, model, modelGroups]);
+
+    useEffect(() => {
+        const preferredRunId = activeRunId || runs[0]?.runId || null;
+        setSelectedEvidenceRunId((current) => {
+            if (activeRunId && current !== activeRunId) {
+                return activeRunId;
+            }
+
+            if (current && runs.some((run) => run.runId === current)) {
+                return current;
+            }
+
+            return preferredRunId;
+        });
+    }, [activeRunId, runs]);
+
+    useEffect(() => {
+        if (!selectedEvidenceRunId) {
+            setEvidenceSummary(null);
+            setEvidenceError(null);
+            return undefined;
+        }
+
+        const controller = new AbortController();
+
+        setEvidenceLoading(true);
+        setEvidenceError(null);
+
+        apiClient.getPipelineEvidenceSummary(selectedEvidenceRunId, 12, { signal: controller.signal })
+            .then((data) => {
+                setEvidenceSummary(data);
+            })
+            .catch((err) => {
+                if (controller.signal.aborted) return;
+                setEvidenceSummary(null);
+                setEvidenceError(err.message || 'Failed to load mission evidence');
+            })
+            .finally(() => {
+                if (!controller.signal.aborted) {
+                    setEvidenceLoading(false);
+                }
+            });
+
+        return () => controller.abort();
+    }, [selectedEvidenceRunId, runs]);
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -233,6 +283,15 @@ export default function DashboardPage() {
                 {cognitiveInsights && cognitiveInsights.tier && (
                     <CognitiveInsights insights={cognitiveInsights} />
                 )}
+
+                <MissionEvidenceSummary
+                    runs={runs}
+                    selectedRunId={selectedEvidenceRunId}
+                    onSelectRun={setSelectedEvidenceRunId}
+                    summary={evidenceSummary}
+                    loading={evidenceLoading}
+                    error={evidenceError}
+                />
 
                 {/* Recent Runs */}
                 <div className="glass-card rounded-2xl p-6">

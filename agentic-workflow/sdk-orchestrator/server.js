@@ -37,10 +37,22 @@ const { EventBridge, EVENT_TYPES, getEventBridge } = require('./event-bridge');
 const { LearningStore } = require('./learning-store');
 const { ChatSessionManager, CHAT_EVENTS } = require('./chat-session-manager');
 const { getFollowupProvider } = require('./followup-provider');
+const { ObservationRecorder } = require('./observation-recorder');
 const { setSessionRoot, getSessionRoot, BLOCKED_PATHS } = require('./filesystem-tools');
 const {
     loadEnv, isValidTicketId, isValidMode, generateBatchId, truncate,
 } = require('./utils');
+
+const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
+const ALLOWED_ARTIFACT_ROOTS = [
+    path.resolve(PROJECT_ROOT, 'agentic-workflow', 'test-artifacts'),
+    path.resolve(PROJECT_ROOT, 'agentic-workflow', 'exploration-data'),
+    path.resolve(PROJECT_ROOT, 'agentic-workflow', 'test-cases'),
+    path.resolve(PROJECT_ROOT, 'agentic-workflow', 'test-results'),
+    path.resolve(PROJECT_ROOT, 'test-results'),
+    path.resolve(PROJECT_ROOT, 'playwright-report'),
+    path.resolve(PROJECT_ROOT, 'web-app', 'playwright-report'),
+];
 
 // ─── Lightweight HTTP Router ────────────────────────────────────────────────
 
@@ -207,6 +219,250 @@ function ok(res, data) { json(res, 200, data); }
 function badRequest(res, msg) { json(res, 400, { error: msg }); }
 function notFound(res, msg) { json(res, 404, { error: msg || 'Not found' }); }
 function conflict(res, msg) { json(res, 409, { error: msg }); }
+
+function buildObservationSummary(run, observations, observationLogPath, options = {}) {
+    const limit = options.limit || 50;
+    const severityCounts = {};
+    const typeCounts = {};
+    const stageCounts = {};
+
+    for (const observation of observations) {
+        const severity = observation.severity || 'info';
+        const type = observation.type || 'observation';
+        const stage = observation.stage || 'unknown';
+
+        severityCounts[severity] = (severityCounts[severity] || 0) + 1;
+        typeCounts[type] = (typeCounts[type] || 0) + 1;
+        stageCounts[stage] = (stageCounts[stage] || 0) + 1;
+    }
+
+    const recent = observations.slice(-limit).reverse();
+    const screenshots = observations
+        .filter(observation => observation.screenshotPath)
+        .slice(-limit)
+        .reverse();
+    const latest = recent[0] || null;
+
+    return {
+        runId: run.runId,
+        ticketId: run.ticketId,
+        status: run.status,
+        mode: run.mode,
+        startedAt: run.startedAt || null,
+        completedAt: run.completedAt || null,
+        observationLogPath,
+        summary: {
+            total: observations.length,
+            withScreenshots: observations.filter(observation => observation.screenshotPath).length,
+            bySeverity: severityCounts,
+            byType: typeCounts,
+            byStage: stageCounts,
+            latestTimestamp: latest?.timestamp || null,
+        },
+        latest,
+        recent,
+        screenshots,
+        mission: {
+            checkpoint: run.mission?.currentCheckpoint || null,
+            evidence: run.mission?.evidence || {},
+        },
+    };
+}
+
+function _toArray(value) {
+    return Array.isArray(value) ? value : [];
+}
+
+function _dedupeBy(items, keySelector) {
+    const seen = new Set();
+    const result = [];
+
+    for (const item of items) {
+        const key = keySelector(item);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        result.push(item);
+    }
+
+    return result;
+}
+
+function _sortByTimestampDesc(items, selector) {
+    return [...items].sort((a, b) => {
+        const aTime = new Date(selector(a) || 0).getTime();
+        const bTime = new Date(selector(b) || 0).getTime();
+        return bTime - aTime;
+    });
+}
+
+function _normalizePathForComparison(value) {
+    return process.platform === 'win32' ? value.toLowerCase() : value;
+}
+
+function _isPathInside(parentPath, candidatePath) {
+    const relativePath = path.relative(parentPath, candidatePath);
+    return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath));
+}
+
+function _isAllowedArtifactPath(filePath) {
+    if (!filePath || typeof filePath !== 'string') return false;
+
+    const resolved = path.resolve(filePath);
+    const normalized = _normalizePathForComparison(resolved);
+
+    for (const blocked of BLOCKED_PATHS) {
+        if (normalized.startsWith(blocked) || normalized === blocked) {
+            return false;
+        }
+    }
+
+    return ALLOWED_ARTIFACT_ROOTS.some(root => _isPathInside(root, resolved));
+}
+
+function _getMimeType(filePath) {
+    const ext = path.extname(filePath).toLowerCase();
+    const map = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+        '.svg': 'image/svg+xml',
+        '.mp4': 'video/mp4',
+        '.webm': 'video/webm',
+        '.mov': 'video/quicktime',
+        '.json': 'application/json; charset=utf-8',
+        '.log': 'text/plain; charset=utf-8',
+        '.txt': 'text/plain; charset=utf-8',
+        '.md': 'text/markdown; charset=utf-8',
+        '.html': 'text/html; charset=utf-8',
+        '.htm': 'text/html; charset=utf-8',
+        '.csv': 'text/csv; charset=utf-8',
+        '.zip': 'application/zip',
+        '.gz': 'application/gzip',
+        '.pdf': 'application/pdf',
+        '.xml': 'application/xml; charset=utf-8',
+    };
+
+    return map[ext] || 'application/octet-stream';
+}
+
+function buildEvidenceSummary(run, manifest, scenarioManifests, options = {}) {
+    const limit = options.limit || 20;
+    const scenarioStatusMap = new Map(
+        _toArray(run.mission?.scenarios).map(scenario => [scenario.id, scenario])
+    );
+    const scenarioResultMap = new Map(
+        _toArray(run.mission?.result?.scenarioResults).map(result => [result.scenarioId, result])
+    );
+
+    const scenarioCards = scenarioManifests.map(entry => {
+        const scenarioState = scenarioStatusMap.get(entry.scenarioId) || {};
+        const scenarioResult = scenarioResultMap.get(entry.scenarioId) || {};
+        const scenarioManifest = entry.manifest || {};
+        const scenarioArtifacts = _toArray(scenarioManifest.artifacts);
+        const scenarioObservations = _sortByTimestampDesc(
+            _toArray(scenarioManifest.observations),
+            observation => observation.timestamp
+        );
+
+        return {
+            scenarioId: entry.scenarioId,
+            name: scenarioManifest.scenario?.name || scenarioState.name || entry.scenarioId,
+            authState: entry.authState || scenarioManifest.scenario?.authState || scenarioState.authState || null,
+            status: scenarioResult.success === true
+                ? 'completed'
+                : scenarioResult.success === false
+                    ? 'failed'
+                    : scenarioState.status || 'unknown',
+            success: scenarioResult.success ?? null,
+            startedAt: scenarioState.startedAt || null,
+            completedAt: scenarioState.completedAt || null,
+            manifestPath: entry.manifestPath,
+            reportPath: entry.reportPath || scenarioManifest.pipeline?.reportPath || null,
+            rawResultsPath: entry.rawResultsPath || scenarioManifest.pipeline?.rawResultsPath || null,
+            specPath: scenarioManifest.pipeline?.specPath || null,
+            explorationPath: scenarioManifest.pipeline?.explorationPath || null,
+            evidenceRoot: scenarioManifest.pipeline?.evidenceRoot || null,
+            summary: {
+                totalArtifacts: scenarioManifest.summary?.totalArtifacts || 0,
+                screenshots: scenarioManifest.summary?.screenshots || 0,
+                videos: scenarioManifest.summary?.videos || 0,
+                traces: scenarioManifest.summary?.traces || 0,
+                observations: scenarioManifest.summary?.observations || 0,
+                failedTests: scenarioManifest.summary?.failedTests || 0,
+                passedTests: scenarioManifest.summary?.passedTests || 0,
+            },
+            observations: scenarioObservations.slice(0, limit),
+            screenshots: scenarioArtifacts
+                .filter(artifact => artifact.kind === 'screenshot')
+                .slice(0, limit),
+            downloads: _dedupeBy([
+                ...scenarioArtifacts,
+                { kind: 'manifest', label: `${entry.scenarioId} manifest`, path: entry.manifestPath },
+                entry.reportPath ? { kind: 'report', label: `${entry.scenarioId} report`, path: entry.reportPath } : null,
+                entry.rawResultsPath ? { kind: 'report', label: `${entry.scenarioId} raw results`, path: entry.rawResultsPath } : null,
+            ].filter(Boolean), artifact => artifact.path),
+        };
+    });
+
+    const parentArtifacts = _toArray(manifest?.artifacts);
+    const allArtifacts = _dedupeBy([
+        ...parentArtifacts,
+        ...scenarioCards.flatMap(card => card.downloads),
+    ], artifact => artifact.path);
+    const allObservations = _sortByTimestampDesc(
+        _dedupeBy([
+            ..._toArray(manifest?.observations),
+            ...scenarioCards.flatMap(card => card.observations),
+        ], observation => observation.id || `${observation.timestamp}:${observation.message}`),
+        observation => observation.timestamp
+    );
+    const latestScreenshots = _sortByTimestampDesc(
+        allArtifacts.filter(artifact => artifact.kind === 'screenshot'),
+        artifact => artifact.modifiedAt
+    ).slice(0, limit);
+
+    const counts = {
+        totalArtifacts: allArtifacts.length,
+        screenshots: allArtifacts.filter(artifact => artifact.kind === 'screenshot').length,
+        videos: allArtifacts.filter(artifact => artifact.kind === 'video').length,
+        traces: allArtifacts.filter(artifact => artifact.kind === 'trace').length,
+        logs: allArtifacts.filter(artifact => artifact.kind === 'log').length,
+        reports: allArtifacts.filter(artifact => artifact.kind === 'report' || artifact.kind === 'manifest').length,
+        observations: allObservations.length,
+        failedTests: scenarioCards.reduce((sum, card) => sum + (card.summary.failedTests || 0), 0),
+        passedTests: scenarioCards.reduce((sum, card) => sum + (card.summary.passedTests || 0), 0),
+    };
+
+    return {
+        runId: run.runId,
+        ticketId: run.ticketId,
+        mode: run.mode,
+        status: run.status,
+        startedAt: run.startedAt || null,
+        completedAt: run.completedAt || null,
+        mission: {
+            missionId: run.mission?.missionId || null,
+            objective: run.mission?.objective || run.ticketId,
+            scenarioCount: scenarioCards.length,
+            passedScenarios: scenarioCards.filter(card => card.success === true).length,
+            failedScenarios: scenarioCards.filter(card => card.success === false).length,
+            latestCheckpoint: run.mission?.checkpoint || null,
+        },
+        summary: counts,
+        scenarios: scenarioCards,
+        latestObservations: allObservations.slice(0, limit),
+        latestScreenshots,
+        downloads: allArtifacts.slice(0, Math.max(limit * 3, 20)),
+        parentManifest: manifest ? {
+            manifestPath: run.artifacts?.evidenceManifest || run.mission?.evidence?.manifestPath || null,
+            summary: manifest.summary || null,
+            reportPath: manifest.pipeline?.reportPath || null,
+            rawResultsPath: manifest.pipeline?.rawResultsPath || null,
+        } : null,
+    };
+}
 
 // ─── Native App Name Mapping ────────────────────────────────────────────────
 
@@ -488,7 +744,7 @@ async function startServer(options = {}) {
      * Returns: { runId, status }
      */
     router.post('/api/pipeline/run', (req, res) => {
-        const { ticketId, mode, environment, model, triggeredBy } = req.body;
+        const { ticketId, mode, environment, model, triggeredBy, mission } = req.body;
 
         if (!ticketId || !isValidTicketId(ticketId)) {
             return badRequest(res, `Invalid or missing ticketId: "${ticketId}"`);
@@ -518,11 +774,23 @@ async function startServer(options = {}) {
                     environment: environment || 'UAT',
                     triggeredBy: triggeredBy || 'api',
                     model: effectiveModel,
+                    mission,
+                });
+                runStore.updateMission(run.runId, {
+                    evidence: {
+                        eventLogPath: eventBridge.getRunEventLogPath(run.runId),
+                    },
                 });
 
                 _executePipeline(run.runId, ticketId, mode || 'full', orchestrator, runStore, eventBridge, activePipelines, effectiveModel);
 
-                accepted(res, { runId: run.runId, status: run.status, ticketId, model: effectiveModel });
+                accepted(res, {
+                    runId: run.runId,
+                    status: run.status,
+                    ticketId,
+                    model: effectiveModel,
+                    mission: run.mission,
+                });
             })
             .catch(error => {
                 json(res, 500, { error: `Failed to validate model: ${error.message}` });
@@ -535,7 +803,7 @@ async function startServer(options = {}) {
      * Returns: { batchId, runs: [...] }
      */
     router.post('/api/pipeline/batch', (req, res) => {
-        const { ticketIds, sprintId, mode, environment, triggeredBy } = req.body;
+        const { ticketIds, sprintId, mode, environment, triggeredBy, mission } = req.body;
 
         const ids = Array.isArray(ticketIds) ? ticketIds : [];
         if (ids.length === 0) {
@@ -554,7 +822,16 @@ async function startServer(options = {}) {
             mode: mode || 'full',
             environment: environment || 'UAT',
             triggeredBy: triggeredBy || 'api',
+            mission,
         });
+
+        for (const run of runs) {
+            runStore.updateMission(run.runId, {
+                evidence: {
+                    eventLogPath: eventBridge.getRunEventLogPath(run.runId),
+                },
+            });
+        }
 
         // Start all pipelines (respects concurrency limit from config)
         for (const run of runs) {
@@ -653,12 +930,196 @@ async function startServer(options = {}) {
             status: run.status,
             mode: run.mode,
             environment: run.environment,
+            triggeredBy: run.triggeredBy,
+            model: run.model,
             stages: run.stages,
             startedAt: run.startedAt,
             completedAt: run.completedAt,
             duration: run.duration,
             error: run.error,
+            mission: run.mission,
         });
+    });
+
+    /**
+     * GET /api/pipeline/checkpoint/:runId
+     * Returns mission-aware checkpoint state for unattended run polling.
+     */
+    router.get('/api/pipeline/checkpoint/:runId', (req, res) => {
+        const checkpoint = runStore.getMissionCheckpoint(req.params.runId);
+        if (!checkpoint) return notFound(res);
+        ok(res, checkpoint);
+    });
+
+    /**
+     * GET /api/pipeline/events/:runId
+     * Query: ?limit=200&source=persisted|buffer|all
+     */
+    router.get('/api/pipeline/events/:runId', (req, res) => {
+        const run = runStore.getRun(req.params.runId);
+        if (!run) return notFound(res);
+
+        const limit = parseInt(req.query.limit, 10) || 200;
+        const source = req.query.source || 'all';
+        const buffered = source === 'persisted' ? [] : eventBridge.getRunEvents(req.params.runId).slice(-limit);
+        const persisted = source === 'buffer' ? [] : eventBridge.getPersistedRunEvents(req.params.runId, { limit });
+
+        ok(res, {
+            runId: req.params.runId,
+            source,
+            limit,
+            eventLogPath: eventBridge.getRunEventLogPath(req.params.runId),
+            bufferedCount: buffered.length,
+            persistedCount: persisted.length,
+            buffered,
+            persisted,
+        });
+    });
+
+    /**
+     * GET /api/pipeline/evidence/:runId
+     * Returns the persisted evidence manifest when available.
+     */
+    router.get('/api/pipeline/evidence/:runId', (req, res) => {
+        const run = runStore.getRun(req.params.runId);
+        if (!run) return notFound(res);
+
+        const manifestPath = run.artifacts?.evidenceManifest || run.mission?.evidence?.manifestPath;
+        const scenarioManifestEntries = Object.entries(run.mission?.evidence?.scenarios || {})
+            .filter(([, value]) => value?.manifestPath && fs.existsSync(value.manifestPath));
+
+        if ((!manifestPath || !fs.existsSync(manifestPath)) && scenarioManifestEntries.length === 0) {
+            return notFound(res, 'Evidence manifest not found');
+        }
+
+        try {
+            const manifest = manifestPath && fs.existsSync(manifestPath)
+                ? JSON.parse(fs.readFileSync(manifestPath, 'utf-8'))
+                : null;
+            const scenarioManifests = scenarioManifestEntries.map(([scenarioId, value]) => ({
+                scenarioId,
+                authState: value.authState || null,
+                manifestPath: value.manifestPath,
+                reportPath: value.reportPath || null,
+                rawResultsPath: value.rawResultsPath || null,
+                manifest: JSON.parse(fs.readFileSync(value.manifestPath, 'utf-8')),
+            }));
+            ok(res, {
+                runId: req.params.runId,
+                manifestPath,
+                manifest,
+                scenarioManifests,
+            });
+        } catch (error) {
+            json(res, 500, { error: `Failed to read evidence manifest: ${error.message}` });
+        }
+    });
+
+    /**
+     * GET /api/pipeline/evidence-summary/:runId
+     * Query: ?limit=20
+     * Returns a parent-level, UI-ready evidence payload flattened across
+     * authenticated and unauthenticated scenario manifests.
+     */
+    router.get('/api/pipeline/evidence-summary/:runId', (req, res) => {
+        const run = runStore.getRun(req.params.runId);
+        if (!run) return notFound(res);
+
+        const limit = Math.max(1, Math.min(parseInt(req.query.limit, 10) || 20, 100));
+        const manifestPath = run.artifacts?.evidenceManifest || run.mission?.evidence?.manifestPath;
+        const scenarioManifestEntries = Object.entries(run.mission?.evidence?.scenarios || {})
+            .filter(([, value]) => value?.manifestPath && fs.existsSync(value.manifestPath));
+
+        if ((!manifestPath || !fs.existsSync(manifestPath)) && scenarioManifestEntries.length === 0) {
+            return notFound(res, 'Evidence summary not found');
+        }
+
+        try {
+            const manifest = manifestPath && fs.existsSync(manifestPath)
+                ? JSON.parse(fs.readFileSync(manifestPath, 'utf-8'))
+                : null;
+            const scenarioManifests = scenarioManifestEntries.map(([scenarioId, value]) => ({
+                scenarioId,
+                authState: value.authState || null,
+                manifestPath: value.manifestPath,
+                reportPath: value.reportPath || null,
+                rawResultsPath: value.rawResultsPath || null,
+                manifest: JSON.parse(fs.readFileSync(value.manifestPath, 'utf-8')),
+            }));
+
+            ok(res, buildEvidenceSummary(run, manifest, scenarioManifests, { limit }));
+        } catch (error) {
+            json(res, 500, { error: `Failed to build evidence summary: ${error.message}` });
+        }
+    });
+
+    /**
+     * GET /api/pipeline/artifact
+     * Query: ?path=<absolutePath>&disposition=inline|attachment
+     * Streams a mission artifact from a restricted set of evidence roots.
+     */
+    router.get('/api/pipeline/artifact', async (req, res) => {
+        const requestedPath = req.query.path;
+        const disposition = req.query.disposition === 'inline' ? 'inline' : 'attachment';
+
+        if (!requestedPath || typeof requestedPath !== 'string') {
+            return badRequest(res, 'Missing artifact path');
+        }
+
+        const filePath = path.resolve(requestedPath);
+
+        if (!_isAllowedArtifactPath(filePath)) {
+            return json(res, 403, { error: 'Artifact path is outside allowed evidence directories' });
+        }
+
+        let stat;
+        try {
+            stat = await fsP.stat(filePath);
+        } catch {
+            return notFound(res, 'Artifact not found');
+        }
+
+        if (!stat.isFile()) {
+            return badRequest(res, 'Artifact path must be a file');
+        }
+
+        const fileName = path.basename(filePath).replace(/[\r\n"]/g, '_');
+        const stream = fs.createReadStream(filePath);
+
+        res.writeHead(200, {
+            'Content-Type': _getMimeType(filePath),
+            'Content-Length': stat.size,
+            'Content-Disposition': `${disposition}; filename="${fileName}"`,
+            'Cache-Control': 'no-store',
+        });
+
+        stream.on('error', (error) => {
+            if (!res.headersSent) {
+                json(res, 500, { error: `Failed to read artifact: ${error.message}` });
+                return;
+            }
+            res.destroy(error);
+        });
+
+        stream.pipe(res);
+    });
+
+    /**
+     * GET /api/pipeline/observations/:runId
+     * Query: ?limit=50
+     * Returns a dashboard-focused observation summary without requiring clients
+     * to parse the full evidence manifest.
+     */
+    router.get('/api/pipeline/observations/:runId', (req, res) => {
+        const run = runStore.getRun(req.params.runId);
+        if (!run) return notFound(res);
+
+        const limit = Math.max(1, Math.min(parseInt(req.query.limit, 10) || 50, 200));
+        const observationRecorder = new ObservationRecorder({ projectRoot: path.join(__dirname, '..', '..') });
+        const observationLogPath = observationRecorder.getObservationLogPath(req.params.runId);
+        const observations = observationRecorder.readObservations(req.params.runId, 1000);
+
+        ok(res, buildObservationSummary(run, observations, observationLogPath, { limit }));
     });
 
     /**
@@ -1778,6 +2239,9 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         log(`    POST /api/pipeline/cancel/:runId — Cancel pipeline`);
         log(`    GET  /api/pipeline/runs          — List runs`);
         log(`    GET  /api/pipeline/status/:runId — Run status`);
+        log(`    GET  /api/pipeline/evidence-summary/:runId — Flattened mission evidence`);
+        log(`    GET  /api/pipeline/artifact       — Secure evidence file streaming`);
+        log(`    GET  /api/pipeline/observations/:runId — Observation summary`);
         log(`    GET  /api/pipeline/results/:runId— Full results`);
         log(`    GET  /api/pipeline/stream/:runId — SSE stream`);
         log(`    GET  /api/pipeline/stream        — Global SSE stream`);
@@ -1832,61 +2296,238 @@ function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBr
     // Fire and forget — async execution
     (async () => {
         try {
-            // Mark started
-            runStore.startRun(runId);
-            eventBridge.push(EVENT_TYPES.RUN_START, runId, { ticketId, mode });
-
-            // Create progress callback that updates both RunStore and EventBridge
-            const followupProvider = getFollowupProvider();
-            const onProgress = (stage, message) => {
+            const emitProgress = (stage, rawMessage, scenario = null) => {
                 if (cancelled) return;
 
-                // Update run store
-                if (message.startsWith('Starting ')) {
-                    runStore.updateStage(runId, stage, 'running', { message });
-                } else if (message === 'Completed' || message.includes('passed') || message.includes('generated')) {
-                    runStore.updateStage(runId, stage, 'passed', { message });
-                    // Generate and push followup suggestions on stage success
-                    const followups = followupProvider.getPipelineFollowups({
-                        stage, success: true, ticketId,
+                const message = scenario
+                    ? `[${scenario.name || scenario.id}] ${rawMessage}`
+                    : rawMessage;
+                const stageDetails = {
+                    message,
+                    scenarioId: scenario?.id || null,
+                    scenarioName: scenario?.name || null,
+                    authState: scenario?.authState || null,
+                };
+
+                if (rawMessage.startsWith('Starting ')) {
+                    runStore.updateStage(runId, stage, 'running', stageDetails);
+                    eventBridge.push(EVENT_TYPES.STAGE_START, runId, { stage, message, ...stageDetails });
+                } else if (rawMessage === 'Completed' || rawMessage.includes('passed') || rawMessage.includes('generated')) {
+                    runStore.updateStage(runId, stage, 'passed', stageDetails);
+                    eventBridge.push(EVENT_TYPES.STAGE_COMPLETE, runId, {
+                        stage,
+                        message,
+                        success: true,
+                        ...stageDetails,
                     });
-                    if (followups.length > 0) {
-                        eventBridge.push(EVENT_TYPES.FOLLOWUP, runId, { stage, followups });
-                    }
-                } else if (message.startsWith('BLOCKED') || message.startsWith('ERROR')) {
-                    runStore.updateStage(runId, stage, 'failed', { message });
-                    // Generate and push followup suggestions on stage failure
-                    const followups = followupProvider.getPipelineFollowups({
-                        stage, success: false, ticketId,
+                } else if (rawMessage.startsWith('BLOCKED') || rawMessage.startsWith('ERROR')) {
+                    runStore.updateStage(runId, stage, 'failed', stageDetails);
+                    runStore.recordMissionObservation(runId, {
+                        type: 'stage-issue',
+                        severity: rawMessage.startsWith('BLOCKED') ? 'warning' : 'error',
+                        stage,
+                        scenarioId: scenario?.id || null,
+                        message,
+                        metadata: { ticketId, stage, authState: scenario?.authState || null },
                     });
-                    if (followups.length > 0) {
-                        eventBridge.push(EVENT_TYPES.FOLLOWUP, runId, { stage, followups });
-                    }
+                    eventBridge.push(EVENT_TYPES.STAGE_COMPLETE, runId, {
+                        stage,
+                        message,
+                        success: false,
+                        ...stageDetails,
+                    });
                 } else {
-                    runStore.updateStage(runId, stage, 'running', { message });
+                    runStore.updateStage(runId, stage, 'running', stageDetails);
+                    eventBridge.push(EVENT_TYPES.STAGE_PROGRESS, runId, { stage, message, ...stageDetails });
                 }
 
-                // Push to event bridge
-                const progressCallback = eventBridge.createProgressCallback(runId);
-                progressCallback(stage, message);
+                const followupProvider = getFollowupProvider();
+                if (rawMessage === 'Completed' || rawMessage.includes('passed') || rawMessage.includes('generated')) {
+                    const followups = followupProvider.getPipelineFollowups({ stage, success: true, ticketId });
+                    if (followups.length > 0) {
+                        eventBridge.push(EVENT_TYPES.FOLLOWUP, runId, {
+                            stage,
+                            followups,
+                            scenarioId: scenario?.id || null,
+                            authState: scenario?.authState || null,
+                        });
+                    }
+                } else if (rawMessage.startsWith('BLOCKED') || rawMessage.startsWith('ERROR')) {
+                    const followups = followupProvider.getPipelineFollowups({ stage, success: false, ticketId });
+                    if (followups.length > 0) {
+                        eventBridge.push(EVENT_TYPES.FOLLOWUP, runId, {
+                            stage,
+                            followups,
+                            scenarioId: scenario?.id || null,
+                            authState: scenario?.authState || null,
+                        });
+                    }
+                }
             };
 
-            // Execute pipeline
-            const result = await orchestrator.runPipeline(ticketId, {
-                mode,
-                model,
-                runId,
-                onProgress,
-                ...extraOptions,
+            // Mark started
+            runStore.startRun(runId);
+            const run = runStore.getRun(runId);
+            const scenarios = Array.isArray(run?.mission?.scenarios) && run.mission.scenarios.length > 0
+                ? run.mission.scenarios
+                : [{ id: 'default', name: 'Default Scenario', authState: 'unspecified' }];
+            runStore.appendMissionCheckpoint(runId, {
+                stage: 'run',
+                status: 'running',
+                message: `Pipeline started for ${ticketId}`,
+                details: { ticketId, mode, model: model || null, scenarioCount: scenarios.length },
             });
+            eventBridge.push(EVENT_TYPES.RUN_START, runId, { ticketId, mode, scenarioCount: scenarios.length });
+
+            const scenarioResults = [];
+            const scenarioEvidence = {};
+
+            for (const scenario of scenarios) {
+                if (cancelled) break;
+
+                runStore.updateScenario(runId, scenario.id, {
+                    status: RUN_STATUS.RUNNING,
+                    startedAt: new Date().toISOString(),
+                    authState: scenario.authState || 'unspecified',
+                });
+                runStore.appendMissionCheckpoint(runId, {
+                    stage: 'scenario',
+                    status: 'running',
+                    scenarioId: scenario.id,
+                    message: `Starting scenario ${scenario.name || scenario.id}`,
+                    details: {
+                        authState: scenario.authState || 'unspecified',
+                        persona: scenario.persona || null,
+                        credentialsRef: scenario.credentialsRef || null,
+                    },
+                });
+                eventBridge.push(EVENT_TYPES.STAGE_PROGRESS, runId, {
+                    stage: 'scenario',
+                    message: `Starting scenario ${scenario.name || scenario.id}`,
+                    scenarioId: scenario.id,
+                    scenarioName: scenario.name || scenario.id,
+                    authState: scenario.authState || 'unspecified',
+                });
+
+                const result = await orchestrator.runPipeline(ticketId, {
+                    mode,
+                    model,
+                    runId,
+                    contextRunId: `${runId}__${scenario.id}`,
+                    scenario,
+                    scenarioId: scenario.id,
+                    authState: scenario.authState || 'unspecified',
+                    onProgress: (stage, message) => emitProgress(stage, message, scenario),
+                    ...extraOptions,
+                });
+
+                scenarioResults.push({
+                    scenarioId: scenario.id,
+                    name: scenario.name || scenario.id,
+                    authState: scenario.authState || 'unspecified',
+                    success: !!result.success,
+                    duration: result.duration || null,
+                    lastCompletedStage: result.lastCompletedStage || null,
+                    error: result.error || null,
+                    artifacts: result.artifacts || {},
+                });
+
+                scenarioEvidence[scenario.id] = {
+                    authState: scenario.authState || 'unspecified',
+                    manifestPath: result.artifacts?.evidenceManifest || null,
+                    reportPath: result.artifacts?.report || null,
+                    rawResultsPath: result.artifacts?.testResults?.rawResultsFile || null,
+                    specPath: result.artifacts?.spec || null,
+                    explorationPath: result.artifacts?.exploration || null,
+                };
+
+                runStore.updateScenario(runId, scenario.id, {
+                    status: result.success ? RUN_STATUS.COMPLETED : RUN_STATUS.FAILED,
+                    completedAt: new Date().toISOString(),
+                    result: {
+                        success: !!result.success,
+                        duration: result.duration || null,
+                        error: result.error || null,
+                    },
+                    artifactPaths: scenarioEvidence[scenario.id],
+                    evidenceCount: Object.values(scenarioEvidence[scenario.id]).filter(Boolean).length,
+                });
+                runStore.appendMissionCheckpoint(runId, {
+                    stage: 'scenario',
+                    status: result.success ? 'passed' : 'failed',
+                    scenarioId: scenario.id,
+                    message: result.success
+                        ? `Scenario ${scenario.name || scenario.id} completed`
+                        : `Scenario ${scenario.name || scenario.id} failed`,
+                    details: {
+                        authState: scenario.authState || 'unspecified',
+                        success: !!result.success,
+                        error: result.error || null,
+                    },
+                });
+
+                if (!result.success) {
+                    runStore.recordMissionObservation(runId, {
+                        type: 'scenario-failure',
+                        severity: 'error',
+                        stage: result.lastCompletedStage || 'scenario',
+                        scenarioId: scenario.id,
+                        message: result.error || `Scenario ${scenario.name || scenario.id} failed`,
+                        metadata: { authState: scenario.authState || 'unspecified' },
+                    });
+                }
+            }
+
+            const failures = scenarioResults.filter(item => !item.success);
+            const result = {
+                ticketId,
+                mode,
+                runId,
+                success: !cancelled && failures.length === 0,
+                duration: runStore.getRun(runId)?.duration || null,
+                lastCompletedStage: scenarioResults[scenarioResults.length - 1]?.lastCompletedStage || null,
+                stageResults: {},
+                scenarioResults,
+                artifacts: {
+                    scenarioResults: Object.fromEntries(scenarioResults.map(item => [item.scenarioId, item.artifacts || {}])),
+                    evidenceScenarios: scenarioEvidence,
+                },
+                error: cancelled
+                    ? 'Cancelled by user'
+                    : failures.map(item => `${item.scenarioId}: ${item.error || 'failed'}`).join('; ') || null,
+            };
 
             // Mark completed
             runStore.completeRun(runId, result);
+            runStore.updateMission(runId, {
+                result: {
+                    success: !!result.success,
+                    scenarioResults,
+                    error: result.error || null,
+                },
+                evidence: {
+                    manifestPath: result.artifacts?.evidenceManifest || null,
+                    reportPath: result.artifacts?.report || null,
+                    rawResultsPath: result.artifacts?.testResults?.rawResultsFile || null,
+                    eventLogPath: eventBridge.getRunEventLogPath(runId),
+                    scenarios: scenarioEvidence,
+                },
+            });
+            runStore.appendMissionCheckpoint(runId, {
+                stage: 'run',
+                status: result.success ? 'passed' : 'failed',
+                message: result.success ? 'Pipeline completed successfully' : (result.error || 'Pipeline completed with failures'),
+                details: {
+                    success: !!result.success,
+                    duration: result.duration || null,
+                },
+            });
             eventBridge.push(EVENT_TYPES.RUN_COMPLETE, runId, {
                 ticketId,
                 success: result.success,
                 duration: result.duration,
                 error: result.error,
+                scenarioResults,
             });
 
         } catch (error) {
@@ -1896,6 +2537,13 @@ function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBr
                 error: error.message,
                 ticketId,
                 mode,
+            });
+            runStore.recordMissionObservation(runId, {
+                type: 'pipeline-error',
+                severity: 'error',
+                stage: 'run',
+                message: error.message,
+                metadata: { ticketId, mode },
             });
             eventBridge.push(EVENT_TYPES.ERROR, runId, {
                 ticketId,

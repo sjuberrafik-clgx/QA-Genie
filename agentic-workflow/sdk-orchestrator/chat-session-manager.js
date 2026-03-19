@@ -124,6 +124,7 @@ const CHAT_EVENTS = {
 };
 
 const MAX_ASSISTANT_IMAGE_BYTES = 6 * 1024 * 1024;
+const PROJECT_ROOT = path.join(__dirname, '..', '..');
 
 // Default timeout for user-input requests (5 minutes).
 // If the user doesn't respond within this window, the agent receives
@@ -222,6 +223,20 @@ class ChatSessionManager extends EventEmitter {
         'text/plain': '.txt',
         'text/markdown': '.md',
         'application/json': '.json',
+    };
+
+    static _DOC_MIME_BY_EXT = {
+        '.pdf': 'application/pdf',
+        '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        '.doc': 'application/msword',
+        '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        '.ppt': 'application/vnd.ms-powerpoint',
+        '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        '.xls': 'application/vnd.ms-excel',
+        '.csv': 'text/csv',
+        '.txt': 'text/plain',
+        '.md': 'text/markdown',
+        '.json': 'application/json',
     };
 
     /** MIME type → file extension mapping for video attachments. */
@@ -906,6 +921,7 @@ class ChatSessionManager extends EventEmitter {
             archived: false,
             sessionContext,
             pendingInputRequests: new Map(),  // requestId → { resolve, question, options, timer }
+            pendingAssistantAttachments: [],
         });
 
         // Wire session events → SSE broadcast
@@ -947,6 +963,15 @@ class ChatSessionManager extends EventEmitter {
             const u2 = session.on('assistant.message', (event) => {
                 const content = event?.data?.content || '';
                 const msg = { role: 'assistant', content, timestamp: new Date().toISOString() };
+                const pendingAttachments = this._consumePendingAssistantAttachments(entry);
+                const eventAttachments = Array.isArray(event?.data?.attachments) ? event.data.attachments : [];
+                const contentAttachments = (eventAttachments.length === 0 && pendingAttachments.length === 0)
+                    ? this._extractAssistantContentArtifactAttachments(content)
+                    : [];
+                const mergedAttachments = [...eventAttachments, ...pendingAttachments, ...contentAttachments];
+                if (mergedAttachments.length > 0) {
+                    msg.attachments = mergedAttachments;
+                }
 
                 // Attach accumulated reasoning to the message (if any)
                 if (reasoningBuffer.trim()) {
@@ -962,6 +987,7 @@ class ChatSessionManager extends EventEmitter {
                     content,
                     messageId: event?.data?.messageId || '',
                     reasoning: msg.reasoning || null,
+                    attachments: msg.attachments || [],
                 });
                 // Persist after assistant message
                 this._persistHistory();
@@ -1007,16 +1033,14 @@ class ChatSessionManager extends EventEmitter {
 
             // Tool execution complete
             const u4 = session.on('tool.execution_complete', (event) => {
-                this._broadcastToSSE(sessionId, CHAT_EVENTS.TOOL_COMPLETE, {
-                    toolName: event?.data?.toolName || 'unknown',
-                    toolCallId: event?.data?.toolCallId || '',
-                    success: event?.data?.success ?? true,
-                    result: typeof event?.data?.result === 'string'
-                        ? event.data.result.substring(0, 500)
-                        : '',
-                });
+                this._handleToolExecutionFinished(sessionId, entry, event, 'tool.execution_complete');
             });
             if (u4) unsubscribers.push(u4);
+
+            const u4b = session.on('tool.execution_end', (event) => {
+                this._handleToolExecutionFinished(sessionId, entry, event, 'tool.execution_end');
+            });
+            if (u4b) unsubscribers.push(u4b);
 
             // Reasoning (thinking) — accumulate into buffer for persistence
             const u5 = session.on('assistant.reasoning_delta', (event) => {
@@ -1035,6 +1059,24 @@ class ChatSessionManager extends EventEmitter {
 
             // Session idle (processing complete)
             const u6 = session.on('session.idle', () => {
+                const pendingAttachments = this._consumePendingAssistantAttachments(entry);
+                if (pendingAttachments.length > 0) {
+                    const artifactMessage = {
+                        role: 'assistant',
+                        content: '',
+                        timestamp: new Date().toISOString(),
+                        attachments: pendingAttachments,
+                    };
+                    entry.messages.push(artifactMessage);
+                    this._broadcastToSSE(sessionId, CHAT_EVENTS.MESSAGE, {
+                        content: artifactMessage.content,
+                        messageId: pendingAttachments[0]?.id || '',
+                        reasoning: null,
+                        attachments: pendingAttachments,
+                    });
+                    this._persistHistory();
+                }
+
                 this._broadcastToSSE(sessionId, CHAT_EVENTS.IDLE, {});
 
                 // Broadcast final followup suggestions on idle (ensures they arrive after message)
@@ -1219,6 +1261,349 @@ class ChatSessionManager extends EventEmitter {
         };
     }
 
+    _consumePendingAssistantAttachments(entry) {
+        if (!entry || !Array.isArray(entry.pendingAssistantAttachments) || entry.pendingAssistantAttachments.length === 0) {
+            return [];
+        }
+
+        const attachments = [];
+        const seen = new Set();
+        for (const attachment of entry.pendingAssistantAttachments) {
+            const key = attachment?.path || attachment?.relativePath || attachment?.name || attachment?.id;
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            attachments.push(attachment);
+        }
+        entry.pendingAssistantAttachments = [];
+        return attachments;
+    }
+
+    _queuePendingAssistantAttachments(entry, attachments, options = {}) {
+        if (!entry || !Array.isArray(attachments) || attachments.length === 0) return 0;
+
+        if (!Array.isArray(entry.pendingAssistantAttachments)) {
+            entry.pendingAssistantAttachments = [];
+        }
+
+        const existingKeys = new Set(
+            entry.pendingAssistantAttachments
+                .map((attachment) => attachment?.path || attachment?.relativePath || attachment?.name || attachment?.id)
+                .filter(Boolean)
+        );
+
+        let added = 0;
+        for (const attachment of attachments) {
+            const key = attachment?.path || attachment?.relativePath || attachment?.name || attachment?.id;
+            if (!key || existingKeys.has(key)) continue;
+            existingKeys.add(key);
+            entry.pendingAssistantAttachments.push(attachment);
+            added++;
+        }
+
+        if (options.logLabel && added === 0) {
+            console.log(`[ChatManager] ℹ️ No new pending attachments queued for ${options.logLabel}`);
+        }
+
+        return added;
+    }
+
+    _normalizeGeneratedArtifactToolName(toolName) {
+        return String(toolName || '')
+            .trim()
+            .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+            .replace(/[\s-]+/g, '_')
+            .toLowerCase();
+    }
+
+    _getGeneratedArtifactToolDescriptor(toolName) {
+        if (!toolName) return null;
+
+        const direct = ChatSessionManager._GENERATED_ARTIFACT_TOOL_MAP[toolName];
+        if (direct) return direct;
+
+        const normalizedName = this._normalizeGeneratedArtifactToolName(toolName);
+        return ChatSessionManager._GENERATED_ARTIFACT_TOOL_MAP[normalizedName] || null;
+    }
+
+    _coerceToolResultPayload(rawResult) {
+        if (rawResult == null) return rawResult;
+
+        if (typeof rawResult === 'string') {
+            const trimmed = rawResult.trim();
+            if (!trimmed) return trimmed;
+
+            try {
+                return this._coerceToolResultPayload(JSON.parse(trimmed));
+            } catch {
+                return trimmed;
+            }
+        }
+
+        if (Array.isArray(rawResult)) {
+            return rawResult.map((item) => this._coerceToolResultPayload(item));
+        }
+
+        if (typeof rawResult !== 'object') {
+            return rawResult;
+        }
+
+        if (typeof rawResult.text === 'string' && rawResult.text.trim()) {
+            const parsedText = this._coerceToolResultPayload(rawResult.text);
+            if (typeof parsedText === 'object' && parsedText !== null) {
+                return parsedText;
+            }
+        }
+
+        if (typeof rawResult.result === 'string' && rawResult.result.trim()) {
+            const parsedResult = this._coerceToolResultPayload(rawResult.result);
+            if (typeof parsedResult === 'object' && parsedResult !== null) {
+                return parsedResult;
+            }
+        }
+
+        if (Array.isArray(rawResult.content) && rawResult.content.length > 0) {
+            const contentItems = rawResult.content
+                .map((item) => this._coerceToolResultPayload(item))
+                .filter(Boolean);
+            const structuredItem = contentItems.find((item) => typeof item === 'object' && item !== null && !Array.isArray(item));
+            if (structuredItem) return structuredItem;
+            const textItem = contentItems.find((item) => typeof item === 'string' && item.trim());
+            if (textItem) return textItem;
+        }
+
+        if (rawResult.structuredContent && typeof rawResult.structuredContent === 'object') {
+            return this._coerceToolResultPayload(rawResult.structuredContent);
+        }
+
+        return rawResult;
+    }
+
+    _extractArtifactPathsFromText(text) {
+        if (typeof text !== 'string' || !text.trim()) return [];
+
+        const matches = text.match(/(?:[A-Za-z]:[\\/]|\.\.?[\\/]|\/)?[^\s`"'<>|]+(?:[\\/][^\s`"'<>|]+)*\.(?:pdf|docx|doc|pptx|ppt|xlsx|xls|csv|html|htm|txt|md|json|webm|mp4|png|jpe?g|svg)/gi);
+        return Array.isArray(matches) ? matches : [];
+    }
+
+    _resolveArtifactPath(candidatePath) {
+        const trimmedPath = String(candidatePath || '').trim();
+        if (!trimmedPath) return '';
+
+        const candidatePaths = [];
+        if (path.isAbsolute(trimmedPath)) {
+            candidatePaths.push(path.normalize(trimmedPath));
+        } else {
+            candidatePaths.push(path.resolve(PROJECT_ROOT, trimmedPath));
+            candidatePaths.push(path.resolve(trimmedPath));
+        }
+
+        for (const candidate of candidatePaths) {
+            if (candidate && fs.existsSync(candidate)) {
+                return candidate;
+            }
+        }
+
+        return candidatePaths[0] || '';
+    }
+
+    _isGeneratedArtifactPath(resolvedPath) {
+        if (!resolvedPath) return false;
+
+        const relativePath = path.relative(PROJECT_ROOT, resolvedPath).replace(/\\/g, '/');
+        if (!relativePath || relativePath.startsWith('..')) return false;
+
+        return [
+            'agentic-workflow/test-cases/',
+            'agentic-workflow/test-artifacts/',
+            'agentic-workflow/exploration-data/',
+            'test-results/',
+            'playwright-report/',
+        ].some((prefix) => relativePath.startsWith(prefix));
+    }
+
+    _extractAssistantContentArtifactAttachments(content) {
+        const candidates = this._extractArtifactPathsFromText(content);
+        if (candidates.length === 0) return [];
+
+        const attachments = [];
+        const seen = new Set();
+        for (const candidate of candidates) {
+            const resolvedPath = this._resolveArtifactPath(candidate);
+            if (!resolvedPath || seen.has(resolvedPath) || !this._isGeneratedArtifactPath(resolvedPath)) continue;
+            seen.add(resolvedPath);
+
+            const attachment = this._createAssistantArtifactAttachment(resolvedPath, {
+                label: 'Generated artifact',
+            });
+            if (attachment) attachments.push(attachment);
+        }
+
+        return attachments;
+    }
+
+    _handleToolExecutionFinished(sessionId, entry, event, completionEventName) {
+        const toolName = event?.data?.toolName || event?.data?.name || 'unknown';
+        const toolCallId = event?.data?.toolCallId || event?.data?.id || '';
+        const rawResult = event?.data?.result;
+        const artifactAttachments = this._extractToolGeneratedAttachments(toolName, rawResult);
+
+        if (artifactAttachments.length > 0) {
+            this._queuePendingAssistantAttachments(entry, artifactAttachments, {
+                logLabel: `${toolName} via ${completionEventName}`,
+            });
+        } else {
+            const descriptor = this._getGeneratedArtifactToolDescriptor(toolName);
+            if (descriptor) {
+                console.warn(`[ChatManager] ⚠️ No artifact attachments extracted for ${toolName} via ${completionEventName}`);
+            }
+        }
+
+        this._broadcastToSSE(sessionId, CHAT_EVENTS.TOOL_COMPLETE, {
+            toolName,
+            toolCallId,
+            success: event?.data?.success ?? true,
+            result: typeof rawResult === 'string'
+                ? rawResult.substring(0, 500)
+                : '',
+        });
+    }
+
+    _extractToolGeneratedAttachments(toolName, rawResult) {
+        const descriptor = this._getGeneratedArtifactToolDescriptor(toolName);
+        if (!descriptor) return [];
+
+        const parsed = this._coerceToolResultPayload(rawResult);
+        if (!parsed) return [];
+
+        const candidates = this._collectGeneratedArtifactCandidates(parsed, descriptor.pathFields);
+        if (candidates.length === 0) return [];
+
+        const attachments = [];
+        const seenPaths = new Set();
+        const baseLabel = String(parsed?.message || parsed?.label || descriptor.label || 'Generated artifact').trim();
+
+        for (const candidate of candidates) {
+            const normalizedPath = this._resolveArtifactPath(candidate.path);
+            if (!normalizedPath || seenPaths.has(normalizedPath)) continue;
+            seenPaths.add(normalizedPath);
+
+            const attachment = this._createAssistantArtifactAttachment(normalizedPath, {
+                label: candidates.length > 1
+                    ? `${baseLabel} (${candidate.displayName || path.basename(normalizedPath)})`
+                    : baseLabel,
+            });
+            if (attachment) attachments.push(attachment);
+        }
+
+        return attachments;
+    }
+
+    _collectGeneratedArtifactCandidates(result, pathFields = []) {
+        const fieldsToCheck = Array.from(new Set([
+            ...pathFields,
+            'outputPath',
+            'artifactPath',
+            'excelPath',
+            'reportPath',
+            'downloadPath',
+            'savedPath',
+        ]));
+
+        if (!result) return [];
+
+        const candidates = [];
+        const seen = new Set();
+        const addCandidate = (candidatePath, displayName) => {
+            if (typeof candidatePath !== 'string' || !candidatePath.trim()) return;
+            const key = `${candidatePath}::${displayName || ''}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            candidates.push({ path: candidatePath, displayName });
+        };
+
+        if (typeof result === 'string') {
+            for (const match of this._extractArtifactPathsFromText(result)) {
+                addCandidate(match, 'text');
+            }
+            return candidates;
+        }
+
+        if (Array.isArray(result)) {
+            for (const item of result) {
+                for (const candidate of this._collectGeneratedArtifactCandidates(item, fieldsToCheck)) {
+                    addCandidate(candidate.path, candidate.displayName);
+                }
+            }
+            return candidates;
+        }
+
+        if (typeof result !== 'object') return candidates;
+
+        for (const field of fieldsToCheck) {
+            const value = result[field];
+            if (typeof value === 'string') {
+                addCandidate(value, field);
+                continue;
+            }
+
+            if (Array.isArray(value)) {
+                for (const item of value) {
+                    if (typeof item === 'string') {
+                        addCandidate(item, field);
+                        continue;
+                    }
+
+                    if (!item || typeof item !== 'object') continue;
+                    addCandidate(item.filePath || item.path || item.outputPath, item.fileName || item.name || field);
+                }
+            }
+        }
+
+        for (const value of Object.values(result)) {
+            if (typeof value === 'string') {
+                for (const match of this._extractArtifactPathsFromText(value)) {
+                    addCandidate(match, 'text');
+                }
+                continue;
+            }
+
+            if (Array.isArray(value) || (value && typeof value === 'object')) {
+                for (const candidate of this._collectGeneratedArtifactCandidates(value, fieldsToCheck)) {
+                    addCandidate(candidate.path, candidate.displayName);
+                }
+            }
+        }
+
+        return candidates;
+    }
+
+    _createAssistantArtifactAttachment(filePath, options = {}) {
+        const resolvedPath = path.resolve(String(filePath || '').trim());
+        if (!resolvedPath || !fs.existsSync(resolvedPath)) return null;
+
+        const stat = fs.statSync(resolvedPath);
+        if (!stat.isFile()) return null;
+
+        const ext = path.extname(resolvedPath).toLowerCase();
+        const mimeType = ChatSessionManager._DOC_MIME_BY_EXT[ext] || 'application/octet-stream';
+        const relativePath = path.relative(PROJECT_ROOT, resolvedPath).replace(/\\/g, '/');
+
+        return {
+            id: `assistant_artifact_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            name: path.basename(resolvedPath),
+            type: mimeType,
+            mimeType,
+            extension: ext,
+            size: stat.size,
+            kind: 'artifact',
+            path: resolvedPath,
+            relativePath,
+            actionable: true,
+            label: String(options.label || '').trim() || 'Generated artifact',
+            createdAt: new Date().toISOString(),
+        };
+    }
+
     // ─── Auto-Progress Hints for MCP / Known Tools ──────────────────────────
 
     /**
@@ -1314,6 +1699,13 @@ class ChatSessionManager extends EventEmitter {
         'create_jira_ticket': { phase: 'jira', message: 'Creating Jira ticket...' },
         'update_jira_ticket': { phase: 'jira', message: 'Updating Jira ticket...' },
         'generate_test_case_excel': { phase: 'excel', message: 'Generating Excel file...' },
+        'generate_excel_report': { phase: 'excel', message: 'Generating Excel report...' },
+        'generate_docx': { phase: 'document', message: 'Generating Word document...' },
+        'generate_pptx': { phase: 'document', message: 'Generating PowerPoint deck...' },
+        'generate_pdf': { phase: 'document', message: 'Generating PDF document...' },
+        'generate_html_report': { phase: 'document', message: 'Generating HTML report...' },
+        'generate_markdown': { phase: 'document', message: 'Generating Markdown document...' },
+        'generate_video': { phase: 'video', message: 'Generating video artifact...' },
         'validate_generated_script': { phase: 'validation', message: 'Validating script...' },
         'run_quality_gate': { phase: 'validation', message: 'Running quality gate...' },
         'get_framework_inventory': { phase: 'framework', message: 'Scanning framework inventory...' },
@@ -1338,6 +1730,57 @@ class ChatSessionManager extends EventEmitter {
     static _getToolProgressHint(toolName) {
         return ChatSessionManager._TOOL_PROGRESS_HINTS[toolName] || null;
     }
+
+    static _GENERATED_ARTIFACT_TOOL_MAP = {
+        'generate_test_case_excel': {
+            label: 'Generated test cases workbook',
+            pathFields: ['path', 'filePath'],
+        },
+        'generatetestcaseexcel': {
+            label: 'Generated test cases workbook',
+            pathFields: ['path', 'filePath'],
+        },
+        'generate test case excel': {
+            label: 'Generated test cases workbook',
+            pathFields: ['path', 'filePath'],
+        },
+        'generate-test-case-excel': {
+            label: 'Generated test cases workbook',
+            pathFields: ['path', 'filePath'],
+        },
+        'generateTestCaseExcel': {
+            label: 'Generated test cases workbook',
+            pathFields: ['path', 'filePath'],
+        },
+        'generate_excel_report': {
+            label: 'Generated Excel report',
+            pathFields: ['filePath', 'path'],
+        },
+        'generate_docx': {
+            label: 'Generated Word document',
+            pathFields: ['filePath', 'path'],
+        },
+        'generate_pptx': {
+            label: 'Generated PowerPoint deck',
+            pathFields: ['filePath', 'path'],
+        },
+        'generate_pdf': {
+            label: 'Generated PDF document',
+            pathFields: ['filePath', 'path'],
+        },
+        'generate_html_report': {
+            label: 'Generated HTML report',
+            pathFields: ['filePath', 'path'],
+        },
+        'generate_markdown': {
+            label: 'Generated Markdown document',
+            pathFields: ['filePath', 'path'],
+        },
+        'generate_video': {
+            label: 'Generated video',
+            pathFields: ['filePath', 'path'],
+        },
+    };
 
     /**
      * Reverse-lookup: find a session entry by its SDK session reference.
@@ -1923,6 +2366,7 @@ class ChatSessionManager extends EventEmitter {
                         messages: saved.messages || [],
                         unsubscribers: [],
                         archived: true,
+                        pendingAssistantAttachments: [],
                     });
                 }
                 console.log(`[ChatManager] Loaded ${data.sessions.length} archived chat session(s) from disk`);

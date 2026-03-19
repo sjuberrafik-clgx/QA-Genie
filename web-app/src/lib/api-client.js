@@ -194,6 +194,23 @@ class ApiClient {
         return this._fetch(EP.pipelineStatus(runId), { timeout: TIMEOUTS.RUN_STATUS });
     }
 
+    async getPipelineEvidenceSummary(runId, limit = 12, options = {}) {
+        const query = new URLSearchParams();
+        if (limit) query.set('limit', String(limit));
+        const qs = query.toString();
+        return this._fetch(`${EP.pipelineEvidenceSummary(runId)}${qs ? `?${qs}` : ''}`, {
+            timeout: TIMEOUTS.RUN_STATUS,
+            ...options,
+        });
+    }
+
+    getPipelineArtifactUrl(filePath, options = {}) {
+        if (!filePath) return null;
+        const query = new URLSearchParams({ path: filePath });
+        query.set('disposition', options.download ? 'attachment' : 'inline');
+        return `${this.baseUrl}${EP.pipelineArtifact}?${query.toString()}`;
+    }
+
     // ─── Chat ───────────────────────────────────────────────────
     async createChatSession(model, agentMode = null) {
         return this._fetch(EP.chatSessions, {
@@ -253,6 +270,22 @@ class ApiClient {
 
     async pickDirectory() {
         return this._fetch(EP.filesystemPickDirectory, { method: 'POST', retries: 0, timeout: 65000 });
+    }
+
+    async openFileInNativeApp(filePath) {
+        return this._fetch(EP.filesystemOpenFile, {
+            method: 'POST',
+            body: JSON.stringify({ path: filePath }),
+            retries: 0,
+        });
+    }
+
+    async openFolderInNativeApp(filePath) {
+        return this._fetch(EP.filesystemOpenFolder, {
+            method: 'POST',
+            body: JSON.stringify({ path: filePath }),
+            retries: 0,
+        });
     }
 
     async setWorkspaceRoot(sessionId, dirPath) {

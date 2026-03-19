@@ -2,6 +2,20 @@
 
 ## 🔍 Common Issues and Solutions
 
+Current core QA agents in this workspace:
+
+- `orchestrator`
+- `testgenie`
+- `scriptgenerator`
+- `buggenie`
+- `taskgenie`
+- `codereviewer`
+
+Additional utility agents available in the workspace:
+
+- `filegenie`
+- `docgenie`
+
 ---
 
 ## Issue 1: Agents Not Appearing in Chat
@@ -19,6 +33,10 @@
 ls .github/agents/
 
 # Should show:
+# taskgenie.agent.md
+# codereviewer.agent.md
+# filegenie.agent.md
+# docgenie.instructions.md
 # testgenie.agent.md
 # scriptgenerator.agent.md
 # buggenie.agent.md
@@ -107,7 +125,7 @@ infer: true
 ### Symptoms
 - Error: "Tool not available"
 - Agent can't fetch Jira tickets
-- Agent can't use Playwright MCP
+- Agent can't use the unified MCP browser tools
 - File operations fail
 
 ### Solutions
@@ -120,7 +138,7 @@ tools: ['atlassian/atlassian-mcp-server/*']  # For Jira access
 ---
 ```
 
-For TestGenie and BugGenie:
+For TestGenie, BugGenie, and TaskGenie:
 ```yaml
 tools: ['atlassian/atlassian-mcp-server/*']
 ```
@@ -132,7 +150,7 @@ tools: [
   'search/textSearch',
   'search/codebase',
   'edit',
-  'microsoft/playwright-mcp/*'
+   'mcp_unified-autom_unified_*'
 ]
 ```
 
@@ -143,8 +161,8 @@ tools: [
 # Search for: "MCP"
 # Verify Atlassian MCP server is configured
 
-# Check if Playwright MCP is installed
-# Look for Playwright MCP in extensions
+# Check if the workspace MCP server is configured
+# Verify the unified MCP tooling is available to the agent workflow
 ```
 
 #### Solution 3C: Enable MCP Server
@@ -403,7 +421,7 @@ npx playwright test tests/specs/feature/test-name.spec.js
 # Agents need internet to access:
 # - GitHub Copilot API
 # - Jira (Atlassian MCP)
-# - Playwright MCP
+# - Unified MCP browser tooling
 
 # Verify stable internet connection
 ```
@@ -509,14 +527,14 @@ Use this checklist to verify your setup:
 
 - [ ] VS Code version 1.107.0 or later
 - [ ] GitHub Copilot subscription active
-- [ ] Agents in `.github/agents/` folder (4 files)
+- [ ] Agents in `.github/agents/` folder (current agent definitions present)
 - [ ] Each agent has proper YAML frontmatter
 - [ ] Settings in `.vscode/settings.json` configured
 - [ ] `chat.customAgentInSubagent.enabled: true`
 - [ ] `github.copilot.chat.cli.customAgents.enabled: true`
 - [ ] `chat.viewSessions.enabled: true`
 - [ ] Atlassian MCP configured (for Jira)
-- [ ] Playwright MCP available (for automation)
+- [ ] Unified MCP tooling available (for automation)
 - [ ] Git initialized in workspace
 - [ ] Node.js and npm installed
 - [ ] Playwright dependencies installed

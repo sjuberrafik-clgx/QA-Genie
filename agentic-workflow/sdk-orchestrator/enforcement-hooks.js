@@ -22,6 +22,7 @@ const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
 const { ExplorationQualityAnalyzer, DECISION: OODA_DECISION } = require('./ooda-loop');
+const { ObservationRecorder } = require('./observation-recorder');
 
 // ─── State Tracking ─────────────────────────────────────────────────────────
 
@@ -153,6 +154,12 @@ function formatRuntimeObservationContext(observation) {
 function createEnforcementHooks(agentName, options = {}) {
     const { config = {}, learningStore = null, groundingStore = null, verbose = false } = options;
     const mcpConfig = config.mcpExploration || {};
+    const observationRecorder = new ObservationRecorder({ projectRoot: path.join(__dirname, '..', '..') });
+    const runId = options.runId || null;
+    const ticketId = options.ticketId || null;
+    const scenarioId = options.scenarioId || null;
+    const authState = options.authState || null;
+    const contextStore = options.contextStore || null;
 
     // Initialize OODA exploration quality analyzer (for scriptgenerator)
     const qualityAnalyzer = (agentName === 'scriptgenerator')
@@ -517,13 +524,42 @@ function createEnforcementHooks(agentName, options = {}) {
 
         const runtimeObservation = extractRuntimeObservation(toolName, input.result);
         if (runtimeObservation) {
-            state.lastRuntimeBlocker = runtimeObservation;
-            state.runtimeObservations.push({
+            const storedObservation = {
                 ...runtimeObservation,
                 timestamp: new Date().toISOString(),
-            });
+            };
+            state.lastRuntimeBlocker = storedObservation;
+            state.runtimeObservations.push(storedObservation);
             log(`🚨 Runtime blocker observed via ${toolName}: ${runtimeObservation.blocker.kind || 'unknown'}`);
             runtimeObservationContext = formatRuntimeObservationContext(runtimeObservation);
+
+            if (runId) {
+                const recorded = observationRecorder.recordObservation({
+                    runId,
+                    ticketId,
+                    scenarioId,
+                    source: 'enforcement-hook',
+                    type: 'runtime-blocker',
+                    severity: runtimeObservation.blocker?.classification?.severity || 'warning',
+                    stage: agentName,
+                    toolName,
+                    message: runtimeObservation.blocker?.message || runtimeObservation.blocker?.text || 'Runtime blocker observed',
+                    metadata: {
+                        blocker: runtimeObservation.blocker || null,
+                        blockerSource: runtimeObservation.source || null,
+                        authState,
+                        screenshotRecommended: true,
+                    },
+                    artifactPath: runtimeObservation.blocker?.screenshotPath || null,
+                });
+
+                if (contextStore) {
+                    contextStore.addNote('enforcement-hooks',
+                        `Runtime blocker recorded for ${toolName}: ${runtimeObservation.blocker?.kind || 'unknown'}`,
+                        { observationLogPath: recorded.logPath }
+                    );
+                }
+            }
         }
 
         // ── Context Engineering: Trim bloated tool results to save context budget ──
@@ -578,6 +614,34 @@ function createEnforcementHooks(agentName, options = {}) {
             // If quality is low, enforce structural consequences
             if (qualityAssessment && qualityAssessment.decision !== OODA_DECISION.ACCEPT) {
                 const severity = qualityAssessment.decision === OODA_DECISION.RETRY_RECOMMENDED ? '🚨' : '⚠️';
+
+                if (runId) {
+                    const recorded = observationRecorder.recordObservation({
+                        runId,
+                        ticketId,
+                        scenarioId,
+                        source: 'enforcement-hook',
+                        type: 'snapshot-quality',
+                        severity: qualityAssessment.decision === OODA_DECISION.RETRY_RECOMMENDED ? 'warning' : 'info',
+                        stage: agentName,
+                        toolName,
+                        message: `Snapshot quality ${qualityAssessment.decision} (${qualityAssessment.score})`,
+                        metadata: {
+                            score: qualityAssessment.score,
+                            decision: qualityAssessment.decision,
+                            warnings: qualityAssessment.warnings,
+                            recommendation: qualityAssessment.recommendation,
+                            authState,
+                        },
+                    });
+
+                    if (contextStore) {
+                        contextStore.addNote('enforcement-hooks',
+                            `Snapshot quality recorded: ${qualityAssessment.decision} (${qualityAssessment.score})`,
+                            { observationLogPath: recorded.logPath }
+                        );
+                    }
+                }
 
                 // ── OODA ENFORCEMENT: Reset snapshot flag on RETRY_RECOMMENDED ──
                 // This converts the existing pre-tool gate into a quality-aware gate.
@@ -921,6 +985,7 @@ const COGNITIVE_PHASE_RULES = {
 function createCognitiveEnforcementHooks(phaseName, options = {}) {
     const { verbose = false } = options;
     const rules = COGNITIVE_PHASE_RULES[phaseName];
+    const baseHooks = createEnforcementHooks('scriptgenerator', options);
 
     if (!rules) {
         // Unknown phase — fall back to standard scriptgenerator hooks
@@ -1007,6 +1072,13 @@ function createCognitiveEnforcementHooks(phaseName, options = {}) {
     };
 
     hooks.onPostToolUse = async (input, invocation) => {
+        if (input.toolName?.includes('unified_') && typeof baseHooks.onPostToolUse === 'function') {
+            const baseResult = await baseHooks.onPostToolUse(input, invocation);
+            if (baseResult?.permissionDecision === 'deny' || baseResult?.additionalContext) {
+                return baseResult;
+            }
+        }
+
         // ── Auto-validate spec files written by Coder ───────────────
         if (phaseName === 'cognitive-coder') {
             const toolName = input.toolName || '';
@@ -1042,6 +1114,13 @@ function createCognitiveEnforcementHooks(phaseName, options = {}) {
 
     hooks.onErrorOccurred = async (input, invocation) => {
         const errorMsg = input.error || '';
+
+        if ((rules.allowMCP || errorMsg.includes('RUNTIME_BLOCKER')) && typeof baseHooks.onErrorOccurred === 'function') {
+            const baseResult = await baseHooks.onErrorOccurred(input, invocation);
+            if (baseResult?.additionalContext || baseResult?.errorHandling !== 'skip') {
+                return baseResult;
+            }
+        }
 
         if (errorMsg.includes('MCP') || errorMsg.includes('connection refused')) {
             return { errorHandling: 'retry', additionalContext: 'MCP server may not be ready. Retrying.' };

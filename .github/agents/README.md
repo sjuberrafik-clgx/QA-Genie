@@ -1,393 +1,264 @@
-# Multi-Agent Orchestration Setup
+# Multi-Agent QA Workflow
 
-This workspace is configured for **VS Code 1.107+ Multi-Agent Orchestration**, enabling your TestGenie, ScriptGenerator, and BugGenie agents to work together in automated workflows with minimal manual intervention.
+This directory contains the custom GitHub Copilot agents used by the QA automation platform.
 
-## 🎯 What's New
+Use this README when you want to understand how the agents are organized, how to invoke them in VS Code, and how the QA workflow is split between core pipeline agents and utility agents.
 
-With VS Code 1.107, you can now:
-- ✅ Run custom agents as **subagents** (automatic delegation)
-- ✅ Use **background agents** for long-running tasks
-- ✅ Execute agents in **isolated Git worktrees** (no conflicts)
-- ✅ **Hand off context** seamlessly between agents
-- ✅ **Monitor all agents** from unified Agent HQ interface
-- ✅ Run **multiple agents in parallel** without blocking your work
-
-## 📁 Project Structure
-
-```
-.github/agents/                      # VS Code 1.107 multi-agent system
-│
-├── README.md                        # This file - system overview
-│
-├── agents/                          # Agent definition files
-│   ├── orchestrator.agent.md        # Master coordinator agent
-│   ├── testgenie.agent.md           # Test case generation from Jira
-│   ├── scriptgenerator.agent.md     # Playwright automation creation
-│   └── buggenie.agent.md            # Bug ticket creation (2-step workflow)
-│
-├── lib/                             # Core JavaScript modules
-│   ├── index.js                     # Clean exports entry point
-│   ├── workflow-coordinator.js      # Main orchestration engine (v2.4.0)
-│   ├── error-analyzer.js            # AI-powered error analysis
-│   ├── custom-templates.js          # Custom workflow templates
-│   └── system-analysis.js           # Architecture documentation
-│
-├── docs/                            # Documentation & guides
-│   ├── WORKFLOWS.md                 # Workflow definitions & usage
-│   ├── WORKFLOW_TEMPLATES.md        # Custom template guide
-│   ├── WORKFLOW_SYSTEM_QUICKSTART.md # Quick start guide
-│   ├── QUICKREF.md                  # Quick reference card
-│   ├── AGENT_PROTOCOL.md            # Agent communication protocol
-│   ├── AGENT_SKILLS_GUIDE.md        # Skills system guide
-│   ├── AGENT_SKILLS_QUICKREF.md     # Skills quick reference
-│   ├── TROUBLESHOOTING.md           # Common issues & solutions
-│   ├── LINEAR_WORKFLOW_GUIDE.md     # Linear workflow patterns
-│   ├── SETUP_COMPLETE.md            # Setup verification
-│   ├── IMPLEMENTATION_SUMMARY.md    # Implementation details
-│   └── SCRIPTGENERATOR_V2_ENHANCEMENTS.md # ScriptGenerator updates
-│
-└── state/                           # Runtime state (gitignored)
-    ├── workflow-state.json          # Active workflow states
-    ├── workflow-metrics.json        # Performance metrics
-    └── custom-templates.json        # User-defined templates
-```
-
-## ⚙️ Configuration
-
-The `.vscode/settings.json` file has been configured with:
-
-```json
-{
-  "chat.customAgentInSubagent.enabled": true,
-  "github.copilot.chat.cli.customAgents.enabled": true,
-  "chat.viewSessions.enabled": true,
-  "chat.viewSessions.orientation": "auto"
-}
-```
-
-These enable:
-- Custom agents as subagents (automatic routing)
-- Background agent support
-- Integrated session management in Chat view
-
-## 🚀 Quick Start
-
-### 1. Verify Setup
-
-1. Open VS Code 1.107 or later
-2. Open the Chat panel (Ctrl+Shift+I or Cmd+Shift+I)
-3. Ask: **"What subagents can you use?"**
-4. You should see: TestGenie, ScriptGenerator, BugGenie, Orchestrator
-
-### 2. Test Individual Agents
-
-**TestGenie:**
-
-@testgenie Generate test cases for Jira ticket AOTF-1234
-
-*✅ Test cases will appear as formatted tables directly in the chat window*
-
-**ScriptGenerator:**
-
-@scriptgenerator Convert these steps to Playwright automation:
-1. Login to OneHome
-2. Search for properties in San Francisco
-3. Verify results are displayed
-
-**BugGenie:**
-
-@buggenie Create bug ticket for image loading issue in UAT Canopy MLS
-
-### 3. Use Orchestrated Workflows
-
-**Complete Automation Pipeline:**
-
-@orchestrator Automate testing for AOTF-1234 - generate test cases and create Playwright test
-
-**Parallel Execution:**
-
-@orchestrator Generate test cases for AOTF-1234, AOTF-1235, and AOTF-1236 in parallel
-
-## 🔄 Automated Workflows
-
-### Workflow 1: Jira → Test Cases → Automation
-
-You: "Automate testing for AOTF-1234"
-
-Orchestrator:
-├─ Step 1: TestGenie generates manual test cases from Jira
-├─ Step 2: ScriptGenerator converts to Playwright automation
-├─ Step 3: Executes test and reports results
-└─ If failures: BugGenie creates defect tickets
-
-**Example Prompt:**
-
-@orchestrator Create full automation for Jira ticket AOTF-5678 in UAT Canopy environment
-
-### Workflow 2: Manual Steps → Automation
-
-You: "Convert manual steps to Playwright"
-
-Orchestrator:
-└─ ScriptGenerator creates production-ready test
-
-**Example Prompt:**
-
-@scriptgenerator Automate the test cases in tests/manual/feature-x.md
-
-### Workflow 3: Bug Discovery → Jira Ticket
-
-You: "Create bug ticket for [issue description]"
-
-Orchestrator:
-├─ Step 1: BugGenie generates review copy
-├─ [You review and confirm]
-└─ Step 2: BugGenie creates Jira ticket
-
-**Example Prompt:**
-
-@buggenie Bug found in PROD - Property images not loading on RLS MLS
-
-### Workflow 4: Background Batch Processing
-
-```
-You: "Generate automation for all tickets in sprint 23"
-
-Orchestrator:
-├─ Fetches all tickets from sprint
-├─ Creates background agent for each ticket
-│   └─ Each runs: TestGenie → ScriptGenerator
-├─ Agents run in isolated Git worktrees (no conflicts)
-└─ Aggregates results when complete
-```
-
-**Example Prompt:**
-```
-@orchestrator Generate test automation for all tickets in sprint 23, run in background
-```
-
-## 🎛️ Agent Capabilities
-
-### TestGenie
-- ✅ Fetches Jira ticket details via Atlassian MCP
-- ✅ Generates optimized manual test cases
-- ✅ **Displays test cases as formatted tables directly in chat (no files created)**
-- ✅ Covers all acceptance criteria
-- ✅ Includes MLS/OneHome contexts
-- ✅ Optional: Generates Playwright automation when requested
-- 🔗 **Handoff to:** ScriptGenerator (for automation)
-
-### ScriptGenerator
-- ✅ Explores existing test framework structure
-- ✅ Reuses page objects, helpers, and config
-- ✅ Executes steps in real-time with Playwright MCP
-- ✅ Captures and validates stable selectors
-- ✅ Enriches page objects with new selectors
-- ✅ Generates production-ready, passing tests
-- 🔗 **Handoff to:** BugGenie (on test failures)
-
-### BugGenie
-- ✅ Two-step workflow: Review → Create (prevents mistakes)
-- ✅ Supports UAT and PROD environment selection
-- ✅ Integrates MLS context
-- ✅ Creates linked Testing tasks
-- ✅ Preserves formatting in Jira (ADF/Markdown)
-- 🔗 **Handoff to:** TestGenie (for Testing task test cases)
-
-### Orchestrator
-- ✅ Coordinates multi-agent workflows
-- ✅ Automatically routes requests to correct agents
-- ✅ Maintains context across handoffs
-- ✅ Supports parallel and sequential execution
-- ✅ Manages background agents and worktrees
-- 🔗 **Controls:** All agents
-
-## 📊 Monitoring Agents
-
-### View Active Sessions
-
-1. Open Chat panel
-2. Sessions list shows all active/archived agents
-3. View status, progress, and file changes
-4. Click session to see conversation history
-
-### Background Agents
-
-Background agents appear in the sessions list with:
-- ⚙️ Status indicator (running/completed)
-- 📊 Progress percentage
-- 📝 File change statistics
-- ⏱️ Runtime duration
-
-### Continue Tasks to Background
-
-If a local chat task is taking too long:
-1. Click **"Continue in"** button
-2. Select **Background Agent**
-3. Task moves to background, you can continue other work
-
-## 🛠️ Advanced Features
-
-### Git Worktree Isolation
-
-When creating background agents:
-1. VS Code creates separate Git worktree
-2. Agent makes changes in isolated folder
-3. No conflicts with your active work
-4. Review changes and merge back when ready
-
-**Create background agent with worktree:**
-```
-@orchestrator Generate automation for AOTF-1234, run in background with Git worktree
-```
-
-### Context Attachment
-
-Attach rich context to agent requests:
-- 📎 File selections
-- 🐛 Problems/errors
-- 🔍 Search results
-- 🔀 Git commits
-- 📋 Symbols
-
-**Example:**
-1. Select code in editor
-2. Right-click → "Add to Chat"
-3. Agent receives full context
-
-### Custom Agent Keyboard Shortcuts
-
-You can bind keyboard shortcuts to individual agents:
-
-1. Open Command Palette (Ctrl+Shift+P)
-2. Search for "Chat: Open Chat (TestGenie Agent)"
-3. Right-click → "Configure Keyboard Shortcut"
-4. Assign your preferred shortcut
-
-## 🔧 Troubleshooting
-
-### Agents Not Appearing
-
-**Problem:** Custom agents not visible in Chat
-
-**Solutions:**
-1. Verify agents are in `.github/agents/` folder
-2. Check agent files have proper YAML frontmatter
-3. Ensure `infer: true` in agent metadata
-4. Restart VS Code
-5. Check settings are enabled in `.vscode/settings.json`
-
-### Agent Not Being Invoked
-
-**Problem:** Agent doesn't respond or wrong agent responds
-
-**Solutions:**
-1. Use `@agentname` to explicitly invoke agent
-2. Check agent `description` field is clear and specific
-3. Verify agent `tools` array includes necessary tools
-4. Review agent's capability keywords
-
-### Context Not Preserved
-
-**Problem:** Agent loses context when handing off
-
-**Solutions:**
-1. Use Orchestrator for multi-step workflows
-2. Explicitly mention critical details (Jira URLs, environment)
-3. Attach files/selections as context before starting
-4. Use "Continue in" feature to preserve context
-
-### Background Agent Conflicts
-
-**Problem:** Multiple agents modifying same files
-
-**Solutions:**
-1. Use Git worktrees (checkbox when creating background agent)
-2. Ensure agents output to different file paths
-3. Review changes before merging worktrees
-
-## 📚 Examples & Use Cases
-
-### Example 1: Sprint Automation
-
-**Goal:** Automate all testing for sprint 23
-
-```
-@orchestrator I need to automate testing for all tickets in sprint 23. 
-Please generate test cases and Playwright automation for each ticket. 
-Run in background with Git worktrees.
-```
-
-**What happens:**
-1. Orchestrator fetches all tickets in sprint 23
-2. Creates separate background agent for each ticket
-3. Each agent runs: TestGenie → ScriptGenerator pipeline
-4. Agents run in isolated worktrees (no conflicts)
-5. You receive summary when all complete
-
-### Example 2: Bug Triage Workflow
-
-**Goal:** Test failed, need to log defect
-
-```
-Test execution results:
-- Test: Property Search Filters
-- Status: FAILED
-- Error: Expected 10 results, got 0
-- Environment: UAT Canopy
-
-@buggenie Create bug ticket for this failure
-```
-
-**What happens:**
-1. BugGenie generates formatted review copy
-2. You review and confirm
-3. BugGenie creates Jira ticket with proper formatting
-4. Option to create linked Testing task
-
-### Example 3: Rapid Test Conversion
-
-**Goal:** Convert manual test document to automation
-
-```
-@scriptgenerator Convert all test cases in tests/manual/property-search.md 
-to Playwright automation. Use existing page objects and framework.
-```
-
-**What happens:**
-1. ScriptGenerator reads manual test document
-2. Explores existing framework components
-3. Generates Playwright specs for each test case
-4. Enriches page objects with new selectors
-5. Saves tests to appropriate location
-6. Runs tests to validate
-
-## 🎓 Best Practices
-
-1. **Start with Individual Agents:** Get familiar with each agent's capabilities
-2. **Use Orchestrator for Workflows:** Let orchestrator handle multi-step processes
-3. **Review Before Proceeding:** Always review generated content before next step
-4. **Use Background for Long Tasks:** Don't block your work on long-running operations
-5. **Leverage Git Worktrees:** Essential for parallel agent execution
-6. **Monitor Sessions:** Keep eye on agent progress in Chat view
-7. **Archive Completed Sessions:** Keep sessions list manageable
-8. **Explicit Agent Invocation:** Use `@agentname` when you want specific agent
-
-## 🔗 Additional Resources
-
-- [VS Code 1.107 Release Notes](https://code.visualstudio.com/updates/v1_107)
-- [Using Agents in VS Code](https://code.visualstudio.com/docs/copilot/agents/overview)
-- [Background Agents Guide](https://code.visualstudio.com/docs/copilot/agents/background-agents)
-- [Custom Agents Documentation](https://code.visualstudio.com/docs/copilot/customization/custom-agents)
-
-## 📞 Support
-
-For issues or questions:
-1. Check this README
-2. Review agent-specific `.agent.md` files in `.github/agents/`
-3. Check VS Code Output panel (Copilot Chat logs)
-4. Review existing `.github/chatmodes/README.md` for workflow diagrams
+For the broader repository overview, setup, SDK pipeline, dashboard, and platform architecture, see [README.md](../../README.md).
 
 ---
 
-**Ready to automate your QA workflows?** Try the Quick Start examples above! 🚀
+## What Lives Here
+
+This folder provides:
+
+- Agent definitions under [.github/agents](.)
+- Shared orchestration utilities under [.github/agents/lib](lib)
+- Agent usage notes under [.github/agents/docs](docs)
+
+The agent system is designed for VS Code custom-agent workflows, not as a standalone runtime by itself.
+
+---
+
+## Agent Inventory
+
+The workspace currently includes eight agent definitions.
+
+### Core QA Agents
+
+| Agent | Invoke | Role | Typical Output |
+|---|---|---|---|
+| Orchestrator | `@orchestrator` | Coordinates the QA workflow and delegates to the right agent | End-to-end pipeline progress and artifacts |
+| TestGenie | `@testgenie` | Generates manual test cases from Jira tickets | Chat markdown tables and Excel test cases |
+| ScriptGenerator | `@scriptgenerator` | Generates Playwright automation using MCP-first exploration | `.spec.js` automation scripts |
+| BugGenie | `@buggenie` | Turns failed execution context into structured Jira bug reports | Review copy and Jira defect tickets |
+| TaskGenie | `@taskgenie` | Creates linked Jira Testing tasks and can embed test cases | Jira Testing tasks |
+| CodeReviewer | `@codereviewer` | Reviews generated scripts for quality, standards, and reuse | Review findings and suggested fixes |
+
+### Utility Agents
+
+| Agent | Invoke | Role | Typical Output |
+|---|---|---|---|
+| FileGenie | `@filegenie` | Filesystem and document-focused operations | File summaries, file operations, document assistance |
+| DocGenie | `@docgenie` | Document and presentation generation workflows | Reports, presentations, export artifacts |
+
+Terminology used in this workspace:
+
+- Test cases means manual QA steps produced by TestGenie.
+- Automation scripts means Playwright `.spec.js` files produced by ScriptGenerator.
+- Core QA agents participate directly in the testing workflow.
+- Utility agents are available in the workspace but are not the default path for the QA pipeline.
+
+---
+
+## Project Structure
+
+```text
+.github/agents/
+├── README.md
+├── orchestrator.agent.md
+├── testgenie.agent.md
+├── scriptgenerator.agent.md
+├── buggenie.agent.md
+├── taskgenie.agent.md
+├── codereviewer.agent.md
+├── filegenie.agent.md
+├── docgenie.instructions.md
+├── lib/
+│   ├── index.js
+│   ├── workflow-coordinator.js
+│   ├── workflow-enforcer.js
+│   ├── workflow-preflight.js
+│   ├── workflow-recovery.js
+│   ├── quality-gates.js
+│   ├── error-analyzer.js
+│   └── test-iteration-engine.js
+└── docs/
+    ├── AGENT_PROTOCOL.md
+    ├── QUICKREF.md
+    ├── TROUBLESHOOTING.md
+    └── WORKFLOWS.md
+```
+
+---
+
+## How to Invoke Agents
+
+Invoke agents explicitly in Copilot Chat with lowercase names:
+
+```text
+@orchestrator Process Jira ticket AOTF-16339 in UAT
+```
+
+```text
+@testgenie Generate test cases for AOTF-16339
+```
+
+```text
+@scriptgenerator Create automation for AOTF-16339 using the existing framework
+```
+
+```text
+@buggenie Create a bug ticket for the latest failure in AOTF-16339
+```
+
+```text
+@taskgenie Create a linked testing task for AOTF-16339
+```
+
+```text
+@codereviewer Review tests/specs/aotf-16339/AOTF-16339.spec.js
+```
+
+```text
+@filegenie Summarize the latest report files in test-results
+```
+
+```text
+@docgenie Create a summary presentation from the latest QA artifacts
+```
+
+---
+
+## How the QA Workflow Fits Together
+
+The main QA flow is sequential even though the workspace contains multiple agents.
+
+### Primary Workflow
+
+1. Orchestrator accepts the request and decides whether the full pipeline is needed.
+2. TestGenie generates manual test cases from Jira details.
+3. ScriptGenerator performs live MCP exploration before generating automation.
+4. The generated script is executed in the Playwright framework.
+5. If execution fails, the SDK workflow can attempt self-healing.
+6. BugGenie creates a defect when failures remain.
+7. TaskGenie can create linked Testing tasks when needed.
+
+### Review Workflow
+
+CodeReviewer is typically used after script generation when you want standards validation or maintainability feedback.
+
+### Utility Workflow
+
+FileGenie and DocGenie are optional support tools and are not the core path for ticket-to-automation execution.
+
+---
+
+## What Each Core Agent Is Responsible For
+
+### Orchestrator
+
+- Routes work across agents
+- Coordinates multi-step workflows
+- Keeps the workflow aligned with the intended stage order
+- Best entry point when the user wants the full QA process handled in one request
+
+### TestGenie
+
+- Reads Jira ticket context
+- Generates manual test cases
+- Produces markdown tables in chat and Excel outputs through the workflow scripts
+- Best entry point when coverage design is needed before automation
+
+### ScriptGenerator
+
+- Explores the live application before writing code
+- Uses MCP data rather than guessed selectors
+- Generates Playwright `.spec.js` files that follow the framework pattern
+- Best entry point when automation needs to be generated from validated exploration
+
+### BugGenie
+
+- Analyzes failed run context
+- Produces review-ready defect content before Jira creation
+- Creates or updates bug tickets based on execution outcomes
+- Best entry point when failures should become structured issues
+
+### TaskGenie
+
+- Creates linked Jira Testing tasks
+- Supports assignment to the current user
+- Can include embedded test case content when appropriate
+- Best entry point when delivery needs trackable testing work items
+
+### CodeReviewer
+
+- Reviews generated scripts against framework expectations
+- Checks for reuse opportunities, selector quality, and pattern compliance
+- Best entry point when a script should be validated before merge or reuse
+
+---
+
+## VS Code Expectations
+
+To use these agents successfully:
+
+1. Open the repository root in VS Code.
+2. Use VS Code 1.107 or later.
+3. Install GitHub Copilot and GitHub Copilot Chat.
+4. Make sure the workspace-level configuration is loaded.
+5. Configure [agentic-workflow/.env](../../agentic-workflow/.env) for Jira and environment access if you want the full QA workflow.
+
+---
+
+## Relationship to the SDK Pipeline
+
+These agents are the conversational layer.
+
+The SDK pipeline in [agentic-workflow/sdk-orchestrator](../../agentic-workflow/sdk-orchestrator) is the programmatic layer used for:
+
+- Batch execution
+- CI-style runs
+- Retry and healing logic
+- API and SSE integration for the dashboard
+
+If you want reproducible command-driven execution, use the CLI documented in [agentic-workflow/docs/SDK_ORCHESTRATION.md](../../agentic-workflow/docs/SDK_ORCHESTRATION.md).
+
+---
+
+## Supporting Files
+
+Useful companion docs in this folder:
+
+- [docs/WORKFLOWS.md](docs/WORKFLOWS.md)
+- [docs/AGENT_PROTOCOL.md](docs/AGENT_PROTOCOL.md)
+- [docs/QUICKREF.md](docs/QUICKREF.md)
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
+
+Useful broader references:
+
+- [../../README.md](../../README.md)
+- [../../.github/copilot-instructions.md](../../.github/copilot-instructions.md)
+- [../../agentic-workflow/docs/WORKFLOW_OVERVIEW.md](../../agentic-workflow/docs/WORKFLOW_OVERVIEW.md)
+- [../../agentic-workflow/docs/SDK_ORCHESTRATION.md](../../agentic-workflow/docs/SDK_ORCHESTRATION.md)
+- [../../agentic-workflow/docs/AUTOMATION_STANDARDS.md](../../agentic-workflow/docs/AUTOMATION_STANDARDS.md)
+
+---
+
+## Troubleshooting
+
+### Agent Does Not Appear in Chat
+
+Check:
+
+1. The file exists in [.github/agents](.).
+2. VS Code is new enough to support custom agent workflows.
+3. Copilot Chat is enabled and signed in.
+
+### Wrong Agent Is Being Used
+
+Use explicit invocation with `@agentname` rather than relying on inference.
+
+### Multi-Step Work Loses Context
+
+Start with Orchestrator when the task spans more than one stage.
+
+### Script Generation Quality Is Poor
+
+Check that:
+
+1. MCP exploration can reach the target environment.
+2. Grounding is configured in [../../agentic-workflow/config/grounding-config.json](../../agentic-workflow/config/grounding-config.json).
+3. The Playwright framework and test data are current.
+
+For broader platform troubleshooting, see [../../README.md](../../README.md) and [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).

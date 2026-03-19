@@ -65,6 +65,10 @@ in parallel using background agents
 | Generate test cases from Jira | TestGenie | `@testgenie` |
 | Create Playwright automation | ScriptGenerator | `@scriptgenerator` |
 | Create bug/defect ticket | BugGenie | `@buggenie` |
+| Create linked Jira Testing task | TaskGenie | `@taskgenie` |
+| Review generated automation | CodeReviewer | `@codereviewer` |
+| File and document operations | FileGenie | `@filegenie` |
+| Report and document generation | DocGenie | `@docgenie` |
 | Multi-step workflow | Orchestrator | `@orchestrator` |
 | Ask about capabilities | Any | `What subagents can you use?` |
 
@@ -87,7 +91,7 @@ Pass         Fail
   │           ↓
 Done    [BugGenie] → Jira Defect Ticket
               ↓
-        [Optional: Testing Task]
+    [TaskGenie] → Linked Testing Task
               ↓
         [TestGenie] → Test Cases for Testing Task
 ```
@@ -223,7 +227,7 @@ Test failed 3 times → Check pass rate:
 5. **Context Attachment:** Right-click code → "Add to Chat" for better context
 6. **Monitor Progress:** Keep Chat panel open to monitor background agents
 7. **Archive Sessions:** Keep sessions list clean by archiving completed work
-8. **Jira Policy:** Agents READ from Jira, but NEVER add comments - all updates shown in chat
+8. **Jira Policy:** Agents can read Jira data, create new issues, and update supported Jira fields where the workflow permits
 
 ---
 
@@ -231,24 +235,25 @@ Test failed 3 times → Check pass rate:
 
 **What Agents CAN Do:**
 - ✅ Fetch and read Jira ticket details
-- ✅ Create NEW bug tickets (BugGenie only)
+- ✅ Create new bug tickets and testing tasks
+- ✅ Update supported Jira fields and existing issues where the workflow allows
 - ✅ Display information in chat
 
 **What Agents CANNOT Do:**
-- ❌ Add comments to existing Jira tickets
-- ❌ Update existing ticket fields
-- ❌ Post automation results directly to Jira
+- ❌ Perform unrestricted Jira changes outside the workflow rules
+- ❌ Bypass the review step where the agent requires user confirmation
+- ❌ Replace human review for sensitive production issue handling
 
 **Why:** 
-- Keeps Jira clean and controlled
-- Users review before posting
-- Prevents automated spam/noise
+- Keeps Jira changes controlled
+- Preserves user review where required
+- Prevents noisy or low-quality updates
 - Maintains ticket quality
 
 **How to Update Jira:**
-1. Agent shows results in chat
-2. User reviews the output
-3. User manually adds to Jira if needed
+1. Invoke the appropriate agent for the workflow
+2. Review the output if the workflow includes a confirmation step
+3. Let the agent create or update the issue through the approved path
 
 ---
 

@@ -19,6 +19,8 @@ export const API_CONFIG = {
         pipelineForceCancel: (runId) => `/api/pipeline/force-cancel/${runId}`,
         pipelineRuns: '/api/pipeline/runs',
         pipelineStatus: (runId) => `/api/pipeline/status/${runId}`,
+        pipelineEvidenceSummary: (runId) => `/api/pipeline/evidence-summary/${runId}`,
+        pipelineArtifact: '/api/pipeline/artifact',
         pipelineStream: (runId) => `/api/pipeline/stream/${runId}`,
         pipelineStreamGlobal: '/api/pipeline/stream',
 
@@ -37,6 +39,8 @@ export const API_CONFIG = {
         filesystemBrowse: '/api/filesystem/browse',
         filesystemQuickAccess: '/api/filesystem/quick-access',
         filesystemPickDirectory: '/api/filesystem/pick-directory',
+        filesystemOpenFile: '/api/filesystem/open-file',
+        filesystemOpenFolder: '/api/filesystem/open-folder',
 
         // Reports (per-execution Playwright test results)
         reports: '/api/reports',
