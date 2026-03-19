@@ -22,16 +22,26 @@ This document defines the standardized communication protocol between agents in 
 ### Agent Hierarchy
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     ORCHESTRATOR                            │
-│           (Workflow Coordinator & Router)                   │
-└────────────────┬────────────────┬────────────────┬─────────┘
-                 │                │                │
-         ┌───────▼───────┐ ┌──────▼──────┐ ┌──────▼──────┐
-         │   TESTGENIE   │ │SCRIPTGENERATOR│ │  BUGGENIE   │
-         │ Test Case Gen │ │ Automation Gen│ │  Bug Report │
-         └───────────────┘ └──────────────┘ └─────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                           ORCHESTRATOR                             │
+│                    (Workflow Coordinator & Router)                 │
+└───────────────┬────────────────────┬────────────────────┬──────────┘
+        │                    │                    │
+    ┌───────▼───────┐    ┌──────▼─────────┐   ┌──────▼───────┐
+    │   TESTGENIE   │    │ SCRIPTGENERATOR │   │   BUGGENIE   │
+    │ Manual Cases  │    │ Automation Gen  │   │  Bug Report  │
+    └───────┬───────┘    └──────┬─────────┘   └──────┬───────┘
+        │                   │                    │
+    ┌───────▼───────┐    ┌──────▼─────────┐   ┌──────▼───────┐
+    │   TASKGENIE   │    │ CODEREVIEWER   │   │ Utility Agents│
+    │ Testing Tasks │    │ Script Review  │   │ File/Doc Ops  │
+    └───────────────┘    └────────────────┘   └───────────────┘
 ```
+
+Protocol note:
+
+- The message contract below documents the core QA workflow.
+- FileGenie and DocGenie are utility agents and are not part of the default stage chain.
 
 ### Communication Flow
 
@@ -173,7 +183,7 @@ const ErrorCode = {
     E2003: { type: 'EXCEL_CREATION_FAILED', recoverable: true,
              fix: 'Verify test-cases/ directory is writable' },
     E2004: { type: 'SCRIPT_EXPLORATION_FAILED', recoverable: true,
-             fix: 'Check UAT environment and Playwright MCP' },
+             fix: 'Check UAT environment and unified MCP connectivity' },
     E2005: { type: 'SCRIPT_GENERATION_FAILED', recoverable: true,
              fix: 'Verify test structure and framework patterns' },
     E2006: { type: 'SCRIPT_EXECUTION_FAILED', recoverable: true,
@@ -400,7 +410,7 @@ const RecoveryActions = {
     },
     
     RE_EXPLORE: {
-        description: 'Re-explore with Playwright MCP',
+        description: 'Re-explore with unified MCP browser tooling',
         strategy: 'fresh_exploration',
         timeout: 180000  // ms
     },

@@ -320,6 +320,8 @@ if (workflow) {
 | `search_project_context` | Search the codebase for relevant page objects, business functions, utilities. Use when you need to understand how a feature is implemented. |
 | `get_feature_map` | Get details about a specific feature (pages, page objects, keywords). Use when generating test cases for a feature you're unfamiliar with. |
 | `check_existing_coverage` | Check if automation scripts already exist for a feature/ticket. Use BEFORE generating test cases to avoid duplication. |
+| `search_knowledge_base` | Search Confluence / KB for requirements, business rules, user stories, and supporting feature context when the Jira ticket is incomplete or ambiguous. |
+| `get_knowledge_base_page` | Fetch the full content of the most relevant KB page when search results indicate there is important detail not present in Jira. |
 
 ### Grounding Workflow for Test Case Generation
 
@@ -329,7 +331,27 @@ if (workflow) {
    - What keywords are associated with the feature
 2. If the feature name is unclear, call `search_project_context` with keywords from the ticket
 3. Call `check_existing_coverage` to see if test cases already exist for this ticket/feature
-4. Use domain terminology from grounding context (auto-injected in your system prompt) when writing test steps — e.g., if the ticket says "EMC", you already know it means "Estimated Monthly Cost"
+4. If the Jira summary, description, or acceptance criteria are sparse, ambiguous, or clearly insufficient for good coverage, call `search_knowledge_base` using the feature name plus terms like `acceptance criteria`, `requirements`, `user story`, or `business rules`
+5. If the KB search returns a strong match, call `get_knowledge_base_page` for the top result and use that content to expand coverage without contradicting Jira
+6. Use domain terminology from grounding context (auto-injected in your system prompt) when writing test steps — e.g., if the ticket says "EMC", you already know it means "Estimated Monthly Cost"
+
+### Sparse Jira Ticket Fallback (MANDATORY)
+
+When Jira details are weak, you MUST enrich your understanding before finalizing the test cases.
+
+Treat the ticket as sparse when one or more of these is true:
+- The description is missing or very short
+- Acceptance criteria are missing, vague, or clearly incomplete for the feature complexity
+- The summary names a feature but the ticket does not explain the user flow, business rule, or expected behavior
+
+In that case, do this sequence:
+1. Fetch the Jira ticket
+2. Extract feature terms from the summary, labels, components, and acceptance criteria
+3. Search the knowledge base using those terms plus `requirements`, `acceptance criteria`, `user story`, or `business rules`
+4. Open the top KB page if needed for detail
+5. Expand test coverage using KB details that are consistent with Jira
+
+Never invent new product behavior when both Jira and KB are silent. Use KB to fill gaps, not to override the ticket.
 
 ### What You Get Automatically (No Tool Call Needed)
 

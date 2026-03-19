@@ -302,6 +302,10 @@ class KnowledgeBaseConnector {
      * title relevance, and recency signals. This is a deterministic CoT-style
      * reasoning chain (zero LLM calls) that improves context quality.
      *
+     * Supports both call styles for backward compatibility:
+     *   buildKBContext(agentName, taskDescription, options)
+     *   buildKBContext(taskDescription, options)
+     *
      * @param {string} agentName - Agent role
      * @param {string} taskDescription - Current task description
      * @param {Object} [options]
@@ -309,6 +313,12 @@ class KnowledgeBaseConnector {
      * @returns {Promise<string>} Formatted context string, or empty string if no results
      */
     async buildKBContext(agentName, taskDescription, options = {}) {
+        if (typeof taskDescription !== 'string') {
+            options = taskDescription && typeof taskDescription === 'object' ? taskDescription : {};
+            taskDescription = agentName;
+            agentName = options.agentName || 'default';
+        }
+
         if (!taskDescription || !this._initialized) return '';
 
         const maxChars = options.maxChars || this._maxContextChars;

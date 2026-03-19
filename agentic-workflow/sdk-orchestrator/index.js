@@ -335,6 +335,10 @@ class SDKOrchestrator {
         return this.pipelineRunner.run(ticketId, {
             mode,
             runId: options.runId || undefined,
+            contextRunId: options.contextRunId || undefined,
+            scenario: options.scenario || null,
+            scenarioId: options.scenarioId || options.scenario?.id || null,
+            authState: options.authState || options.scenario?.authState || null,
             onProgress: options.onProgress || this._defaultProgressHandler.bind(this),
         });
     }

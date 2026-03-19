@@ -312,7 +312,11 @@ class GroundingStore {
         if (!this._kbConnector) return '';
 
         try {
-            return await this._kbConnector.buildKBContext(query, options);
+            return await this._kbConnector.buildKBContext(
+                options.agentName || 'default',
+                query,
+                options
+            );
         } catch (error) {
             this._log(`⚠ KB context build failed: ${error.message}`);
             return '';

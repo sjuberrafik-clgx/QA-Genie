@@ -2,7 +2,12 @@
 
 ## 🎯 Overview
 
-This document provides visual workflow diagrams for the multi-agent orchestration setup, suitable for presentations and documentation.
+This document provides visual workflow diagrams for the multi-agent orchestration setup.
+
+Agent categories used in this workspace:
+
+- Core QA agents: Orchestrator, TestGenie, ScriptGenerator, BugGenie, TaskGenie, CodeReviewer
+- Utility agents: FileGenie, DocGenie
 
 ---
 
@@ -15,25 +20,30 @@ This document provides visual workflow diagrams for the multi-agent orchestratio
 └────────────────────┬────────────────────────────────────────┘
                      │
                      ▼
-         ┌───────────────────────┐
-         │   QA Orchestrator     │
-         │  (Master Controller)  │
-         └─────┬─────┬─────┬─────┘
-               │     │     │
-       ┌───────┘     │     └───────┐
-       ▼             ▼             ▼
-┌──────────┐  ┌──────────┐  ┌──────────┐
-│TestGenie │  │ Script   │  │ BugGenie │
-│          │  │Generator │  │          │
-│Jira→Test │  │Manual→   │  │Test→     │
-│Cases     │  │Playwright│  │Jira Bug  │
-└────┬─────┘  └────┬─────┘  └────┬─────┘
-     │             │             │
-     ├─────────────┼─────────────┤
-     │      Atlassian MCP        │
-     │    Playwright MCP         │
-     │    VS Code Tools          │
-     └───────────────────────────┘
+           ┌───────────────────────┐
+           │   QA Orchestrator     │
+           │  (Master Controller)  │
+           └─────┬─────┬─────┬─────┘
+                     │     │     │
+         ┌───────┘     │     └───────────────┐
+         ▼             ▼                     ▼
+┌──────────┐  ┌──────────┐          ┌──────────┐
+│TestGenie │  │ Script   │          │ BugGenie │
+│Jira→Test │  │Generator │          │Fail→Bug  │
+│Cases     │  │MCP→Spec  │          │Workflow  │
+└────┬─────┘  └────┬─────┘          └────┬─────┘
+       │             │                     │
+       ▼             ▼                     ▼
+┌──────────┐  ┌──────────┐          ┌──────────┐
+│TaskGenie │  │CodeReview│          │ Dashboard│
+│Testing   │  │Script QA │          │Artifacts │
+│Tasks     │  │Feedback  │          │and Status│
+└────┬─────┘  └────┬─────┘          └────┬─────┘
+       │             │                     │
+       ├─────────────┼─────────────────────┤
+       │ Atlassian MCP / Unified MCP / VS  │
+       │ Code Tools / SDK Orchestration    │
+       └───────────────────────────────────┘
 ```
 
 ---
@@ -99,6 +109,11 @@ This document provides visual workflow diagrams for the multi-agent orchestratio
           │    Created       │   Linked to AOTF-1234
           └──────────────────┘
 ```
+
+Optional follow-on stages:
+
+- TaskGenie creates linked Testing tasks for tracking and assignment.
+- CodeReviewer validates generated automation when a review pass is requested.
 
 ---
 
@@ -202,7 +217,7 @@ This document provides visual workflow diagrams for the multi-agent orchestratio
          ▼
 ┌─────────────────┐
 │  Optional:      │ → "Create testing task?"
-│ Testing Task    │   
+│   TaskGenie     │
 └────────┬────────┘   If yes:
          │            Create AOTF-5679
          ▼            "Testing - Search Returns No Results"

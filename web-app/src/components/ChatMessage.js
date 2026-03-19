@@ -20,8 +20,12 @@ function ChatMessage({ message, isStreaming = false }) {
     const isUser = role === 'user';
     const [copied, setCopied] = useState(false);
     const [expandedImage, setExpandedImage] = useState(null);
-    const imageAttachments = Array.isArray(attachments) ? attachments.filter(att => att.kind !== 'document' && att.kind !== 'video') : [];
-    const documentAttachments = Array.isArray(attachments) ? attachments.filter(att => att.kind === 'document') : [];
+    const imageAttachments = Array.isArray(attachments)
+        ? attachments.filter(att => att.kind === 'image' || (att.dataUrl && att.kind !== 'document' && att.kind !== 'artifact' && att.kind !== 'video'))
+        : [];
+    const documentAttachments = Array.isArray(attachments)
+        ? attachments.filter(att => att.kind === 'document' || att.kind === 'artifact')
+        : [];
 
     if (!isUser && !isStreaming && (!content || !content.trim()) && (!attachments || attachments.length === 0)) {
         return null;
@@ -165,6 +169,14 @@ function ChatMessage({ message, isStreaming = false }) {
                                         className="max-w-[240px] max-h-[180px] object-cover"
                                     />
                                 </button>
+                            ))}
+                        </div>
+                    )}
+
+                    {!isUser && documentAttachments.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                            {documentAttachments.map((att, idx) => (
+                                <FileAttachmentCard key={att.id || `assistant-doc-${idx}`} attachment={att} />
                             ))}
                         </div>
                     )}

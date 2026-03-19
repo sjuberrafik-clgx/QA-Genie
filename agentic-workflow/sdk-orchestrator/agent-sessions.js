@@ -295,11 +295,23 @@ class AgentSessionFactory {
 
         // 4. Get role-specific enforcement hooks
         const hooks = isCognitive
-            ? createCognitiveEnforcementHooks(agentName, { verbose: this.verbose })
+            ? createCognitiveEnforcementHooks(agentName, {
+                verbose: this.verbose,
+                runId: context.runId || null,
+                ticketId: context.ticketId || null,
+                scenarioId: context.scenarioId || null,
+                authState: context.authState || null,
+                contextStore: context.contextStore || null,
+            })
             : createEnforcementHooks(agentName, {
                 config: this.config,
                 learningStore: this.learningStore,
                 groundingStore: gStore || null,
+                runId: context.runId || null,
+                ticketId: context.ticketId || null,
+                scenarioId: context.scenarioId || null,
+                authState: context.authState || null,
+                contextStore: context.contextStore || null,
                 verbose: this.verbose,
             });
 

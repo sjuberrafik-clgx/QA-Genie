@@ -504,6 +504,9 @@ class CognitiveScriptGenerator {
             // Create focused session — NO MCP tools
             const sessionInfo = await this.sessionFactory.createAgentSession('cognitive-analyst', {
                 ticketId: context.ticketId,
+                runId: context.runId,
+                scenarioId: context.scenarioId || null,
+                authState: context.authState || null,
                 taskDescription: 'Analyze test cases and create exploration plan',
                 systemPromptOverride: phases.analyst.buildAnalystSystemPrompt(),
                 disableMCP: true, // No MCP tools for Analyst
@@ -578,6 +581,9 @@ class CognitiveScriptGenerator {
             // Create session with explorer-specific MCP profile
             const sessionInfo = await this.sessionFactory.createAgentSession('cognitive-explorer-nav', {
                 ticketId: context.ticketId,
+                runId: context.runId,
+                scenarioId: context.scenarioId || null,
+                authState: context.authState || null,
                 taskDescription: 'Explore application following the analysis plan',
                 systemPromptOverride: phases.explorer.buildExplorerSystemPrompt(),
                 toolProfile: 'explorer-nav',
@@ -656,6 +662,9 @@ class CognitiveScriptGenerator {
             // Create session — NO MCP tools, only file write capability
             const sessionInfo = await this.sessionFactory.createAgentSession('cognitive-coder', {
                 ticketId: context.ticketId,
+                runId: context.runId,
+                scenarioId: context.scenarioId || null,
+                authState: context.authState || null,
                 taskDescription: retryOptions.reviewFixes
                     ? 'Fix script based on reviewer feedback'
                     : retryOptions.brokenSelectors
@@ -745,6 +754,9 @@ class CognitiveScriptGenerator {
 
             const sessionInfo = await this.sessionFactory.createAgentSession('cognitive-reviewer', {
                 ticketId: context.ticketId,
+                runId: context.runId,
+                scenarioId: context.scenarioId || null,
+                authState: context.authState || null,
                 taskDescription: 'Review generated Playwright script',
                 systemPromptOverride: phases.reviewer.buildReviewerSystemPrompt(),
                 disableMCP: true,
@@ -823,6 +835,9 @@ class CognitiveScriptGenerator {
 
             const sessionInfo = await this.sessionFactory.createAgentSession('cognitive-dryrun', {
                 ticketId: context.ticketId,
+                runId: context.runId,
+                scenarioId: context.scenarioId || null,
+                authState: context.authState || null,
                 taskDescription: 'Verify selectors on live page',
                 systemPromptOverride: phases.dryrun.buildDryRunSystemPrompt(),
                 toolProfile: 'dryrun',
