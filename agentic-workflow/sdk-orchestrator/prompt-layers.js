@@ -192,7 +192,8 @@ function buildJiraLayer() {
 
 ### Jira Interaction Policy
 - Agents may READ, CREATE, and UPDATE Jira tickets
-- When creating Testing tasks: call \`get_jira_current_user\` for accountId, use \`linkedIssueKey\` for linking, use \`assigneeAccountId\` for assignment
+- When creating Testing tasks: use \`linkedIssueKey\` for related linked tasks, use \`parentIssueKey\` for true subtasks, call \`get_jira_current_user\` for self-assignment, call \`search_jira_users\` for named-user assignment, and use \`assigneeAccountId\` for assignment
+- When removing an associated Jira link, use \`remove_jira_issue_link\` with \`ticketId\` + \`relatedIssueKey\` or an explicit \`linkId\`
 - **Always display Jira URLs as clickable markdown hyperlinks** using \`[text](url)\` format
 - Don't truncate Jira ticket information — list ALL fields individually, never summarize as "specified fields"
 - Jira project key and cloud ID configured in \`agentic-workflow/.env\`
@@ -276,24 +277,51 @@ function buildDocumentLayer() {
 ## Document Generation
 
 You have access to 4 document generation tools:
-- **generate_pptx** — PowerPoint with flexible slides[] (11 slide types)
+- **generate_pptx** — PowerPoint with flexible slides[] (28 slide types)
 - **generate_docx** — Word document with flexible sections[] (10 section types)
 - **generate_pdf** — PDF with flexible sections[] (same as DOCX)
 - **generate_excel_report** — Excel with flexible sheets[] (5 content types)
+
+### Attachment-Driven Workflow
+- If the user uploaded a workbook, deck, PDF, or other document, call list_session_documents first.
+- For workbook-driven presentations, call parse_session_document before you design the slide sequence.
+- Treat uploaded documents as the source of truth for structure and terminology. Do not improvise from filenames alone.
+
+### PPTX Slide Catalog
+- Narrative: title, content, bullets, quote, section-break, closing
+- Comparison and structure: two-column, comparison, summary, agenda, team-profiles
+- Process and flow: timeline, process-flow, roadmap, funnel, swot, matrix-quadrant, pyramid
+- Visual and data: table, chart, image, hero-image, diagram, stats-dashboard, data-story, icon-grid, infographic
+
+### PPTX Field Conventions
+- comparison: use leftTitle/rightTitle plus leftItems/rightItems or leftContent/rightContent
+- two-column: optional leftTitle/rightTitle; body content can be leftContent/rightContent or leftItems/rightItems
+- summary: use metrics plus highlights, summaryPoints, or bullets
+- table: prefer tableData.headers and tableData.rows; top-level headers and rows are also accepted
+- diagram: provide mermaidCode, diagramImage, or imagePath
 
 ### Design Themes
 modern-blue (default), dark-professional, corporate-green, warm-minimal
 
 ### Workflow
-1. Analyze user's request → determine format and structure
-2. Construct JSON array (slides/sections/sheets) with rich content
-3. Call the appropriate generate_* tool with the JSON string
-4. Report result (file path, size, summary)
+1. Analyze the request → audience, objective, narrative arc, and best format
+2. Build a brief internal outline before writing JSON → slide count, theme, section order, and where visuals should appear
+3. Choose semantic slide types instead of defaulting to content/bullets for everything
+4. Construct the JSON array (slides/sections/sheets) with source-backed content
+5. Call the appropriate generate_* tool with the JSON string
+6. If the generator returns validation warnings, correct the structure instead of shipping the first draft
+
+### Slide Selection Heuristics
+- Use timeline for milestones, process-flow for ordered steps, roadmap for phased delivery, and funnel for staged narrowing
+- Use comparison for side-by-side current vs future or option A vs option B content
+- Use stats-dashboard for 3-6 KPIs, data-story for one key insight with narrative, and summary for metrics plus takeaways
+- Alternate dense text slides with visual/process slides so the deck does not become a wall of text
 
 ### Rules
 - Context-driven design — structure flows from content, not templates
-- Balance content types — mix headings, paragraphs, tables, bullets
+- Balance content types — mix narrative, comparison, data, and process slides
 - Use heading levels for hierarchy (1–3)
+- Do not generate empty panels. Comparison, two-column, summary, chart, table, and diagram slides must include the fields their layout needs.
 - Presentations: aim for 8–15 slides
 - All JSON arrays must be passed as string parameters
 `.trim();

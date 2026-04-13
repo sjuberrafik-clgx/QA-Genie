@@ -26,11 +26,16 @@
 const fs = require('fs');
 const path = require('path');
 const { resolveTheme, TYPOGRAPHY, getOutputDir, generateFileName } = require('./doc-design-system');
+const { renderForHybridOutput, cleanupBrowser } = require('./shared/diagram-engine');
 
 // ─── HTML Section Renderers ─────────────────────────────────────────────────
 
 function esc(text) {
     return String(text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function toBase64DataUri(content, mimeType) {
+    return `data:${mimeType};base64,${Buffer.from(String(content || ''), 'utf8').toString('base64')}`;
 }
 
 function renderCover(section) {
@@ -199,10 +204,36 @@ function renderChart(section, chartIndex) {
 </div>`;
 }
 
-function renderDiagram(section) {
-    const code = esc(section.mermaidCode || section.code || '');
-    if (!code) return '<p class="text-secondary italic">[Diagram: No Mermaid code provided]</p>';
-    return `<div class="mermaid mb-6">${section.mermaidCode || section.code || ''}</div>`;
+async function renderDiagram(section, theme, diagramIndex) {
+    const mermaidCode = section.mermaidCode || section.code || '';
+    if (!mermaidCode) return '<p class="text-secondary italic">[Diagram: No Mermaid code provided]</p>';
+
+    const title = section.title ? `<h4 class="text-lg font-semibold mb-2">${esc(section.title)}</h4>` : '';
+    const caption = section.caption ? `<p class="diagram-caption text-sm text-secondary mt-3">${esc(section.caption)}</p>` : '';
+    const themeName = section.theme || theme?._name || 'modern-blue';
+    const outputName = section.outputName || `html-diagram-${diagramIndex}`;
+
+    let fallbackMarkup = '<p class="text-secondary italic">[Diagram fallback unavailable]</p>';
+    const renderResult = await renderForHybridOutput({
+        mermaidCode,
+        theme: themeName,
+        outputName,
+    });
+
+    if (renderResult.success && renderResult.svgContent) {
+        const svgDataUri = toBase64DataUri(renderResult.svgContent, 'image/svg+xml');
+        fallbackMarkup = `<img src="${svgDataUri}" alt="${esc(section.title || 'Mermaid diagram')}" loading="lazy" />`;
+    }
+
+    const liveCode = mermaidCode.replace(/<\/script/gi, '<\\/script');
+
+    return `${title}<section class="diagram-block mb-6" data-diagram-block="true">
+    <div class="diagram-fallback" data-diagram-fallback="true">${fallbackMarkup}</div>
+    <div class="diagram-live" data-diagram-live="true">
+        <div class="mermaid">${liveCode}</div>
+    </div>
+    ${caption}
+</section>`;
 }
 
 function renderInfographicPlaceholder(section) {
@@ -358,6 +389,44 @@ body {
     transition: background 0.2s;
 }
 .icon-btn:hover { background: var(--surface); }
+
+.diagram-block {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    border-radius: 14px;
+    padding: 1rem;
+}
+
+.diagram-fallback,
+.diagram-live {
+    width: 100%;
+}
+
+.diagram-fallback {
+    display: block;
+}
+
+.diagram-fallback img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.diagram-live {
+    display: none;
+}
+
+.diagram-block.diagram-rendered .diagram-live {
+    display: block;
+}
+
+.diagram-block.diagram-rendered .diagram-fallback {
+    display: none;
+}
+
+.diagram-caption {
+    text-align: center;
+}
 
 /* Utilities for content rendering */
 .text-body { color: var(--text); }
@@ -538,29 +607,42 @@ async function generateHtmlReport(options) {
     let bodyHtml = '';
     let inCollapsible = false;
 
-    for (const section of sections) {
-        // Collapsible wrapping for h1 sections
-        if (collapsible && section.type === 'heading' && section.level === 1) {
-            if (inCollapsible) bodyHtml += '</div>\n'; // close previous collapsible
-            const renderer = SECTION_RENDERERS[section.type];
-            const headingHtml = renderer ? renderer(section) : '';
-            bodyHtml += headingHtml.replace(/class="([^"]*)"/, 'class="$1 collapsible-toggle"');
-            bodyHtml += '<div class="collapsible-content">\n';
-            inCollapsible = true;
-            continue;
-        }
-
-        const renderer = SECTION_RENDERERS[section.type];
-        if (renderer) {
-            if (section.type === 'chart') {
-                bodyHtml += renderer(section, chartIndex++);
-            } else {
-                bodyHtml += renderer(section);
+    try {
+        for (const section of sections) {
+            // Collapsible wrapping for h1 sections
+            if (collapsible && section.type === 'heading' && section.level === 1) {
+                if (inCollapsible) bodyHtml += '</div>\n';
+                const renderer = SECTION_RENDERERS[section.type];
+                const headingHtml = renderer ? renderer(section) : '';
+                bodyHtml += headingHtml.replace(/class="([^"]*)"/, 'class="$1 collapsible-toggle"');
+                bodyHtml += '<div class="collapsible-content">\n';
+                inCollapsible = true;
+                continue;
             }
-        } else {
-            bodyHtml += `<p class="text-secondary italic mb-4">[Unknown section type: ${esc(section.type)}]</p>`;
+
+            const renderer = SECTION_RENDERERS[section.type];
+            if (renderer) {
+                let renderedSection;
+                if (section.type === 'chart') {
+                    renderedSection = renderer(section, chartIndex++);
+                } else if (section.type === 'diagram') {
+                    renderedSection = renderer(section, theme, chartIndex++);
+                } else {
+                    renderedSection = renderer(section);
+                }
+
+                bodyHtml += (renderedSection && typeof renderedSection.then === 'function')
+                    ? await renderedSection
+                    : renderedSection;
+            } else {
+                bodyHtml += `<p class="text-secondary italic mb-4">[Unknown section type: ${esc(section.type)}]</p>`;
+            }
+            bodyHtml += '\n';
         }
-        bodyHtml += '\n';
+    } finally {
+        if (hasMermaid) {
+            await cleanupBrowser().catch(() => { });
+        }
     }
 
     if (inCollapsible) bodyHtml += '</div>\n';
@@ -604,7 +686,27 @@ ${bodyHtml}
         </footer>
     </main>
 
-    ${hasMermaid ? '<script>mermaid.initialize({ startOnLoad: true, theme: "default" });</script>' : ''}
+    ${hasMermaid ? `<script>
+        document.addEventListener('DOMContentLoaded', async function() {
+            if (!window.mermaid) return;
+
+            const blocks = Array.from(document.querySelectorAll('[data-diagram-block="true"]'));
+            if (!blocks.length) return;
+
+            try {
+                mermaid.initialize({ startOnLoad: false, theme: "default" });
+                await mermaid.run({ querySelector: '.diagram-live .mermaid' });
+
+                blocks.forEach(function(block) {
+                    if (block.querySelector('.diagram-live svg')) {
+                        block.classList.add('diagram-rendered');
+                    }
+                });
+            } catch (error) {
+                console.warn('Mermaid runtime unavailable, using fallback diagrams.', error);
+            }
+        });
+    </script>` : ''}
     <script>${js}</script>
 </body>
 </html>`;

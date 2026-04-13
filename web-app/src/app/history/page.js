@@ -11,6 +11,11 @@ import { formatDate } from '@/lib/report-utils';
 import { ClockIcon, SearchIcon, ConversationIcon, TrashIcon, XIcon, LockIcon } from '@/components/Icons';
 import useResetScrollOnRouteChange from '@/hooks/useResetScrollOnRouteChange';
 
+function getSessionDisplayLabel(session) {
+    if (session?.title?.trim()) return session.title.trim();
+    return session?.sessionId ? `Chat ${session.sessionId.substring(0, 8)}` : 'Chat session';
+}
+
 export default function HistoryPage() {
     const [sessions, setSessions] = useState([]);
     const [selectedSessionId, setSelectedSessionId] = useState(null);
@@ -96,7 +101,9 @@ export default function HistoryPage() {
     const filteredSessions = sessions.filter(s => {
         if (!searchQuery.trim()) return true;
         const q = searchQuery.toLowerCase();
+        const label = getSessionDisplayLabel(s).toLowerCase();
         return (
+            label.includes(q) ||
             s.sessionId.toLowerCase().includes(q) ||
             (s.model || '').toLowerCase().includes(q)
         );
@@ -162,7 +169,7 @@ export default function HistoryPage() {
                                     type="text"
                                     value={searchQuery}
                                     onChange={(e) => setSearchQuery(e.target.value)}
-                                    placeholder="Search by session or model"
+                                    placeholder="Search by title, session, or model"
                                     aria-label="Search chat sessions"
                                     className="w-full rounded-xl border border-surface-200 bg-surface-50/80 py-2.5 pl-9 pr-3 text-xs focus:border-brand-400 focus:outline-none focus:ring-2 focus:ring-brand-500/20 transition-colors"
                                 />
@@ -191,6 +198,7 @@ export default function HistoryPage() {
                             ) : (
                                 filteredSessions.map((session) => {
                                     const isSelected = session.sessionId === selectedSessionId;
+                                    const sessionLabel = getSessionDisplayLabel(session);
 
                                     return (
                                         <div
@@ -209,7 +217,7 @@ export default function HistoryPage() {
                                                     <div className="mb-1.5 flex items-center gap-2">
                                                         <span className={`h-2 w-2 rounded-full ${session.archived ? 'bg-surface-300' : 'bg-accent-400'}`} />
                                                         <span className={`truncate text-[13px] font-semibold ${isSelected ? 'text-brand-700' : 'text-surface-800'}`}>
-                                                            {session.sessionId.substring(0, 18)}...
+                                                            {sessionLabel}
                                                         </span>
                                                         <span className={`rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] ${session.archived
                                                             ? 'bg-surface-100 text-surface-500'
@@ -257,7 +265,7 @@ export default function HistoryPage() {
                                     </h2>
                                     <p className="mt-1 text-[13px] font-medium leading-5 tracking-[-0.01em] text-surface-500">
                                         {selectedSession
-                                            ? `${selectedSession.sessionId.substring(0, 20)}... • ${selectedSession.model || 'gpt-4o'}`
+                                            ? `${getSessionDisplayLabel(selectedSession)} • ${selectedSession.model || 'gpt-4o'}`
                                             : 'Choose a session from the archive to inspect messages and attachments.'}
                                     </p>
                                 </div>

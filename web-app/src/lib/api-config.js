@@ -27,6 +27,8 @@ export const API_CONFIG = {
         // Chat
         chatSessions: '/api/chat/sessions',
         chatSession: (id) => `/api/chat/sessions/${id}`,
+        chatStatus: (id) => `/api/chat/sessions/${id}/status`,
+        chatResume: (id) => `/api/chat/sessions/${id}/resume`,
         chatMessages: (id) => `/api/chat/sessions/${id}/messages`,
         chatStream: (id) => `/api/chat/sessions/${id}/stream`,
         chatHistory: (id) => `/api/chat/sessions/${id}/history`,

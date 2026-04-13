@@ -32,12 +32,13 @@ const AGENT_ICON_MAP = {
 };
 
 const AGENT_WELCOME_COPY = {
-    null: 'Unified command mode for planning, test generation, automation, bugs, tasks, and file workflows.',
-    testgenie: 'Turn Jira context into optimized manual test cases and Excel-ready test steps.',
-    scriptgenerator: 'Generate Playwright automation with MCP-backed exploration and stable selector discovery.',
+    null: 'Run planning, test generation, automation, bugs, tasks, and file work from one mode.',
+    testgenie: 'Build manual coverage and Excel-ready test steps from Jira context.',
+    scriptgenerator: 'Create grounded Playwright automation from live MCP exploration.',
     buggenie: 'Convert failures and evidence into structured Jira defect tickets.',
-    taskgenie: 'Create linked testing tasks with assignment-ready Jira details.',
-    filegenie: 'Browse, organize, and inspect local files in the directory you explicitly choose for that chat.',
+    taskgenie: 'Create linked testing tasks, subtasks, and assignment-ready Jira details.',
+    filegenie: 'Search, organize, and inspect local project files in the workspace you choose.',
+    docgenie: 'Turn workbooks, notes, and reports into polished decks, docs, and visuals.',
 };
 
 const WELCOME_AGENT_CARDS = AGENT_MODES.map((agent) => ({
@@ -45,6 +46,78 @@ const WELCOME_AGENT_CARDS = AGENT_MODES.map((agent) => ({
     desc: AGENT_WELCOME_COPY[String(agent.value)] || agent.description,
     Icon: AGENT_ICON_MAP[agent.icon] || SparkleIcon,
 }));
+
+const USER_INPUT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const USER_INPUT_REQUEST_ID_RE = /^uir_[a-z0-9_\-]+$/i;
+
+function isNonEmptyString(value) {
+    return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isOpaquePromptValue(value) {
+    if (!isNonEmptyString(value)) return false;
+    const trimmed = value.trim();
+    return USER_INPUT_UUID_RE.test(trimmed) || USER_INPUT_REQUEST_ID_RE.test(trimmed);
+}
+
+function getDefaultUserInputQuestion(inputType = 'default') {
+    if (inputType === 'credentials') return 'The agent needs your username and password to continue.';
+    if (inputType === 'password') return 'The agent needs your password to continue.';
+    if (inputType === 'confirmation') return 'The agent needs your confirmation to continue.';
+    return 'The agent needs your input to continue.';
+}
+
+function normalizeUserInputRequestEvent(data = {}) {
+    const nestedPayload = data.options && typeof data.options === 'object' && !Array.isArray(data.options)
+        ? data.options
+        : null;
+    const meta = {
+        ...(nestedPayload?.meta && typeof nestedPayload.meta === 'object' && !Array.isArray(nestedPayload.meta) ? nestedPayload.meta : {}),
+        ...(data.meta && typeof data.meta === 'object' && !Array.isArray(data.meta) ? data.meta : {}),
+    };
+    const explicitType = isNonEmptyString(data.type) ? data.type : null;
+    const nestedType = isNonEmptyString(nestedPayload?.type) ? nestedPayload.type : null;
+    const inputType = explicitType && explicitType !== 'default'
+        ? explicitType
+        : (nestedType || explicitType || 'default');
+    const options = Array.isArray(data.options)
+        ? data.options
+        : Array.isArray(nestedPayload?.options)
+            ? nestedPayload.options
+            : [];
+
+    const candidates = [
+        data.question,
+        data.message,
+        nestedPayload?.question,
+        nestedPayload?.message,
+    ].filter(isNonEmptyString).map(value => value.trim());
+
+    let fallbackCandidate = '';
+    let question = '';
+    for (const candidate of candidates) {
+        if (!fallbackCandidate) fallbackCandidate = candidate;
+        if (!isOpaquePromptValue(candidate)) {
+            question = candidate;
+            break;
+        }
+    }
+
+    if (!question) {
+        question = isOpaquePromptValue(fallbackCandidate)
+            ? getDefaultUserInputQuestion(inputType)
+            : (fallbackCandidate || getDefaultUserInputQuestion(inputType));
+    }
+
+    return {
+        requestId: data.requestId,
+        question,
+        options,
+        type: inputType,
+        meta,
+        resolved: !!data.resolved,
+    };
+}
 
 function hasRenderableMessageContent(message) {
     const content = message?.content || message?.data?.content || '';
@@ -69,6 +142,30 @@ function mapChatMessage(message) {
     return mapped;
 }
 
+function needsSessionResume(session) {
+    return session?.runtimeState === 'resume_required'
+        || session?.runtimeState === 'recovering'
+        || session?.runtimeState === 'failed';
+}
+
+function isSessionBooting(session) {
+    return session?.runtimeState === 'initializing'
+        || session?.runtimeState === 'queued';
+}
+
+function sortSessionsByRecency(nextSessions = []) {
+    return [...nextSessions].sort((a, b) => new Date(b.lastActivityAt || b.createdAt) - new Date(a.lastActivityAt || a.createdAt));
+}
+
+function mergeSessionSnapshots(previousSessions = [], incomingSessions = []) {
+    const previousById = new Map(previousSessions.map(session => [session.sessionId, session]));
+    const merged = incomingSessions.map(session => ({
+        ...(previousById.get(session.sessionId) || {}),
+        ...session,
+    }));
+    return sortSessionsByRecency(merged);
+}
+
 export default function ChatPage() {
     const {
         groups: modelGroups,
@@ -86,6 +183,7 @@ export default function ChatPage() {
     const [streamingContent, setStreamingContent] = useState('');
     const [streamingReasoning, setStreamingReasoning] = useState('');
     const [isProcessing, setIsProcessing] = useState(false);
+    const [isCreatingSession, setIsCreatingSession] = useState(false);
     const [error, setError] = useState(null);
     const [model, setModelState] = useState('');
     const [modelTouched, setModelTouched] = useState(false);
@@ -101,6 +199,7 @@ export default function ChatPage() {
     const streamingContentRef = useRef('');
     const streamingReasoningRef = useRef('');
     const currentToolGroupRef = useRef(null);               // tracks the active tool group ID
+    const createSessionInFlightRef = useRef(false);
 
     useResetScrollOnRouteChange([messageScrollRef]);
 
@@ -111,6 +210,42 @@ export default function ChatPage() {
 
     // SSE connection for active chat session
     const streamUrl = activeSessionId ? apiClient.getChatStreamUrl(activeSessionId) : null;
+
+    const upsertSessionMeta = useCallback((sessionMeta) => {
+        if (!sessionMeta?.sessionId) return;
+        setSessions(prev => {
+            return sortSessionsByRecency([sessionMeta, ...prev.filter(s => s.sessionId !== sessionMeta.sessionId)]);
+        });
+    }, []);
+
+    const refreshSessions = useCallback(async () => {
+        const data = await apiClient.listChatSessions();
+        const all = Array.isArray(data) ? data.filter(session => !session.archived) : [];
+        setSessions(prev => mergeSessionSnapshots(prev, all));
+        return all;
+    }, []);
+
+    const ensureLiveSession = useCallback(async (sessionId) => {
+        if (!sessionId) throw new Error('No active session selected');
+        const status = await apiClient.getChatSessionStatus(sessionId);
+        upsertSessionMeta(status);
+
+        if (status.archived) {
+            throw new Error('This conversation is archived and can only be viewed from History.');
+        }
+
+        if (isSessionBooting(status)) {
+            return status;
+        }
+
+        if (needsSessionResume(status)) {
+            const resumed = await apiClient.resumeChatSession(sessionId);
+            upsertSessionMeta(resumed);
+            return resumed;
+        }
+
+        return status;
+    }, [upsertSessionMeta]);
 
     const handleSSEEvent = useCallback((type, event) => {
         const data = event?.data || {};
@@ -169,7 +304,13 @@ export default function ChatPage() {
                     prev.map(g => ({
                         ...g,
                         tools: g.tools.map(t => t.id === data.toolCallId
-                            ? { ...t, status: 'complete', result: data.result, success: data.success }
+                            ? {
+                                ...t,
+                                status: 'complete',
+                                result: data.result,
+                                success: data.success,
+                                attachments: Array.isArray(data.attachments) ? data.attachments : [],
+                            }
                             : t
                         ),
                     }))
@@ -231,26 +372,35 @@ export default function ChatPage() {
                 }
                 break;
 
-            case 'chat_user_input_request':
+            case 'chat_user_input_request': {
+                const normalizedRequest = normalizeUserInputRequestEvent(data);
                 setUserInputRequests(prev => {
                     // Avoid duplicates (e.g. from history replay)
-                    if (prev.some(r => r.requestId === data.requestId)) {
+                    if (prev.some(r => r.requestId === normalizedRequest.requestId)) {
                         // If replayed with resolved flag, update it
-                        if (data.resolved) {
-                            return prev.map(r => r.requestId === data.requestId
-                                ? { ...r, resolved: true }
+                        if (normalizedRequest.resolved) {
+                            return prev.map(r => r.requestId === normalizedRequest.requestId
+                                ? {
+                                    ...r,
+                                    question: normalizedRequest.question,
+                                    options: normalizedRequest.options,
+                                    type: normalizedRequest.type,
+                                    meta: normalizedRequest.meta,
+                                    resolved: true,
+                                }
                                 : r
                             );
                         }
                         return prev;
                     }
                     return [...prev, {
-                        requestId: data.requestId,
-                        question: data.question,
-                        options: data.options || [],
-                        type: data.type || 'default',
+                        requestId: normalizedRequest.requestId,
+                        question: normalizedRequest.question,
+                        options: normalizedRequest.options,
+                        type: normalizedRequest.type,
+                        meta: normalizedRequest.meta,
                         timestamp: ts,
-                        resolved: data.resolved || false,
+                        resolved: normalizedRequest.resolved,
                         resolvedAnswer: null,
                         auto: false,
                     }];
@@ -258,6 +408,7 @@ export default function ChatPage() {
                 // Auto-scroll to show the prompt
                 setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
                 break;
+            }
 
             case 'chat_user_input_complete':
                 setUserInputRequests(prev =>
@@ -282,17 +433,80 @@ export default function ChatPage() {
         }
     }, []);
 
-    const { status: sseStatus } = useSSE(streamUrl, { onEvent: handleSSEEvent });
+    const handleSSEDisconnect = useCallback(async (message) => {
+        if (!activeSessionId) {
+            setError(message);
+            return;
+        }
 
-    // Auto-scroll to bottom on any content change
+        try {
+            const status = await apiClient.getChatSessionStatus(activeSessionId);
+            upsertSessionMeta(status);
+
+            if (status.archived) {
+                setError('This conversation is archived and can only be viewed from History.');
+                return;
+            }
+
+            if (needsSessionResume(status)) {
+                setError('Live session runtime disconnected. It will be resumed automatically when you send the next message.');
+                return;
+            }
+        } catch (err) {
+            setError(err.message || message);
+            return;
+        }
+
+        setError(message);
+    }, [activeSessionId, upsertSessionMeta]);
+
+    const { status: sseStatus } = useSSE(streamUrl, { onEvent: handleSSEEvent, onError: handleSSEDisconnect });
+
+    // Auto-scroll only when the timeline actually has conversational content.
     useEffect(() => {
+        const hasTimelineContent = messages.length > 0
+            || toolGroups.length > 0
+            || userInputRequests.length > 0
+            || Boolean(streamingContent)
+            || Boolean(streamingReasoning);
+
+        if (!activeSessionId || !hasTimelineContent) return;
+
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messages, streamingContent, toolGroups, streamingReasoning]);
+    }, [activeSessionId, messages, streamingContent, toolGroups, streamingReasoning, userInputRequests]);
 
     // Load sessions on mount
     useEffect(() => {
         loadSessions();
     }, []);
+
+    useEffect(() => {
+        if (sessions.length === 0) return undefined;
+
+        let disposed = false;
+        const poll = async () => {
+            try {
+                const latest = await refreshSessions();
+                if (disposed) return;
+                if (activeSessionId && !latest.some(session => session.sessionId === activeSessionId)) {
+                    setActiveSessionId(null);
+                    setMessages([]);
+                    setToolGroups([]);
+                    setFollowups([]);
+                    setUserInputRequests([]);
+                    setIsProcessing(false);
+                }
+            } catch {
+                // Ignore transient polling failures.
+            }
+        };
+
+        const timer = setInterval(poll, 3000);
+        return () => {
+            disposed = true;
+            clearInterval(timer);
+        };
+    }, [activeSessionId, refreshSessions, sessions.length]);
 
     useEffect(() => {
         if (!modelTouched && defaultModel && model !== defaultModel) {
@@ -308,20 +522,15 @@ export default function ChatPage() {
 
     const loadSessions = async () => {
         try {
-            const data = await apiClient.listChatSessions();
-            const all = Array.isArray(data) ? data : [];
-            // Auto-cleanup: remove empty sessions (no messages) from previous visits
-            const active = all.filter(s => s.messageCount > 0);
-            const empty = all.filter(s => s.messageCount === 0);
-            setSessions(active);
-            // Background delete — don't block UI or show errors
-            empty.forEach(s => apiClient.deleteChatSession(s.sessionId).catch(() => { }));
+            await refreshSessions();
         } catch {
             // Backend may not be running yet
         }
     };
 
     const createSession = async (overrideAgent) => {
+        if (createSessionInFlightRef.current) return;
+
         // Guard: only accept string or null — prevents React SyntheticEvent from onClick
         const agentForSession = (typeof overrideAgent === 'string' || overrideAgent === null)
             ? overrideAgent
@@ -343,6 +552,8 @@ export default function ChatPage() {
         };
 
         try {
+            createSessionInFlightRef.current = true;
+            setIsCreatingSession(true);
             setError(null);
             setIsProcessing(false);
             const selectedModel = model || defaultModel || getDefaultModel(modelGroups);
@@ -353,32 +564,19 @@ export default function ChatPage() {
                 setFollowups(session.followups);
             }
         } catch (err) {
-            // Retry once on abort/signal errors (common with MCP server cold-start)
-            if (err.message && (err.message.includes('abort') || err.message.includes('signal'))) {
-                console.warn('[Chat] Session creation aborted, retrying...', err.message);
-                try {
-                    const selectedModel = model || defaultModel || getDefaultModel(modelGroups);
-                    const session = await apiClient.createChatSession(selectedModel, agentForSession);
-                    applyNewSession(session);
-                    if (Array.isArray(session.followups) && session.followups.length > 0) {
-                        setFollowups(session.followups);
-                    }
-                    setError(null);
-                    return;
-                } catch (retryErr) {
-                    setError(`Failed to create session (retry): ${retryErr.message}`);
-                    return;
-                }
-            }
             setError(`Failed to create session: ${err.message}`);
+        } finally {
+            createSessionInFlightRef.current = false;
+            setIsCreatingSession(false);
         }
     };
 
     const switchSession = async (sessionId) => {
-        // Auto-delete the session we're leaving if it has no messages
-        if (activeSessionId && activeSessionId !== sessionId && messages.length === 0) {
-            apiClient.deleteChatSession(activeSessionId).catch(() => { });
-            setSessions(prev => prev.filter(s => s.sessionId !== activeSessionId));
+        try {
+            await ensureLiveSession(sessionId);
+        } catch (err) {
+            setError(`Failed to open session: ${err.message}`);
+            return;
         }
 
         setActiveSessionId(sessionId);
@@ -432,8 +630,16 @@ export default function ChatPage() {
         }
     };
 
-    const sendMessage = async (content, imageAttachments = [], docAttachments = [], videoAttachments = []) => {
+    const sendMessage = useCallback(async (content, imageAttachments = [], docAttachments = [], videoAttachments = []) => {
         if (!activeSessionId || (!content.trim() && imageAttachments.length === 0 && docAttachments.length === 0 && videoAttachments.length === 0)) return;
+
+        try {
+            await ensureLiveSession(activeSessionId);
+        } catch (err) {
+            setError(`Failed to send: ${err.message}`);
+            setIsProcessing(false);
+            return;
+        }
 
         // Build user message with optional attachments for local display
         const userMessage = { role: 'user', content, timestamp: new Date().toISOString() };
@@ -501,12 +707,15 @@ export default function ChatPage() {
             const finalAttachments = apiAttachments.length > 0 ? apiAttachments : undefined;
             const defaultContent = imageAttachments.length > 0 ? '(image attached)' : (docAttachments.length > 0 ? '(document attached)' : (videoAttachments.length > 0 ? '(video attached)' : ''));
 
-            await apiClient.sendChatMessage(activeSessionId, content || defaultContent, finalAttachments, model);
+            const result = await apiClient.sendChatMessage(activeSessionId, content || defaultContent, finalAttachments, model);
+            if (result?.session) {
+                upsertSessionMeta(result.session);
+            }
         } catch (err) {
             setError(`Failed to send: ${err.message}`);
             setIsProcessing(false);
         }
-    };
+    }, [activeSessionId, ensureLiveSession, model, upsertSessionMeta]);
 
     const handleAbort = async () => {
         if (!activeSessionId) return;
@@ -522,6 +731,7 @@ export default function ChatPage() {
      * If current session has no messages, destroy it first (clean swap).
      */
     const handleAgentChange = async (newAgent) => {
+        if (isProcessing || isCreatingSession) return;
         if (newAgent === agentMode) return;
         setAgentMode(newAgent);
         setFilegenieRoot(null);
@@ -554,7 +764,7 @@ export default function ChatPage() {
     };
 
     const handleFollowupSelect = (followup) => {
-        if (!activeSessionId || isProcessing) return;
+        if (!activeSessionId || isProcessing || isCreatingSession) return;
         setFollowups([]);
         // Prefill if explicitly flagged OR if prompt ends with an incomplete placeholder (e.g., "AOTF-")
         const needsInput = followup.prefill || /AOTF-\s*$/i.test(followup.prompt);
@@ -606,7 +816,7 @@ export default function ChatPage() {
     const runningToolCount = toolGroups.reduce((acc, g) => acc + g.tools.filter(t => t.status === 'running').length, 0);
 
     return (
-        <div className="flex h-screen bg-surface-50 overflow-hidden">
+        <div className="flex h-screen min-h-0 bg-surface-50 overflow-hidden">
             {/* Session Sidebar */}
             <SessionList
                 sessions={sessions}
@@ -614,54 +824,59 @@ export default function ChatPage() {
                 onSelect={switchSession}
                 onCreate={createSession}
                 onDelete={deleteSession}
+                isCreating={isCreatingSession}
                 isOpen={sidebarOpen}
                 onToggle={() => setSidebarOpen(prev => !prev)}
             />
 
             {/* Chat Area */}
-            <div className="flex-1 flex flex-col min-w-0">
+            <div className="flex-1 flex min-h-0 min-w-0 flex-col">
                 {/* Header — frosted glass */}
-                <div className="px-6 py-3 border-b border-surface-200/60 bg-white/80 backdrop-blur-md flex items-center justify-between sticky top-0 z-10">
-                    <div className="flex items-center gap-3">
-                        <button
-                            onClick={() => setSidebarOpen(prev => !prev)}
-                            className="w-8 h-8 rounded-lg hover:bg-surface-100 flex items-center justify-center transition-colors text-surface-500 hover:text-surface-700"
-                            title={sidebarOpen ? 'Close conversations' : 'Open conversations'}
-                        >
-                            <MenuIcon />
-                        </button>
-                        <div className="w-9 h-9 rounded-xl gradient-brand flex items-center justify-center shadow-sm">
-                            <SparkleIcon className="w-5 h-5 text-white" />
+                <div className="relative z-20 shrink-0 border-b border-surface-200/60 bg-white/80 backdrop-blur-md">
+                    <div className="flex flex-col gap-3 px-4 py-3 sm:px-6 xl:flex-row xl:items-start xl:justify-between">
+                        <div className="flex min-w-0 items-center gap-3 xl:max-w-[18rem] 2xl:max-w-[20rem]">
+                            <button
+                                onClick={() => setSidebarOpen(prev => !prev)}
+                                className="w-8 h-8 rounded-lg hover:bg-surface-100 flex items-center justify-center transition-colors text-surface-500 hover:text-surface-700"
+                                title={sidebarOpen ? 'Close conversations' : 'Open conversations'}
+                            >
+                                <MenuIcon />
+                            </button>
+                            <div className="w-9 h-9 rounded-xl gradient-brand flex items-center justify-center shadow-sm">
+                                <SparkleIcon className="w-5 h-5 text-white" />
+                            </div>
+                            <div className="min-w-0">
+                                <h1 className="text-sm font-bold text-surface-900 leading-tight">AI Chat Assistant</h1>
+                                <p className="max-w-[11rem] truncate text-[11px] text-surface-500 sm:max-w-[15rem] xl:max-w-[17rem] 2xl:max-w-[20rem]">
+                                    {activeSessionId
+                                        ? (sessions.find(s => s.sessionId === activeSessionId)?.title || `Session ${activeSessionId.substring(0, 8)}`)
+                                        : 'Conversation workspace'}
+                                </p>
+                            </div>
                         </div>
-                        <div>
-                            <h1 className="text-sm font-bold text-surface-900 leading-tight">AI Chat Assistant</h1>
-                            <p className="text-[11px] text-surface-500 truncate max-w-[280px]">
-                                {activeSessionId
-                                    ? (sessions.find(s => s.sessionId === activeSessionId)?.title || `Session ${activeSessionId.substring(0, 8)}`)
-                                    : 'Conversation workspace'}
-                            </p>
-                        </div>
-                    </div>
-                    <div className="flex items-center gap-3 min-w-0 overflow-visible">
-                        <AgentSelect value={agentMode} onChange={handleAgentChange} disabled={isProcessing} />
-                        <ModelSelect value={model} onChange={setModel} groups={modelGroups} loading={modelCatalogLoading} className="w-[170px] flex-shrink-0" />
-                        <span
-                            title={modelCatalogError || modelCatalogWarnings[0] || (modelCatalogSource === 'sdk-discovered' ? 'Using runtime SDK model catalog' : 'Using fallback model catalog')}
-                            className={`px-2 py-1 rounded-full text-[10px] font-semibold border flex-shrink-0 ${modelCatalogError
-                                ? 'bg-red-50 text-red-600 border-red-200'
-                                : modelCatalogSource === 'sdk-discovered'
-                                    ? 'bg-accent-50 text-accent-700 border-accent-200'
-                                    : 'bg-amber-50 text-amber-700 border-amber-200'
-                                }`}
-                        >
-                            {modelCatalogSource === 'sdk-discovered' ? 'Runtime' : 'Fallback'}
-                        </span>
-                        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100/80 border border-surface-200/50 flex-shrink-0 whitespace-nowrap">
-                            <span className={`w-2 h-2 rounded-full transition-colors flex-shrink-0 ${sseStatus === 'connected' ? 'bg-accent-400 shadow-sm shadow-accent-400/40' :
-                                sseStatus === 'reconnecting' ? 'bg-amber-400 animate-pulse' :
-                                    !activeSessionId ? 'bg-surface-300' : 'bg-red-400'
-                                }`} />
-                            <span className="text-[11px] font-medium text-surface-500 capitalize">{!activeSessionId ? 'Ready' : sseStatus}</span>
+                        <div className="flex w-full min-w-0 flex-1 flex-col gap-2.5 overflow-visible xl:items-end">
+                            <AgentSelect value={agentMode} onChange={handleAgentChange} disabled={isProcessing || isCreatingSession} className="min-w-0 w-full xl:max-w-[min(100%,54rem)] 2xl:max-w-[min(100%,62rem)]" />
+                            <div className="flex w-full flex-wrap items-center gap-2 sm:gap-2.5 xl:justify-end">
+                                <ModelSelect value={model} onChange={setModel} groups={modelGroups} loading={modelCatalogLoading} className="w-full sm:w-[190px] lg:w-[220px] xl:w-[240px]" />
+                                <span
+                                    title={modelCatalogError || modelCatalogWarnings[0] || (modelCatalogSource === 'sdk-discovered' ? 'Using runtime SDK model catalog' : 'Using fallback model catalog')}
+                                    className={`px-2 py-1 rounded-full text-[10px] font-semibold border flex-shrink-0 ${modelCatalogError
+                                        ? 'bg-red-50 text-red-600 border-red-200'
+                                        : modelCatalogSource === 'sdk-discovered'
+                                            ? 'bg-accent-50 text-accent-700 border-accent-200'
+                                            : 'bg-amber-50 text-amber-700 border-amber-200'
+                                        }`}
+                                >
+                                    {modelCatalogSource === 'sdk-discovered' ? 'Runtime' : 'Fallback'}
+                                </span>
+                                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100/80 border border-surface-200/50 flex-shrink-0 whitespace-nowrap">
+                                    <span className={`w-2 h-2 rounded-full transition-colors flex-shrink-0 ${sseStatus === 'connected' ? 'bg-accent-400 shadow-sm shadow-accent-400/40' :
+                                        sseStatus === 'reconnecting' ? 'bg-amber-400 animate-pulse' :
+                                            !activeSessionId ? 'bg-surface-300' : 'bg-red-400'
+                                        }`} />
+                                    <span className="text-[11px] font-medium text-surface-500 capitalize">{!activeSessionId ? 'Ready' : sseStatus}</span>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -674,75 +889,73 @@ export default function ChatPage() {
                 )}
 
                 {/* Messages area */}
-                <div ref={messageScrollRef} className="flex-1 overflow-y-auto">
-                    <div className="max-w-4xl mx-auto px-6 py-5 space-y-5">
+                <div ref={messageScrollRef} className="flex-1 min-h-0 overflow-y-auto">
+                    <div className={`mx-auto px-4 py-5 space-y-5 sm:px-6 ${activeSessionId ? 'max-w-4xl' : 'max-w-[78rem]'}`}>
                         {/* Empty state — capability cards */}
                         {!activeSessionId && (
-                            <div className="flex min-h-full items-center justify-center py-2 xl:py-4">
-                                <div className="w-full max-w-6xl">
-                                    <div className="grid gap-5 xl:grid-cols-[minmax(280px,0.82fr)_minmax(0,1.18fr)] xl:items-center">
-                                        <div className="rounded-[28px] border border-surface-200/80 bg-[radial-gradient(circle_at_24%_18%,rgba(180,92,255,0.16),transparent_32%),radial-gradient(circle_at_78%_78%,rgba(31,158,171,0.14),transparent_42%),linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.94))] px-6 py-6 text-center shadow-[0_22px_55px_rgba(15,23,42,0.08)] xl:px-7 xl:py-7 xl:text-left">
-                                            <div className="flex items-center justify-center xl:justify-start">
-                                                <div className="relative rounded-[28px] border border-surface-200/70 bg-white/70 px-4 py-3 shadow-[0_18px_40px_rgba(15,23,42,0.08)]">
-                                                    <div className="absolute inset-x-8 bottom-2 h-4 rounded-full bg-[radial-gradient(circle,rgba(124,58,237,0.18),rgba(31,158,171,0.12),transparent_72%)] blur-lg" />
-                                                    <RobotMascotLogo size={108} emphasis="hero" mood="glossy" className="relative z-[1]" />
+                            <div className="flex min-h-[24rem] items-start justify-center py-3 sm:min-h-[26rem] sm:py-4 xl:min-h-[28rem] xl:items-center xl:py-5">
+                                <div className="w-full max-w-[78rem] overflow-visible">
+                                    <div className="grid gap-4 overflow-visible xl:grid-cols-[minmax(250px,0.72fr)_minmax(0,1.38fr)] xl:items-start 2xl:items-center">
+                                        <div className="relative overflow-visible rounded-[28px] border border-surface-200/80 bg-[radial-gradient(circle_at_24%_18%,rgba(180,92,255,0.16),transparent_32%),radial-gradient(circle_at_78%_78%,rgba(31,158,171,0.14),transparent_42%),linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.94))] px-4 py-4 text-center shadow-[0_22px_55px_rgba(15,23,42,0.08)] xl:px-5 xl:py-5 xl:text-left">
+                                            <div className="flex items-center justify-center pt-1 xl:justify-start">
+                                                <div className="relative overflow-visible rounded-[28px] border border-surface-200/70 bg-white/72 px-4 pb-3 pt-4 shadow-[0_18px_40px_rgba(15,23,42,0.08)] xl:px-5 xl:pb-4 xl:pt-5">
+                                                    <div className="absolute inset-x-10 bottom-3 h-5 rounded-full bg-[radial-gradient(circle,rgba(124,58,237,0.18),rgba(31,158,171,0.12),transparent_72%)] blur-xl" />
+                                                    <RobotMascotLogo size={96} emphasis="hero" mood="glossy" className="relative z-[1] mx-auto" />
                                                 </div>
                                             </div>
-                                            <div className="mt-5 inline-flex items-center gap-2 rounded-full border border-brand-200/70 bg-brand-50/80 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-brand-600">
+                                            <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-brand-200/70 bg-brand-50/80 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-brand-600">
                                                 <SparkleIcon className="w-3.5 h-3.5" />
                                                 Conversation workspace
                                             </div>
-                                            <h2 className="mt-3 text-[1.65rem] font-bold tracking-tight text-surface-900">QA Automation Assistant</h2>
-                                            <p className="mt-2 text-sm leading-7 text-surface-500 xl:max-w-md">
+                                            <h2 className="mt-3 text-[1.4rem] font-bold tracking-tight text-surface-900 xl:text-[1.55rem]">QA Automation Assistant</h2>
+                                            <p className="mt-2 text-[13px] leading-6 text-surface-500 xl:max-w-sm">
                                                 Start a new session from the primary action below, then stay with TPM for full workflow coverage or switch to a specialist agent for focused work.
                                             </p>
 
-                                            <div className="mt-5 flex flex-wrap items-center justify-center gap-2.5 xl:justify-start">
+                                            <div className="mt-3.5 flex flex-wrap items-center justify-center gap-2 xl:justify-start">
                                                 <span className="inline-flex items-center rounded-full border border-surface-200 bg-white/80 px-3 py-1 text-[11px] font-medium text-surface-600">
-                                                    6 agent modes ready
+                                                    7 agent modes ready
                                                 </span>
                                                 <span className="inline-flex items-center rounded-full border border-surface-200 bg-white/80 px-3 py-1 text-[11px] font-medium text-surface-600">
                                                     TPM selected by default
                                                 </span>
                                             </div>
 
-                                            <div className="mt-6 flex flex-col items-center gap-3 xl:items-start">
+                                            <div className="mt-4 flex flex-col items-center gap-2.5 xl:items-start">
                                                 <button
                                                     onClick={() => createSession()}
+                                                    disabled={isCreatingSession}
                                                     className="gradient-brand text-white rounded-xl px-6 py-3 text-sm font-semibold shadow-md shadow-brand-500/20 hover:shadow-lg hover:shadow-brand-500/30 transition-all"
                                                 >
-                                                    Start New Chat
+                                                    {isCreatingSession ? 'Starting...' : 'Start New Chat'}
                                                 </button>
-                                                <p className="text-[12px] leading-6 text-surface-500 xl:max-w-sm">
+                                                <p className="text-[11px] leading-5 text-surface-500 xl:max-w-sm">
                                                     A new session opens the composer immediately so users can start asking questions without extra setup.
                                                 </p>
                                             </div>
                                         </div>
 
-                                        <div className="rounded-[28px] border border-surface-200/80 bg-white/92 p-4 shadow-[0_20px_48px_rgba(15,23,42,0.06)] xl:p-5">
-                                            <div className="mb-4 flex items-center justify-between gap-3">
+                                        <div className="rounded-[28px] border border-surface-200/80 bg-white/92 p-3 shadow-[0_20px_48px_rgba(15,23,42,0.06)] sm:p-3.5 xl:p-4">
+                                            <div className="mb-3 flex items-center justify-between gap-3 sm:mb-3.5">
                                                 <div className="text-left">
                                                     <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-surface-400">Agent modes</p>
                                                     <h3 className="mt-1 text-lg font-semibold tracking-tight text-surface-900">Pick the mode that matches the work.</h3>
                                                 </div>
-                                                <div className="hidden rounded-full border border-brand-100 bg-brand-50/70 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-brand-600 sm:inline-flex">
-                                                    No scroll needed
-                                                </div>
                                             </div>
 
-                                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                                            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
                                                 {WELCOME_AGENT_CARDS.map((card) => (
-                                                    <div key={card.value ?? 'default'} className="text-left rounded-2xl border border-surface-200/80 bg-surface-50/60 p-3.5 transition-all hover:border-brand-200 hover:bg-white hover:shadow-sm group cursor-default">
-                                                        <div className={`mb-2 flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${card.bgClass} ${card.textClass}`}>
-                                                            <card.Icon className="w-4 h-4" />
+                                                    <div key={card.value ?? 'default'} className="group flex h-full min-h-[7.25rem] cursor-default flex-col rounded-2xl border border-surface-200/80 bg-surface-50/60 p-2.5 transition-all hover:border-brand-200 hover:bg-white hover:shadow-sm">
+                                                        <div className={`mb-2 flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${card.bgClass} ${card.textClass}`}>
+                                                            <card.Icon className="w-3.5 h-3.5" />
                                                         </div>
-                                                        <div className="flex items-center gap-1.5 mb-1">
-                                                            <h3 className="text-[13px] font-semibold text-surface-800 leading-tight">{card.label}</h3>
+                                                        <div className="mb-1 flex items-center gap-1.5">
+                                                            <h3 className="text-[12px] font-semibold text-surface-800 leading-tight">{card.label}</h3>
                                                             <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${card.badgeBg} ${card.badgeText}`}>
                                                                 {card.shortLabel}
                                                             </span>
                                                         </div>
-                                                        <p className="text-[11px] leading-5 text-surface-500">{card.desc}</p>
+                                                        <p className="agent-card-copy text-[10px] leading-[1rem] text-surface-500">{card.desc}</p>
                                                     </div>
                                                 ))}
                                             </div>
@@ -820,6 +1033,7 @@ export default function ChatPage() {
                                         question={req.question}
                                         options={req.options}
                                         type={req.type || 'default'}
+                                        meta={req.meta || {}}
                                         resolved={req.resolved}
                                         resolvedAnswer={req.resolvedAnswer}
                                         auto={req.auto}

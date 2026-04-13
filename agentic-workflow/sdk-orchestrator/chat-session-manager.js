@@ -19,10 +19,19 @@
  */
 
 const { EventEmitter } = require('events');
+const { randomUUID } = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { getFollowupProvider } = require('./followup-provider');
+const { extractAtlassianUrlContext } = require('./atlassian-url-utils');
+const { getGeneratedArtifactRoots, isGeneratedArtifactPath } = require('./generated-artifact-policy');
+const {
+    buildProjectSkillActivationGuide,
+    buildProjectSkillRoutingHint,
+    detectProjectSkillsForMessage,
+    loadProjectSkillsCatalog,
+} = require('./project-skills-catalog');
 
 // ─── Grounding System (lazy-loaded) ─────────────────────────────────────────
 let _groundingModule;
@@ -98,6 +107,27 @@ function stripVSCodeToolPrefix(text) {
     return text.replace(/mcp_unified-autom_unified_/g, 'unified_');
 }
 
+function buildAtlassianRoutingHint(urlContext) {
+    if (!urlContext || urlContext.atlassianUrls.length === 0) return '';
+
+    const lines = [
+        '[INTERNAL ROUTING HINT]',
+        'The user message contains Atlassian URLs. Resolve them with Jira/KB tools before answering.',
+    ];
+
+    for (const jiraIssue of urlContext.jiraIssues) {
+        lines.push(`- Jira issue URL detected: use fetch_jira_ticket with "${jiraIssue.issueKey}" or the full URL.`);
+    }
+
+    for (const confluencePage of urlContext.confluencePages) {
+        lines.push(`- Confluence page URL detected: use get_knowledge_base_page with "${confluencePage.pageId}" or the full URL.`);
+        lines.push('- Do not claim the page requires browser login when KB connector or Atlassian MCP tools are available.');
+    }
+
+    lines.push('Fetch the referenced Jira or Confluence content first, then summarize only the requested portion.');
+    return lines.join('\n');
+}
+
 // Load .env for Jira credentials (Atlassian MCP auth)
 // Uses override:true so updated tokens are picked up without server restart
 try {
@@ -130,6 +160,222 @@ const PROJECT_ROOT = path.join(__dirname, '..', '..');
 // If the user doesn't respond within this window, the agent receives
 // an auto-generated fallback answer so it doesn't hang forever.
 const USER_INPUT_TIMEOUT_MS = 5 * 60 * 1000;
+const RECOVERY_HISTORY_LIMIT = 10;
+const MAX_RECOVERY_TRANSCRIPT_CHARS = 4000;
+const SESSION_TITLE_MAX_LENGTH = 72;
+const SESSION_TITLE_TRUNCATED_LENGTH = 69;
+const GENERIC_SESSION_TITLES = new Set([
+    'hi',
+    'hello',
+    'hey',
+    'help',
+    'start',
+    'new chat',
+    'chat',
+    'session',
+]);
+
+const SESSION_RUNTIME_STATES = {
+    QUEUED: 'queued',
+    INITIALIZING: 'initializing',
+    ACTIVE: 'active',
+    RESUME_REQUIRED: 'resume_required',
+    RECOVERING: 'recovering',
+    FAILED: 'failed',
+    ARCHIVED: 'archived',
+};
+
+const SESSION_EXECUTION_STATES = {
+    IDLE: 'idle',
+    RUNNING: 'running',
+    WAITING_FOR_INPUT: 'waiting_for_input',
+    ERROR: 'error',
+};
+
+function toPositiveInt(value, fallback) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const USER_INPUT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const USER_INPUT_REQUEST_ID_RE = /^uir_[a-z0-9_\-]+$/i;
+
+function isNonEmptyString(value) {
+    return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isOpaqueUserInputValue(value) {
+    if (!isNonEmptyString(value)) return false;
+    const trimmed = value.trim();
+    return USER_INPUT_UUID_RE.test(trimmed) || USER_INPUT_REQUEST_ID_RE.test(trimmed);
+}
+
+function getDefaultUserInputQuestion(inputType = 'default') {
+    if (inputType === 'credentials') return 'The agent needs your username and password to continue.';
+    if (inputType === 'password') return 'The agent needs your password to continue.';
+    if (inputType === 'confirmation') return 'The agent needs your confirmation to continue.';
+    return 'The agent needs your input to continue.';
+}
+
+function normalizeUserInputRequestPayload(rawRequest, fallbackType = 'default') {
+    const requestObject = rawRequest && typeof rawRequest === 'object' && !Array.isArray(rawRequest)
+        ? rawRequest
+        : {};
+    const nestedPayload = requestObject.options && typeof requestObject.options === 'object' && !Array.isArray(requestObject.options)
+        ? requestObject.options
+        : null;
+
+    const explicitType = [
+        requestObject.type,
+        requestObject.meta?.type,
+        requestObject.meta?.inputType,
+    ].find(isNonEmptyString) || null;
+    const nestedType = [
+        nestedPayload?.type,
+        nestedPayload?.meta?.type,
+    ].find(isNonEmptyString) || null;
+    const inputType = explicitType && explicitType !== 'default'
+        ? explicitType
+        : (nestedType || explicitType || fallbackType || 'default');
+
+    const rawOptions = Array.isArray(requestObject.options)
+        ? requestObject.options
+        : Array.isArray(nestedPayload?.options)
+            ? nestedPayload.options
+            : [];
+
+    const rawMeta = {
+        ...(nestedPayload?.meta && typeof nestedPayload.meta === 'object' ? nestedPayload.meta : {}),
+        ...(requestObject.meta && typeof requestObject.meta === 'object' ? requestObject.meta : {}),
+        type: inputType,
+    };
+
+    const candidates = [
+        typeof rawRequest === 'string' ? rawRequest : null,
+        requestObject.question,
+        requestObject.message,
+        requestObject.content,
+        requestObject.prompt,
+        nestedPayload?.question,
+        nestedPayload?.message,
+        nestedPayload?.content,
+        nestedPayload?.prompt,
+    ].filter(isNonEmptyString).map(value => value.trim());
+
+    let fallbackCandidate = '';
+    let question = '';
+    for (const candidate of candidates) {
+        if (!fallbackCandidate) fallbackCandidate = candidate;
+        if (!isOpaqueUserInputValue(candidate)) {
+            question = candidate;
+            break;
+        }
+    }
+
+    if (!question) {
+        question = isOpaqueUserInputValue(fallbackCandidate)
+            ? getDefaultUserInputQuestion(inputType)
+            : (fallbackCandidate || getDefaultUserInputQuestion(inputType));
+    }
+
+    return {
+        question,
+        options: rawOptions,
+        type: inputType,
+        meta: rawMeta,
+        usedFallbackQuestion: question === getDefaultUserInputQuestion(inputType),
+        nestedPayloadDetected: !!nestedPayload,
+    };
+}
+
+function normalizeUserInputHistoryMessage(message) {
+    if (!message || message.role !== 'user_input_request') return message;
+
+    const normalized = normalizeUserInputRequestPayload({
+        content: message.content,
+        options: message.options,
+        type: message.type,
+        meta: message.meta,
+    }, message.type || 'default');
+
+    return {
+        ...message,
+        content: normalized.question,
+        options: normalized.options,
+        type: normalized.type,
+        meta: normalized.meta,
+    };
+}
+
+function normalizeSessionTitleText(value) {
+    if (!isNonEmptyString(value)) return '';
+
+    return value
+        .replace(/```[\s\S]*?```/g, ' ')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/[*_~>#-]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function stripSessionTitleLeadIn(value) {
+    if (!isNonEmptyString(value)) return '';
+
+    const leadInPatterns = [
+        /^please\s+/i,
+        /^can you\s+/i,
+        /^could you\s+/i,
+        /^would you\s+/i,
+        /^i need (?:you )?to\s+/i,
+        /^help me\s+/i,
+        /^let'?s\s+/i,
+    ];
+
+    let result = value.trim();
+    for (const pattern of leadInPatterns) {
+        result = result.replace(pattern, '');
+    }
+    return result.trim();
+}
+
+function truncateSessionTitle(value, max = SESSION_TITLE_MAX_LENGTH) {
+    if (!isNonEmptyString(value) || value.length <= max) return value || '';
+
+    const candidate = value.substring(0, SESSION_TITLE_TRUNCATED_LENGTH);
+    const lastSpace = candidate.lastIndexOf(' ');
+    const trimmed = lastSpace >= 32 ? candidate.substring(0, lastSpace) : candidate;
+    return `${trimmed.trim()}...`;
+}
+
+function capitalizeSessionTitle(value) {
+    if (!isNonEmptyString(value)) return '';
+    return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function isUuidLikeTitle(value) {
+    if (!isNonEmptyString(value)) return false;
+    return USER_INPUT_UUID_RE.test(value.trim());
+}
+
+function isFallbackSessionTitle(value) {
+    if (!isNonEmptyString(value)) return true;
+
+    const normalized = value.trim().toLowerCase();
+    if (GENERIC_SESSION_TITLES.has(normalized)) return true;
+    if (isUuidLikeTitle(normalized)) return true;
+    if (/^(chat|session)\s+[0-9a-f]{6,}$/i.test(normalized)) return true;
+    return normalized.length < 4;
+}
+
+function buildSessionTitleCandidate(content) {
+    const normalized = normalizeSessionTitleText(content);
+    if (!normalized) return '';
+
+    const firstSentence = normalized.split(/(?<=[.!?])\s+/)[0] || normalized;
+    const stripped = stripSessionTitleLeadIn(firstSentence) || stripSessionTitleLeadIn(normalized) || normalized;
+    const title = capitalizeSessionTitle(truncateSessionTitle(stripped));
+    return title;
+}
 
 // ─── Chat Session Manager ───────────────────────────────────────────────────
 
@@ -151,6 +397,7 @@ class ChatSessionManager extends EventEmitter {
         this.model = options.model;
         this.config = options.config;
         this.learningStore = options.learningStore || null;
+        this._generatedArtifactRoots = getGeneratedArtifactRoots(this.config, PROJECT_ROOT);
 
         // Initialize grounding store for local context enrichment
         this._groundingStore = null;
@@ -172,18 +419,22 @@ class ChatSessionManager extends EventEmitter {
 
         // Track active sessions: sessionId → { session, sseClients[], createdAt }
         this._sessions = new Map();
+        this._runtimeCreateConcurrency = toPositiveInt(
+            options.runtimeCreateConcurrency || process.env.CHAT_RUNTIME_CREATE_CONCURRENCY,
+            2
+        );
+        this._runtimeCreateActiveCount = 0;
+        this._runtimeCreateQueue = [];
 
         // Followup provider for context-aware suggestions
         this._followupProvider = getFollowupProvider();
 
         // ── Chat history persistence ──
-        this._historyPath = path.join(
+        this._historyPath = options.historyPath || path.join(
             __dirname, '..', 'test-artifacts', 'chat-history.json'
         );
         this._loadHistory();
 
-        // Cache default system prompt (used when agentMode is null)
-        this._defaultSystemPrompt = this._buildSystemPrompt(null);
     }
 
     // ─── Valid agent modes ──────────────────────────────────────────────────
@@ -237,6 +488,13 @@ class ChatSessionManager extends EventEmitter {
         '.txt': 'text/plain',
         '.md': 'text/markdown',
         '.json': 'application/json',
+        '.html': 'text/html',
+        '.htm': 'text/html',
+        '.svg': 'image/svg+xml',
+        '.mp4': 'video/mp4',
+        '.webm': 'video/webm',
+        '.js': 'text/javascript',
+        '.ts': 'text/typescript',
     };
 
     /** MIME type → file extension mapping for video attachments. */
@@ -258,7 +516,7 @@ class ChatSessionManager extends EventEmitter {
      */
     _convertAttachmentsToTempFiles(attachments) {
         const sdkAttachments = [];
-        const tempFiles = [];
+        const tempFiles = []; // Initialize tempFiles array
         const docTempFiles = []; // { path, filename } for document text extraction
         const videoTempFiles = []; // { path, filename, media_type } for video frame extraction
         const tempDir = os.tmpdir();
@@ -299,7 +557,6 @@ class ChatSessionManager extends EventEmitter {
                 try {
                     const buffer = Buffer.from(att.data, 'base64');
                     fs.writeFileSync(filePath, buffer);
-                    tempFiles.push(filePath);
                     docTempFiles.push({ path: filePath, filename: att.filename || `document${ext}` });
 
                     console.log(`[ChatManager] \u{1F4C4} Wrote temp document: ${fileName} (${(buffer.length / 1024).toFixed(1)} KB)`);
@@ -355,8 +612,8 @@ class ChatSessionManager extends EventEmitter {
 
         for (const doc of docTempFiles) {
             try {
-                const result = await parseDocument(doc.path, { maxChars: perDocBudget });
-                const text = result.text || '';
+                const result = await parseDocument(doc.path, { maxChars: perDocBudget, maxRows: 25 });
+                const text = this._formatParsedDocumentForPrompt(doc, result, perDocBudget);
                 const meta = [];
                 if (result.pageCount) meta.push(`${result.pageCount} pages`);
                 if (result.slideCount) meta.push(`${result.slideCount} slides`);
@@ -379,10 +636,43 @@ class ChatSessionManager extends EventEmitter {
         return sections.join('\n\n');
     }
 
+    _formatParsedDocumentForPrompt(doc, result, maxChars) {
+        if (result?.type === 'xlsx' && Array.isArray(result.sheets)) {
+            let workbookSummary = `Workbook summary for ${doc.filename}:`;
+
+            for (const sheet of result.sheets) {
+                workbookSummary += `\n\nSheet: ${sheet.name}`;
+                workbookSummary += `\n- Size: ${sheet.rowCount} rows x ${sheet.columnCount} columns`;
+
+                const sampleRows = Array.isArray(sheet.data) ? sheet.data.slice(0, 12) : [];
+                if (sampleRows.length === 0) {
+                    workbookSummary += '\n- Sample rows: none';
+                    continue;
+                }
+
+                workbookSummary += '\n- Sample rows:';
+                for (const row of sampleRows) {
+                    const values = Array.isArray(row.values)
+                        ? row.values.filter(value => value !== '')
+                        : [];
+                    if (values.length === 0) continue;
+                    workbookSummary += `\n  - Row ${row.row}: ${values.join(' | ')}`;
+                }
+            }
+
+            if (maxChars && workbookSummary.length > maxChars) {
+                workbookSummary = `${workbookSummary.substring(0, maxChars)}\n\n[...truncated at ${maxChars} characters]`;
+            }
+
+            return workbookSummary;
+        }
+
+        return result?.text || '';
+    }
+
     /**
      * Clean up temp files after a delay (gives SDK time to read them).
      *
-     * @param {string[]} tempFiles - Paths to delete
      * @param {number} [delayMs=60000] - Delay before cleanup (default: 60s)
      */
     _scheduleCleanup(tempFiles, delayMs = 60000) {
@@ -410,9 +700,13 @@ class ChatSessionManager extends EventEmitter {
         // ── Agent-specific prompt from .agent.md ──
         if (agentMode && ChatSessionManager.VALID_AGENTS.includes(agentMode)) {
             try {
-                const agentMdPath = path.join(__dirname, '..', '..', '.github', 'agents', `${agentMode}.agent.md`);
-                if (fs.existsSync(agentMdPath)) {
-                    let agentPrompt = fs.readFileSync(agentMdPath, 'utf-8');
+                const agentPromptPathCandidates = [
+                    path.join(__dirname, '..', '..', '.github', 'agents', `${agentMode}.agent.md`),
+                    path.join(__dirname, '..', '..', '.github', 'agents', `${agentMode}.instructions.md`),
+                ];
+                const agentPromptPath = agentPromptPathCandidates.find(candidate => fs.existsSync(candidate));
+                if (agentPromptPath) {
+                    let agentPrompt = fs.readFileSync(agentPromptPath, 'utf-8');
 
                     // Strip chatagent frontmatter (```chatagent\n---\n...\n---\n)
                     const fmMatch = agentPrompt.match(/^[`]{3,}chatagent\s*\n---[\s\S]*?---\s*\n/);
@@ -428,11 +722,20 @@ class ChatSessionManager extends EventEmitter {
                         'You are running inside a web app chat session (not VS Code).',
                         'Use the custom tools available to you to complete tasks.',
                         '',
-                        // Dashboard-context: explicit Jira tool guidance (prevents web-scraping fallback)
                         'CRITICAL — Jira Ticket Access:',
                         '- To READ existing Jira tickets, use the `fetch_jira_ticket` custom tool or Atlassian MCP tools (atl_getJiraIssue, atl_searchJiraIssuesUsingJql).',
+                        '- To SEARCH Jira issues by JQL or free text, use the `search_jira_issues` custom tool.',
+                        '- To READ a Jira Epic or inspect its child issues, use `get_jira_epic` and `get_jira_epic_issues`. To search only Epic issues, use `search_jira_epics`.',
+                        '- To find Jira issues that are still not assigned to any Epic, use `list_jira_issues_without_epic` with a projectKey or scoped JQL.',
                         '- To CREATE new Jira tickets, use the `create_jira_ticket` custom tool or Atlassian MCP tools (atl_createJiraIssue).',
+                        '- Only pass `labels` to `create_jira_ticket` when the user explicitly asks to add labels. Otherwise omit the labels parameter entirely.',
                         '- To UPDATE/EDIT existing Jira tickets (change summary, description, labels, priority, or add comments), use the `update_jira_ticket` custom tool.',
+                        '- To INSPECT editable Jira fields and available workflow transitions, use the `get_jira_ticket_capabilities` custom tool.',
+                        '- To REASSIGN an existing Jira ticket, use the `assign_jira_ticket` custom tool with an accountId or a resolvable assignee query.',
+                        '- To CHANGE Jira status, use the `transition_jira_ticket` custom tool. Atlassian MCP transition tools can be used as fallback when configured.',
+                        '- To LOG time spent on a Jira ticket, or when the user says "Time Tracking" / "add hours", use the `log_jira_work` custom tool.',
+                        '- To UPDATE originalEstimate or remainingEstimate fields, use the `update_jira_estimates` custom tool only when the user explicitly asks for estimate changes.',
+                        '- If a request mixes worklog language and estimate language, ask which one the user wants before mutating Jira time tracking fields.',
                         '- NEVER use web/fetch, fetch_webpage, or HTTP scraping to access Jira URLs — Jira is a client-rendered SPA and HTML scraping returns no useful content.',
                         '- When creating Testing tasks for Bug-type tickets, FIRST use `fetch_jira_ticket` to read the parent ticket details (summary, issue type, description, acceptance criteria), THEN create the Testing task with proper context.',
                         '',
@@ -440,6 +743,14 @@ class ChatSessionManager extends EventEmitter {
                         '- When the user provides a Jira ticket URL (e.g., https://corelogic.atlassian.net/browse/AOTF-16514), extract the base URL (everything before "/browse/") and pass it as the `jiraBaseUrl` parameter when calling `create_jira_ticket`.',
                         '- This ensures the returned ticket URL matches the user\'s Jira instance domain.',
                         '- Example: if user gives "https://corelogic.atlassian.net/browse/AOTF-16514", set jiraBaseUrl="https://corelogic.atlassian.net".',
+                        '- When the user provides a Jira browse URL and asks to read or summarize the ticket, use `fetch_jira_ticket` with the ticket key or the full URL. Do not ask the user to paste the ticket text manually.',
+                        '',
+                        'CRITICAL — Confluence URL Handling:',
+                        '- To READ and NAVIGATE Confluence directly, prefer `search_confluence_content`, `get_confluence_page_details`, `list_confluence_spaces`, `list_confluence_pages_in_space`, and `get_confluence_page_tree`.',
+                        '- Keep `search_knowledge_base` and `get_knowledge_base_page` for grounding-oriented KB retrieval across providers, or use Atlassian MCP Confluence tools as fallback.',
+                        '- When the user provides a Confluence page URL (e.g., https://corelogic.atlassian.net/wiki/spaces/AOTF/pages/189467646/...), extract the page ID (189467646) and fetch it directly with `get_confluence_page_details`. The tool also accepts the full URL.',
+                        '- If the user asks to summarize a specific section from a Confluence URL, fetch the page first and summarize only that requested section.',
+                        '- NEVER claim a Confluence page cannot be accessed because of browser login when the KB connector or Atlassian MCP tools are available in the session.',
                         '',
                         'CRITICAL — Testing Task Description Formatting:',
                         '- When creating Testing tasks for Bug-type parent tickets, format test cases as MARKDOWN TABLES in the description.',
@@ -449,7 +760,8 @@ class ChatSessionManager extends EventEmitter {
                         '  | 1.1 | Step description | Expected result | Actual result |',
                         '- Include section headings with ## for structure (e.g., ## Test Cases, ## Pre-Conditions).',
                         '- Use **bold** for section labels like **Description :-**, **Steps to Reproduce :-**.',
-                        '- The description field supports rich formatting — markdown bold, headings, tables, and lists will be automatically converted to Jira\'s native format (ADF) for proper rendering.',
+                        '- Use `code` for identifiers, field names, and event names, but do not combine bold and inline code on the same text span.',
+                        '- The description field supports a Jira-safe subset of rich formatting — markdown bold, headings, tables, lists, and inline code will be converted to Jira\'s native format (ADF) for proper rendering.',
                         '',
                         'RESPONSE FORMATTING — Rich Markdown:',
                         '- Use ## and ### headings to structure long responses into clear sections.',
@@ -490,18 +802,18 @@ class ChatSessionManager extends EventEmitter {
                     }
 
                     // SDK context: strip VS Code MCP tool prefix so LLM uses raw names
-                    console.log(`[ChatManager] Loaded agent prompt: ${agentMode}.agent.md`);
+                    console.log(`[ChatManager] Loaded agent prompt: ${path.basename(agentPromptPath)}`);
                     return stripVSCodeToolPrefix(parts.join('\n'));
                 }
             } catch (err) {
-                console.warn(`[ChatManager] Failed to load ${agentMode}.agent.md: ${err.message}`);
+                console.warn(`[ChatManager] Failed to load prompt for ${agentMode}: ${err.message}`);
             }
         }
 
         // ── TPM: unified all-capabilities prompt with agent-specific expertise ──
         const parts = [
             'You are TPM (Test Project Manager) — a unified QA Automation powerhouse powered by the Copilot SDK.',
-            'You combine the full capabilities of TestGenie, ScriptGenie, BugGenie, and TaskGenie into a single session.',
+            'You combine the full capabilities of TestGenie, ScriptGenie, BugGenie, TaskGenie, and DocGenie into a single session.',
             'You are running inside a web app chat session (not VS Code).',
             'Use the custom tools available to you to complete tasks.',
             '',
@@ -511,8 +823,10 @@ class ChatSessionManager extends EventEmitter {
             '| **TestGenie** — Test case generation | User asks to generate test cases, create test scenarios, or references a Jira ticket for testing | `fetch_jira_ticket`, `generate_test_case_excel`, Atlassian MCP |',
             '| **ScriptGenie** — Playwright script generation | User asks to automate, create scripts, explore pages via browser, or generate .spec.js | MCP browser tools (`navigate`, `snapshot`, `click`, etc.), `get_framework_inventory`, `validate_generated_script` |',
             '| **BugGenie** — Bug ticket creation | User asks to create bug/defect tickets, report issues, or review test failures | `create_jira_ticket`, `get_test_results`, `analyze_test_failure`, Atlassian MCP |',
-            '| **TaskGenie** — Jira task creation | User asks to create Testing tasks, link tasks to tickets, or assign work | `create_jira_ticket`, `fetch_jira_ticket`, `get_jira_current_user`, Atlassian MCP |',
+            '| **TaskGenie** — Jira task creation | User asks to create Testing tasks, create true subtasks, link or unlink tasks, search issues or epics, inspect Epic membership, assign or reassign work, change status, log work, or explicitly update original/remaining estimates | `search_jira_issues`, `search_jira_epics`, `get_jira_epic`, `get_jira_epic_issues`, `list_jira_issues_without_epic`, `assign_jira_ticket`, `create_jira_ticket`, `fetch_jira_ticket`, `get_jira_current_user`, `search_jira_users`, `get_jira_ticket_capabilities`, `remove_jira_issue_link`, `transition_jira_ticket`, `log_jira_work`, `update_jira_estimates`, Atlassian MCP |',
             '| **FileGenie** — File & document interaction | User asks to open/view files, browse folders, parse documents, organize files, or reveal files in Explorer/Finder | `open_file_native`, `open_containing_folder`, `search_files`, `parse_document`, `list_directory` |',
+            '| **DocGenie** — Document and presentation generation | User asks for presentations, reports, infographics, workbook-to-PPT conversion, or polished document outputs | `list_session_documents`, `parse_session_document`, `generate_pptx`, `generate_docx`, `generate_pdf`, `generate_excel_report`, `generate_infographic`, `generate_video` |',
+            '| **RepoOps** — Safe git commit and push | User explicitly asks to commit/push current project changes from web app chat while excluding tests, artifacts, reports, logs, and generated outputs | `commit_and_push_repo_changes` |',
             '',
             '## Intent Detection & Agent Activation',
             'Detect the user\'s intent from their message and activate the appropriate expertise:',
@@ -521,19 +835,43 @@ class ChatSessionManager extends EventEmitter {
             '- **Bug report keywords**: "bug", "defect", "issue", "failure", "broken", "not working", "create bug", "screen recording", "video recording", "recording of bug", "attached video", "video shows" → Activate BugGenie expertise',
             '- **Task creation keywords**: "task", "testing task", "assign", "link task", "create task" → Activate TaskGenie expertise',
             '- **File open/view keywords**: "open file", "open the", "launch", "view in app", "show in explorer", "reveal in finder", "open excel", "open word", "open report", "open video", "open folder", "open ppt", "open pdf" → Activate FileGenie file-opening tools',
-            '- **Document/video generation keywords**: "generate video", "animation", "animated", "video walkthrough", "multimedia", "create document", "generate presentation", "create slides", "generate report", "infographic", "poster", "html report", "generate markdown", "create pdf", "generate pptx", "generate docx", "storyboard" → Activate DocGenie document generation expertise',
+            '- **Document/video generation keywords**: "generate video", "animation", "animated", "video walkthrough", "multimedia", "create document", "generate presentation", "create slides", "create powerpoint", "slide deck", "executive deck", "leadership deck", "stakeholder deck", "polished deck", "tier-1 deck", "meeting summary deck", "roadmap presentation", "technical review deck", "workbook to powerpoint", "workbook-to-ppt", "generate report", "infographic", "poster", "html report", "generate markdown", "create pdf", "generate pptx", "generate docx", "storyboard" → Activate DocGenie document generation expertise',
+            '- **Presentation setup keywords**: "deck style", "presentation style", "ppt style", "brand deck", "configure presentation", "setup presentation", "leadership deck format" → Activate DocGenie presentation-calibration expertise before generating the deck',
+            '- **Git commit keywords**: "commit and push", "git push", "push changes", "commit changes", "push repo changes", "push web app changes", "stage and push" → Activate repo commit-and-push expertise and use `commit_and_push_repo_changes`',
             '- **General QA queries**: Framework questions, test execution, code review → Use general QA knowledge',
             '- If intent is ambiguous, ask the user which capability they need.',
             '',
             'CRITICAL — Jira Ticket Access:',
             '- To READ existing Jira tickets, use the `fetch_jira_ticket` custom tool or Atlassian MCP tools (atl_getJiraIssue, atl_searchJiraIssuesUsingJql).',
+            '- To SEARCH Jira issues by JQL or free text, use the `search_jira_issues` custom tool.',
+            '- To READ a Jira Epic or inspect its child issues, use `get_jira_epic` and `get_jira_epic_issues`. To search only Epic issues, use `search_jira_epics`.',
+            '- To find Jira issues that are still not assigned to any Epic, use `list_jira_issues_without_epic` with a projectKey or scoped JQL.',
             '- To CREATE new Jira tickets, use the `create_jira_ticket` custom tool or Atlassian MCP tools (atl_createJiraIssue).',
+            '- Only pass `labels` to `create_jira_ticket` when the user explicitly asks to add labels. Otherwise omit the labels parameter entirely.',
+            '- For true Jira subtasks, call `create_jira_ticket` with `parentIssueKey`. For loose related tasks, call `create_jira_ticket` with `linkedIssueKey`. Do not send both in the same request.',
             '- To UPDATE/EDIT existing Jira tickets (change summary, description, labels, priority, or add comments), use the `update_jira_ticket` custom tool.',
+            '- To INSPECT editable Jira fields and available workflow transitions, use the `get_jira_ticket_capabilities` custom tool.',
+            '- To ASSIGN Jira work to a named user, use `search_jira_users` to resolve the accountId first, then pass that accountId to `create_jira_ticket` as `assigneeAccountId`.',
+            '- To REASSIGN an existing Jira ticket, use the `assign_jira_ticket` custom tool with an accountId or a resolvable assignee query.',
+            '- To DELETE a Jira ticket created by mistake, use the `delete_jira_ticket` custom tool only after the user explicitly confirms with DELETE <ticketId> or DELETE <ticketId> WITH SUBTASKS in their latest message.',
+            '- To REMOVE an existing Jira issue link, use the `remove_jira_issue_link` custom tool only when the user explicitly asks to unlink tickets or remove an associated link.',
+            '- To CHANGE Jira status, use the `transition_jira_ticket` custom tool. Atlassian MCP transition tools can be used as fallback when configured.',
+            '- To LOG time spent on a Jira ticket, or when the user says "Time Tracking" / "add hours", use the `log_jira_work` custom tool.',
+            '- To UPDATE originalEstimate or remainingEstimate fields, use the `update_jira_estimates` custom tool only when the user explicitly asks for estimate changes.',
+            '- If a request mixes worklog language and estimate language, ask which one the user wants before mutating Jira time tracking fields.',
             '- NEVER use web/fetch, fetch_webpage, or HTTP scraping to access Jira URLs — Jira is a client-rendered SPA and HTML scraping returns no useful content.',
             '- When creating Testing tasks for Bug-type tickets, FIRST use `fetch_jira_ticket` to read the parent ticket details, THEN create the Testing task with proper context.',
             '',
             'CRITICAL — Jira URL Handling:',
             '- When the user provides a Jira ticket URL (e.g., https://corelogic.atlassian.net/browse/AOTF-16514), extract the base URL (everything before "/browse/") and pass it as the `jiraBaseUrl` parameter when calling `create_jira_ticket`.',
+            '- When the user provides a Jira browse URL and asks to read or summarize the ticket, use `fetch_jira_ticket` with the ticket key or the full URL. Do not ask the user to paste the ticket text manually.',
+            '',
+            'CRITICAL — Confluence URL Handling:',
+            '- To READ and NAVIGATE Confluence directly, prefer `search_confluence_content`, `get_confluence_page_details`, `list_confluence_spaces`, `list_confluence_pages_in_space`, and `get_confluence_page_tree`.',
+            '- Keep `search_knowledge_base` and `get_knowledge_base_page` for grounding-oriented KB retrieval across providers, or use Atlassian MCP Confluence tools as fallback.',
+            '- When the user provides a Confluence page URL (e.g., https://corelogic.atlassian.net/wiki/spaces/AOTF/pages/189467646/...), fetch it directly with `get_confluence_page_details`. The tool accepts the full URL and numeric page ID.',
+            '- If the user asks to summarize a specific section from a Confluence URL, fetch the page first and summarize only that requested section.',
+            '- NEVER claim a Confluence page cannot be accessed because of browser login when the KB connector or Atlassian MCP tools are available in the session.',
             '',
             'CRITICAL — Testing Task Description Formatting:',
             '- When creating Testing tasks for Bug-type parent tickets, format test cases as MARKDOWN TABLES in the description.',
@@ -577,6 +915,11 @@ class ChatSessionManager extends EventEmitter {
             '- Keep the main answer concise; put detailed breakdowns in collapsible sections.',
             '- When explaining multi-step processes, prefer a mermaid flowchart over numbered text lists.',
         ];
+
+        const projectSkillsGuide = buildProjectSkillActivationGuide(loadProjectSkillsCatalog());
+        if (projectSkillsGuide) {
+            parts.push('', projectSkillsGuide);
+        }
 
         // ── Inject agent-specific expertise from .agent.md files ──
         const agentExpertise = [
@@ -691,6 +1034,7 @@ class ChatSessionManager extends EventEmitter {
                     ...createCustomTools(this.defineTool, 'testgenie', toolOpts),
                     ...createCustomTools(this.defineTool, 'buggenie', toolOpts),
                     ...createCustomTools(this.defineTool, 'taskgenie', toolOpts),
+                    ...createCustomTools(this.defineTool, 'docgenie', toolOpts),
                 ];
                 // Default (TPM) also gets read-only filesystem tools
                 try {
@@ -714,54 +1058,334 @@ class ChatSessionManager extends EventEmitter {
         }
     }
 
-    /**
-     * Create a new chat session.
-     *
-     * @param {Object} [options]
-     * @param {string} [options.model]     - Model override
-     * @param {string|null} [options.agentMode] - Agent mode: null (default), 'testgenie', 'scriptgenerator', 'buggenie', 'taskgenie'
-     * @returns {Promise<{ sessionId, model, createdAt, agentMode }>}
-     */
-    async createSession(options = {}) {
-        const model = options.model || this.model;
-        const agentMode = options.agentMode || null;
+    _createSessionError(code, message, status = 409, details = {}) {
+        const error = new Error(message);
+        error.code = code;
+        error.status = status;
+        Object.assign(error, details);
+        return error;
+    }
 
-        // Validate agentMode
-        if (agentMode && !ChatSessionManager.VALID_AGENTS.includes(agentMode)) {
-            throw new Error(`Invalid agentMode: ${agentMode}. Valid: ${ChatSessionManager.VALID_AGENTS.join(', ')}`);
+    _touchSession(entry) {
+        entry.lastActivityAt = new Date().toISOString();
+        entry.lastEventAt = entry.lastActivityAt;
+    }
+
+    _setExecutionState(entry, nextState, extra = {}) {
+        if (!entry) return;
+        entry.executionState = nextState;
+        if (typeof extra.activeToolCount === 'number') {
+            entry.activeToolCount = Math.max(0, extra.activeToolCount);
+        }
+        if (Object.prototype.hasOwnProperty.call(extra, 'lastError')) {
+            entry.lastError = extra.lastError || null;
+        }
+        entry.lastEventAt = new Date().toISOString();
+    }
+
+    _updateRuntimeQueuePositions() {
+        this._runtimeCreateQueue.forEach((task, index) => {
+            const entry = this._sessions.get(task.sessionId);
+            if (!entry || entry._destroyRequested) return;
+            entry.runtimeState = SESSION_RUNTIME_STATES.QUEUED;
+            entry.queuePosition = index + 1;
+        });
+    }
+
+    _drainRuntimeCreateQueue() {
+        while (this._runtimeCreateActiveCount < this._runtimeCreateConcurrency && this._runtimeCreateQueue.length > 0) {
+            const task = this._runtimeCreateQueue.shift();
+            this._updateRuntimeQueuePositions();
+            if (!task) continue;
+            if (!this._sessions.has(task.sessionId) || task.entry?._destroyRequested) {
+                task.resolve(null);
+                continue;
+            }
+            this._runRuntimeBootstrapTask(task);
+        }
+    }
+
+    _runRuntimeBootstrapTask(task) {
+        const { sessionId, entry, resolve } = task;
+        if (!this._sessions.has(sessionId) || entry?._destroyRequested) {
+            resolve(null);
+            return;
         }
 
-        const sessionContext = { sessionId: null };
+        this._runtimeCreateActiveCount++;
+        entry.runtimeState = SESSION_RUNTIME_STATES.INITIALIZING;
+        entry.queuePosition = 0;
+        entry.lastError = null;
+        entry.lastEventAt = new Date().toISOString();
+        this._persistHistory();
+
+        Promise.resolve()
+            .then(async () => {
+                const { session, sessionContext } = await this._createRuntimeSession({
+                    appSessionId: sessionId,
+                    model: entry.model,
+                    agentMode: entry.agentMode,
+                    existingContext: entry.sessionContext,
+                });
+
+                if (!this._sessions.has(sessionId) || entry._destroyRequested) {
+                    if (session && typeof session.destroy === 'function') {
+                        try { await session.destroy(); } catch { /* ignore */ }
+                    }
+                    resolve(null);
+                    return;
+                }
+
+                entry.session = session;
+                entry.sessionContext = sessionContext;
+                entry.runtimeSessionId = session.sessionId;
+                entry.runtimeState = SESSION_RUNTIME_STATES.ACTIVE;
+                entry.queuePosition = 0;
+                entry.lastError = null;
+                this._setExecutionState(entry, SESSION_EXECUTION_STATES.IDLE, { activeToolCount: 0, lastError: null });
+                this._touchSession(entry);
+                this._wireSessionEvents(sessionId, session);
+                this._persistHistory();
+                resolve(this._buildSessionSnapshot(sessionId, entry));
+            })
+            .catch((error) => {
+                if (!this._sessions.has(sessionId) || entry?._destroyRequested) {
+                    resolve(null);
+                    return;
+                }
+
+                entry.session = null;
+                entry.runtimeSessionId = null;
+                entry.runtimeState = SESSION_RUNTIME_STATES.FAILED;
+                entry.queuePosition = 0;
+                this._setExecutionState(entry, SESSION_EXECUTION_STATES.ERROR, {
+                    activeToolCount: 0,
+                    lastError: error?.message || 'Failed to create runtime session',
+                });
+                this._persistHistory();
+                resolve(this._buildSessionSnapshot(sessionId, entry));
+            })
+            .finally(() => {
+                if (entry) {
+                    entry.runtimeInitPromise = null;
+                }
+                this._runtimeCreateActiveCount = Math.max(0, this._runtimeCreateActiveCount - 1);
+                this._drainRuntimeCreateQueue();
+            });
+    }
+
+    _enqueueRuntimeBootstrap(sessionId, entry) {
+        if (!entry) return Promise.resolve(null);
+        if (entry.runtimeInitPromise) return entry.runtimeInitPromise;
+
+        entry.lastError = null;
+        entry.lastEventAt = new Date().toISOString();
+
+        entry.runtimeInitPromise = new Promise((resolve) => {
+            const task = { sessionId, entry, resolve };
+            if (this._runtimeCreateActiveCount < this._runtimeCreateConcurrency) {
+                this._runRuntimeBootstrapTask(task);
+                return;
+            }
+
+            entry.runtimeState = SESSION_RUNTIME_STATES.QUEUED;
+            this._runtimeCreateQueue.push(task);
+            this._updateRuntimeQueuePositions();
+            this._persistHistory();
+        });
+
+        return entry.runtimeInitPromise;
+    }
+
+    _cancelQueuedRuntimeBootstrap(sessionId) {
+        if (this._runtimeCreateQueue.length === 0) return;
+        const remaining = [];
+        for (const task of this._runtimeCreateQueue) {
+            if (task.sessionId === sessionId) {
+                task.resolve(null);
+                continue;
+            }
+            remaining.push(task);
+        }
+        this._runtimeCreateQueue = remaining;
+        this._updateRuntimeQueuePositions();
+    }
+
+    async _awaitRuntimeBootstrap(sessionId, entry) {
+        if (!entry) return null;
+
+        if ((entry.runtimeState === SESSION_RUNTIME_STATES.INITIALIZING || entry.runtimeState === SESSION_RUNTIME_STATES.QUEUED) && entry.runtimeInitPromise) {
+            await entry.runtimeInitPromise;
+        } else if (entry.runtimeState === SESSION_RUNTIME_STATES.FAILED && !entry.archived) {
+            await this._enqueueRuntimeBootstrap(sessionId, entry);
+        }
+
+        if (entry.session && this._getRuntimeState(entry) === SESSION_RUNTIME_STATES.ACTIVE) {
+            return this._buildSessionSnapshot(sessionId, entry);
+        }
+
+        return null;
+    }
+
+    _deriveSessionTitleFromMessages(messages = []) {
+        if (!Array.isArray(messages)) return null;
+
+        for (const message of messages) {
+            if (!message || message.role !== 'user') continue;
+            const candidate = buildSessionTitleCandidate(message.content || '');
+            if (!candidate) continue;
+            if (isFallbackSessionTitle(candidate)) continue;
+            return candidate;
+        }
+
+        for (const message of messages) {
+            if (!message || message.role !== 'user') continue;
+            const candidate = buildSessionTitleCandidate(message.content || '');
+            if (candidate) return candidate;
+        }
+
+        return null;
+    }
+
+    _resolveSessionTitle(entry) {
+        if (!entry) return null;
+
+        const currentTitle = isNonEmptyString(entry.title) ? entry.title.trim() : '';
+        if (currentTitle && !isFallbackSessionTitle(currentTitle)) {
+            return truncateSessionTitle(normalizeSessionTitleText(currentTitle));
+        }
+
+        return this._deriveSessionTitleFromMessages(entry.messages) || (currentTitle || null);
+    }
+
+    _refreshSessionTitle(entry) {
+        if (!entry) return false;
+
+        const nextTitle = this._resolveSessionTitle(entry);
+        const normalizedCurrent = isNonEmptyString(entry.title) ? entry.title.trim() : null;
+
+        if ((normalizedCurrent || null) === (nextTitle || null)) {
+            return false;
+        }
+
+        entry.title = nextTitle || null;
+        return true;
+    }
+
+    _getRuntimeState(entry) {
+        if (!entry) return SESSION_RUNTIME_STATES.ARCHIVED;
+        if (entry.archived) return SESSION_RUNTIME_STATES.ARCHIVED;
+        if (entry.runtimeState) return entry.runtimeState;
+        return entry.session ? SESSION_RUNTIME_STATES.ACTIVE : SESSION_RUNTIME_STATES.RESUME_REQUIRED;
+    }
+
+    _buildSessionSnapshot(sessionId, entry) {
+        const title = this._resolveSessionTitle(entry);
+        return {
+            sessionId,
+            title,
+            model: entry.model,
+            agentMode: entry.agentMode || null,
+            createdAt: entry.createdAt,
+            messageCount: entry.messages.length,
+            sseClients: entry.sseClients?.length || 0,
+            archived: entry.archived || false,
+            archivedReason: entry.archivedReason || null,
+            runtimeState: this._getRuntimeState(entry),
+            executionState: entry.executionState || SESSION_EXECUTION_STATES.IDLE,
+            activeToolCount: entry.activeToolCount || 0,
+            queuePosition: entry.queuePosition || 0,
+            lastError: entry.lastError || null,
+            canResume: !entry.archived,
+            lastActivityAt: entry.lastActivityAt || entry.createdAt,
+            lastEventAt: entry.lastEventAt || entry.lastActivityAt || entry.createdAt,
+            recoveredFromRuntimeFailure: !!entry.recoveredFromRuntimeFailure,
+            recoveryCount: entry.recoveryCount || 0,
+            hasLiveRuntime: !!entry.session,
+            activeProjectSkills: Array.isArray(entry.sessionContext?.latestProjectSkillMatches)
+                ? entry.sessionContext.latestProjectSkillMatches.slice(0, 3)
+                : [],
+            latestProjectSkillMatchedAt: entry.sessionContext?.latestProjectSkillMatchedAt || null,
+        };
+    }
+
+    _buildRecoveryTranscript(entry, limit = RECOVERY_HISTORY_LIMIT) {
+        const transcript = entry.messages
+            .filter(msg => msg.role === 'user' || msg.role === 'assistant')
+            .slice(-limit - 1, -1)
+            .map(msg => {
+                const role = msg.role === 'user' ? 'User' : 'Assistant';
+                const content = String(msg.content || '').trim();
+                if (!content) return null;
+                return `${role}: ${content}`;
+            })
+            .filter(Boolean)
+            .join('\n');
+
+        if (!transcript) return '';
+        return transcript.length > MAX_RECOVERY_TRANSCRIPT_CHARS
+            ? transcript.slice(-MAX_RECOVERY_TRANSCRIPT_CHARS)
+            : transcript;
+    }
+
+    _buildRecoveredPrompt(entry, promptContent) {
+        const transcript = this._buildRecoveryTranscript(entry);
+        if (!transcript) return promptContent;
+
+        return [
+            '[Session recovery notice]',
+            'The previous live runtime session became unavailable. Continue using the reconstructed recent conversation context below.',
+            '<recent_conversation>',
+            transcript,
+            '</recent_conversation>',
+            '<latest_user_message>',
+            promptContent,
+            '</latest_user_message>',
+        ].join('\n\n');
+    }
+
+    _isRecoverableRuntimeError(error) {
+        const message = String(error?.message || '').toLowerCase();
+        return (
+            message.includes('session not found')
+            || message.includes('request session.send failed')
+            || message.includes('session.send failed')
+            || message.includes('session send failed')
+            || message.includes('runtime session')
+            || message.includes('no live runtime session')
+        );
+    }
+
+    async _createRuntimeSession({ appSessionId, model, agentMode, existingContext = null }) {
+        const sessionContext = {
+            latestUserMessageId: null,
+            latestUserMessageTimestamp: null,
+            activeEvidenceMessageId: null,
+            activeEvidenceTimestamp: null,
+            ...(existingContext && typeof existingContext === 'object' ? existingContext : {}),
+            sessionId: appSessionId,
+        };
         const tools = this._buildChatTools(agentMode, sessionContext);
-        const systemPrompt = agentMode ? this._buildSystemPrompt(agentMode) : this._defaultSystemPrompt;
+        const systemPrompt = this._buildSystemPrompt(agentMode);
 
-        console.log(`[ChatManager] Creating session — model: ${model}, agentMode: ${agentMode || 'TPM'}, tools: ${tools.length}`);
+        console.log(`[ChatManager] Creating runtime session — appSessionId: ${appSessionId}, model: ${model}, agentMode: ${agentMode || 'TPM'}, tools: ${tools.length}`);
 
+        let session;
         const sessionConfig = {
             model,
             tools,
             systemMessage: { content: systemPrompt },
             streaming: true,
-
-            // Auto-approve all tool calls in chat (read-only tools are safe)
             onPermissionRequest: async () => ({ kind: 'approved' }),
-
-            // ── User-input relay ─────────────────────────────────────────
-            // When the agent calls ask_user / ask_questions the SDK invokes
-            // this callback.  Instead of auto-answering we:
-            //   1. Emit an SSE event so the dashboard shows an inline prompt
-            //   2. Return a Promise that blocks the agent until the user responds
-            //   3. Set a timeout to auto-resolve if the user doesn't respond
             onUserInputRequest: async (request) => {
-                // Extract question & options from the SDK request object
-                const question = request?.question || request?.message || (typeof request === 'string' ? request : JSON.stringify(request));
-                const options = Array.isArray(request?.options) ? request.options : [];
+                const normalizedRequest = normalizeUserInputRequestPayload(request);
+                const { question, options, type: inputType, meta: requestMeta, usedFallbackQuestion, nestedPayloadDetected } = normalizedRequest;
+                if (usedFallbackQuestion || nestedPayloadDetected) {
+                    console.warn('[ChatManager] onUserInputRequest received a malformed payload; normalized before broadcasting');
+                }
 
-                // We need the sessionId which is captured after createSession resolves.
-                // This callback can only fire after session creation, so _sessions is populated.
                 const sessionEntry = this._findEntryBySession(session);
                 if (!sessionEntry) {
-                    // Fallback if we can't locate the session (should never happen)
                     console.warn('[ChatManager] onUserInputRequest: could not locate session — auto-answering');
                     return { answer: 'Continue with the best approach based on available context.' };
                 }
@@ -771,7 +1395,6 @@ class ChatSessionManager extends EventEmitter {
                 console.log(`[ChatManager] 💬 User input requested (${requestId}): ${question.slice(0, 120)}`);
 
                 return new Promise((resolve) => {
-                    // Auto-resolve timer — prevents the agent from hanging forever
                     const timer = setTimeout(() => {
                         if (entry.pendingInputRequests.has(requestId)) {
                             console.log(`[ChatManager] ⏱️ User input timed out (${requestId}) — auto-resolving`);
@@ -785,28 +1408,24 @@ class ChatSessionManager extends EventEmitter {
                         }
                     }, USER_INPUT_TIMEOUT_MS);
 
-                    // Store the pending request
-                    entry.pendingInputRequests.set(requestId, { resolve, question, options, timer });
+                    entry.pendingInputRequests.set(requestId, { resolve, question, options, timer, meta: requestMeta, type: inputType });
 
-                    // Determine input type from SDK request metadata (if present)
-                    const inputType = request?.type || request?.meta?.type || 'default';
-
-                    // Record in message history so it replays on reconnect
                     entry.messages.push({
                         role: 'user_input_request',
                         content: question,
                         requestId,
                         options,
                         type: inputType,
+                        meta: requestMeta,
                         timestamp: new Date().toISOString(),
                     });
 
-                    // Broadcast SSE event to the dashboard — include type for credential UI
                     this._broadcastToSSE(sid, CHAT_EVENTS.USER_INPUT_REQUEST, {
                         requestId,
                         question,
                         options,
                         type: inputType,
+                        meta: requestMeta,
                     });
 
                     this._persistHistory();
@@ -814,13 +1433,7 @@ class ChatSessionManager extends EventEmitter {
             },
         };
 
-        // Add MCP servers based on agent mode
-        // - Default (null): both MCP servers
-        // - testgenie / buggenie: Atlassian MCP only (Jira)
-        // - scriptgenerator: Unified Automation MCP only (browser)
         try {
-            // Re-read .env to pick up credential changes (e.g. rotated API tokens)
-            // without requiring a server restart
             try {
                 const envPath = path.join(__dirname, '..', '.env');
                 if (fs.existsSync(envPath)) {
@@ -833,19 +1446,13 @@ class ChatSessionManager extends EventEmitter {
             const needsBrowser = explorationEnabled && (!agentMode || agentMode === 'scriptgenerator');
             const needsJira = !agentMode || agentMode === 'testgenie' || agentMode === 'buggenie' || agentMode === 'taskgenie';
 
-            // FileGenie doesn't need browser or Jira MCP — only filesystem tools
             if (agentMode === 'filegenie') {
-                console.log(`[ChatManager] FileGenie mode — skipping MCP servers (filesystem tools only)`);
+                console.log('[ChatManager] FileGenie mode — skipping MCP servers (filesystem tools only)');
             }
 
-            // 1. Unified Automation MCP — live browser exploration
             if (needsBrowser) {
                 const mcpServerPath = path.join(__dirname, '..', 'mcp-server', 'server.js');
                 if (fs.existsSync(mcpServerPath)) {
-                    // Dynamic Tool Scoping: pass the agent's tool profile to the MCP server.
-                    // ScriptGenerator gets 'core' (~65 tools instead of 141), saving ~25K tokens.
-                    // The tools/call handler still routes ANY valid tool name regardless of
-                    // listing — filtering optimizes context, not capabilities.
                     const AGENT_PROFILES = { scriptgenerator: 'core', testgenie: 'core', buggenie: 'core', codereviewer: 'core', taskgenie: 'core' };
                     const toolProfile = AGENT_PROFILES[agentMode] || 'full';
                     mcpServers['unified-automation'] = {
@@ -865,7 +1472,6 @@ class ChatSessionManager extends EventEmitter {
                 }
             }
 
-            // 2. Atlassian MCP — Jira ticket read/write
             if (needsJira) {
                 const jiraEmail = process.env.JIRA_EMAIL || '';
                 const jiraApiToken = process.env.JIRA_API_TOKEN || '';
@@ -891,8 +1497,6 @@ class ChatSessionManager extends EventEmitter {
             console.warn(`[ChatManager] ⚠️ MCP server configuration failed: ${err.message}. Session will proceed without MCP — custom tools (fetch_jira_ticket, create_jira_ticket) remain available.`);
         }
 
-        // Retry once on abort/signal errors (MCP server cold-start can cause SDK timeout)
-        let session;
         try {
             session = await this.client.createSession(sessionConfig);
         } catch (err) {
@@ -900,40 +1504,255 @@ class ChatSessionManager extends EventEmitter {
             if (msg.includes('abort') || msg.includes('signal')) {
                 console.warn(`[ChatManager] Session creation aborted, retrying in 2s... (${msg})`);
                 await new Promise(r => setTimeout(r, 2000));
-                session = await this.client.createSession(sessionConfig); // let it throw on 2nd failure
+                session = await this.client.createSession(sessionConfig);
             } else {
                 throw err;
             }
         }
-        const sessionId = session.sessionId;
-        sessionContext.sessionId = sessionId;
+
+        sessionContext.runtimeSessionId = session.sessionId;
+        return { session, sessionContext };
+    }
+
+    async _recoverRuntimeSession(sessionId, entry, options = {}) {
+        if (entry.archived) {
+            throw this._createSessionError(
+                'CHAT_SESSION_ARCHIVED',
+                `Session ${sessionId} is archived (read-only). Create a new session to chat.`,
+                409,
+                { runtimeState: SESSION_RUNTIME_STATES.ARCHIVED, recoverable: false }
+            );
+        }
+
+        if (entry.recoveryPromise) {
+            return entry.recoveryPromise;
+        }
+
+        entry.recoveryPromise = (async () => {
+            entry.runtimeState = SESSION_RUNTIME_STATES.RECOVERING;
+            entry.runtimeLostReason = options.reason || entry.runtimeLostReason || 'runtime_unavailable';
+            if (entry.activeToolCallIds) {
+                entry.activeToolCallIds.clear();
+            }
+            this._setExecutionState(entry, SESSION_EXECUTION_STATES.IDLE, {
+                activeToolCount: 0,
+                lastError: options.lastError || entry.lastError || null,
+            });
+            this._persistHistory();
+
+            for (const unsub of entry.unsubscribers || []) {
+                try { unsub(); } catch { /* ignore */ }
+            }
+            entry.unsubscribers = [];
+
+            if (entry.session && typeof entry.session.destroy === 'function') {
+                try {
+                    await entry.session.destroy();
+                } catch { /* ignore */ }
+            }
+
+            entry.session = null;
+            entry.runtimeSessionId = null;
+
+            const { session, sessionContext } = await this._createRuntimeSession({
+                appSessionId: sessionId,
+                model: entry.model,
+                agentMode: entry.agentMode,
+                existingContext: entry.sessionContext,
+            });
+
+            entry.session = session;
+            entry.sessionContext = sessionContext;
+            entry.runtimeSessionId = session.sessionId;
+            entry.runtimeState = SESSION_RUNTIME_STATES.ACTIVE;
+            entry.recoveredFromRuntimeFailure = true;
+            entry.recoveryCount = (entry.recoveryCount || 0) + 1;
+            entry.lastRecoveredAt = new Date().toISOString();
+            this._setExecutionState(entry, SESSION_EXECUTION_STATES.IDLE, {
+                activeToolCount: 0,
+                lastError: null,
+            });
+            this._touchSession(entry);
+            this._wireSessionEvents(sessionId, session);
+            this._persistHistory();
+
+            return this._buildSessionSnapshot(sessionId, entry);
+        })();
+
+        try {
+            return await entry.recoveryPromise;
+        } finally {
+            entry.recoveryPromise = null;
+        }
+    }
+
+    async _sendRuntimeMessage(sessionId, entry, messageOptions, allowRecovery = true) {
+        const sendCurrentRuntime = async (finalOptions) => {
+            if (!entry.session) {
+                throw this._createSessionError(
+                    'CHAT_SESSION_RUNTIME_MISSING',
+                    `Live runtime session unavailable for ${sessionId}.`,
+                    409,
+                    { runtimeState: this._getRuntimeState(entry), recoverable: !entry.archived }
+                );
+            }
+
+            const sendFn = typeof entry.session.send === 'function'
+                ? entry.session.send.bind(entry.session)
+                : (typeof entry.session.sendMessage === 'function'
+                    ? entry.session.sendMessage.bind(entry.session)
+                    : null);
+
+            if (!sendFn) {
+                throw this._createSessionError(
+                    'CHAT_SESSION_RUNTIME_INVALID',
+                    `Live runtime session unavailable for ${sessionId}.`,
+                    409,
+                    { runtimeState: this._getRuntimeState(entry), recoverable: !entry.archived }
+                );
+            }
+
+            return sendFn(finalOptions);
+        };
+
+        try {
+            return await sendCurrentRuntime(messageOptions);
+        } catch (error) {
+            if (allowRecovery && !entry.archived && this._isRecoverableRuntimeError(error)) {
+                await this._recoverRuntimeSession(sessionId, entry, {
+                    reason: 'runtime_send_failed',
+                    lastError: error.message,
+                });
+                const recoveredOptions = {
+                    ...messageOptions,
+                    prompt: this._buildRecoveredPrompt(entry, messageOptions.prompt),
+                };
+                return sendCurrentRuntime(recoveredOptions);
+            }
+
+            if (error.code) throw error;
+
+            throw this._createSessionError(
+                'CHAT_SESSION_SEND_FAILED',
+                error?.message || `Failed to send message for session ${sessionId}`,
+                this._isRecoverableRuntimeError(error) ? 409 : 500,
+                {
+                    runtimeState: this._getRuntimeState(entry),
+                    recoverable: this._isRecoverableRuntimeError(error) && !entry.archived,
+                }
+            );
+        }
+    }
+
+    getSessionStatus(sessionId) {
+        const entry = this._sessions.get(sessionId);
+        if (!entry) {
+            throw this._createSessionError('CHAT_SESSION_NOT_FOUND', `Session ${sessionId} not found`, 404, { recoverable: false });
+        }
+        return this._buildSessionSnapshot(sessionId, entry);
+    }
+
+    async resumeSession(sessionId) {
+        const entry = this._sessions.get(sessionId);
+        if (!entry) {
+            throw this._createSessionError('CHAT_SESSION_NOT_FOUND', `Session ${sessionId} not found`, 404, { recoverable: false });
+        }
+        if (entry.archived) {
+            throw this._createSessionError(
+                'CHAT_SESSION_ARCHIVED',
+                `Session ${sessionId} is archived (read-only). Create a new session to chat.`,
+                409,
+                { runtimeState: SESSION_RUNTIME_STATES.ARCHIVED, recoverable: false }
+            );
+        }
+        if (entry.session && this._getRuntimeState(entry) === SESSION_RUNTIME_STATES.ACTIVE) {
+            return this._buildSessionSnapshot(sessionId, entry);
+        }
+
+        const bootstrapped = await this._awaitRuntimeBootstrap(sessionId, entry);
+        if (bootstrapped) {
+            return bootstrapped;
+        }
+
+        return this._recoverRuntimeSession(sessionId, entry, { reason: 'manual_resume' });
+    }
+
+    /**
+     * Create a new chat session.
+     *
+     * @param {Object} [options]
+     * @param {string} [options.model]     - Model override
+     * @param {string|null} [options.agentMode] - Agent mode: null (default), 'testgenie', 'scriptgenerator', 'buggenie', 'taskgenie'
+     * @returns {Promise<{ sessionId, model, createdAt, agentMode }>}
+     */
+    async createSession(options = {}) {
+        const model = options.model || this.model;
+        const agentMode = options.agentMode || null;
+
+        // Validate agentMode
+        if (agentMode && !ChatSessionManager.VALID_AGENTS.includes(agentMode)) {
+            throw new Error(`Invalid agentMode: ${agentMode}. Valid: ${ChatSessionManager.VALID_AGENTS.join(', ')}`);
+        }
+        const sessionId = randomUUID();
         const createdAt = new Date().toISOString();
+        const initialRuntimeState = this._runtimeCreateActiveCount < this._runtimeCreateConcurrency
+            ? SESSION_RUNTIME_STATES.INITIALIZING
+            : SESSION_RUNTIME_STATES.QUEUED;
+        const sessionContext = {
+            sessionId,
+            runtimeSessionId: null,
+            latestUserMessageId: null,
+            latestUserMessageTimestamp: null,
+            activeEvidenceMessageId: null,
+            activeEvidenceTimestamp: null,
+            latestProjectSkillMatches: [],
+            latestProjectSkillMatchedAt: null,
+        };
 
         // Store session metadata
-        this._sessions.set(sessionId, {
-            session,
+        const entry = {
+            session: null,
+            runtimeSessionId: null,
             model,
             agentMode,
             createdAt,
+            lastActivityAt: createdAt,
+            lastEventAt: createdAt,
             sseClients: [],
             messages: [],
             unsubscribers: [],
             archived: false,
             sessionContext,
+            runtimeState: initialRuntimeState,
+            executionState: SESSION_EXECUTION_STATES.IDLE,
+            activeToolCount: 0,
+            queuePosition: initialRuntimeState === SESSION_RUNTIME_STATES.QUEUED
+                ? this._runtimeCreateQueue.length + 1
+                : 0,
+            lastError: null,
+            recoveryCount: 0,
+            recoveredFromRuntimeFailure: false,
             pendingInputRequests: new Map(),  // requestId → { resolve, question, options, timer }
+            sessionAttachments: [],
             pendingAssistantAttachments: [],
-        });
+            runtimeInitPromise: null,
+            _destroyRequested: false,
+            _documentTempFiles: [],
+            activeToolCallIds: new Set(),
+        };
 
-        // Wire session events → SSE broadcast
-        this._wireSessionEvents(sessionId, session);
+        this._sessions.set(sessionId, entry);
 
         // Persist to disk
         this._persistHistory();
 
+        // Start runtime creation in the background so the UI gets a session immediately.
+        void this._enqueueRuntimeBootstrap(sessionId, entry);
+
         // Generate welcome followups for the new session
         const welcomeFollowups = this._followupProvider.getWelcomeFollowups(agentMode || 'default');
 
-        return { sessionId, model, createdAt, agentMode, followups: welcomeFollowups };
+        return { ...this._buildSessionSnapshot(sessionId, entry), followups: welcomeFollowups };
     }
 
     /**
@@ -961,14 +1780,15 @@ class ChatSessionManager extends EventEmitter {
 
             // Complete assistant message
             const u2 = session.on('assistant.message', (event) => {
-                const content = event?.data?.content || '';
-                const msg = { role: 'assistant', content, timestamp: new Date().toISOString() };
+                const rawContent = event?.data?.content || '';
                 const pendingAttachments = this._consumePendingAssistantAttachments(entry);
                 const eventAttachments = Array.isArray(event?.data?.attachments) ? event.data.attachments : [];
                 const contentAttachments = (eventAttachments.length === 0 && pendingAttachments.length === 0)
-                    ? this._extractAssistantContentArtifactAttachments(content)
+                    ? this._extractAssistantContentArtifactAttachments(rawContent)
                     : [];
                 const mergedAttachments = [...eventAttachments, ...pendingAttachments, ...contentAttachments];
+                const content = this._sanitizeAssistantArtifactContent(rawContent, mergedAttachments);
+                const msg = { role: 'assistant', content, timestamp: new Date().toISOString() };
                 if (mergedAttachments.length > 0) {
                     msg.attachments = mergedAttachments;
                 }
@@ -983,6 +1803,7 @@ class ChatSessionManager extends EventEmitter {
                 currentReasoningId = '';
 
                 entry.messages.push(msg);
+                this._touchSession(entry);
                 this._broadcastToSSE(sessionId, CHAT_EVENTS.MESSAGE, {
                     content,
                     messageId: event?.data?.messageId || '',
@@ -1012,6 +1833,14 @@ class ChatSessionManager extends EventEmitter {
             const u3 = session.on('tool.execution_start', (event) => {
                 const toolName = event?.data?.toolName || 'unknown';
                 const toolCallId = event?.data?.toolCallId || '';
+
+                if (entry.activeToolCallIds) {
+                    entry.activeToolCallIds.add(toolCallId || `${toolName}_${Date.now()}`);
+                }
+                this._setExecutionState(entry, SESSION_EXECUTION_STATES.RUNNING, {
+                    activeToolCount: entry.activeToolCallIds?.size || 1,
+                    lastError: null,
+                });
 
                 this._broadcastToSSE(sessionId, CHAT_EVENTS.TOOL_START, {
                     toolName,
@@ -1059,6 +1888,13 @@ class ChatSessionManager extends EventEmitter {
 
             // Session idle (processing complete)
             const u6 = session.on('session.idle', () => {
+                if (entry.activeToolCallIds) {
+                    entry.activeToolCallIds.clear();
+                }
+                this._setExecutionState(entry, SESSION_EXECUTION_STATES.IDLE, {
+                    activeToolCount: 0,
+                    lastError: null,
+                });
                 const pendingAttachments = this._consumePendingAssistantAttachments(entry);
                 if (pendingAttachments.length > 0) {
                     const artifactMessage = {
@@ -1098,8 +1934,23 @@ class ChatSessionManager extends EventEmitter {
 
             // Errors
             const u7 = session.on('session.error', (event) => {
+                const errorMessage = event?.data?.message || 'Unknown error';
+                if (entry.activeToolCallIds) {
+                    entry.activeToolCallIds.clear();
+                }
+                if (this._isRecoverableRuntimeError({ message: errorMessage })) {
+                    entry.session = null;
+                    entry.runtimeSessionId = null;
+                    entry.runtimeState = SESSION_RUNTIME_STATES.RESUME_REQUIRED;
+                    entry.runtimeLostReason = errorMessage;
+                }
+                this._setExecutionState(entry, SESSION_EXECUTION_STATES.ERROR, {
+                    activeToolCount: 0,
+                    lastError: errorMessage,
+                });
+                this._persistHistory();
                 this._broadcastToSSE(sessionId, CHAT_EVENTS.ERROR, {
-                    error: event?.data?.message || 'Unknown error',
+                    error: errorMessage,
                 });
             });
             if (u7) unsubscribers.push(u7);
@@ -1381,12 +2232,32 @@ class ChatSessionManager extends EventEmitter {
     _extractArtifactPathsFromText(text) {
         if (typeof text !== 'string' || !text.trim()) return [];
 
-        const matches = text.match(/(?:[A-Za-z]:[\\/]|\.\.?[\\/]|\/)?[^\s`"'<>|]+(?:[\\/][^\s`"'<>|]+)*\.(?:pdf|docx|doc|pptx|ppt|xlsx|xls|csv|html|htm|txt|md|json|webm|mp4|png|jpe?g|svg)/gi);
-        return Array.isArray(matches) ? matches : [];
+        const extensionPattern = '(?:pdf|docx|doc|pptx|ppt|xlsx|xls|csv|html|htm|txt|md|json|webm|mp4|png|jpe?g|svg|spec\\.js|js|ts)';
+        const patterns = [
+            // Captures absolute/relative paths including spaces (e.g., C:\\Repo Name\\artifact.pptx).
+            new RegExp('(?:[A-Za-z]:[\\\\/]|\\.\\.?[\\\\/]|/|[A-Za-z0-9_.-]+[\\\\/])[^\\r\\n<>|]+?\\.' + extensionPattern, 'gi'),
+            // Conservative fallback without spaces for compact inline paths.
+            new RegExp('(?:[A-Za-z]:[\\\\/]|\\.\\.?[\\\\/]|/)?[^\\s\\r\\n"\'<>|]+(?:[\\\\/][^\\s\\r\\n"\'<>|]+)*\\.' + extensionPattern, 'gi'),
+        ];
+
+        const candidates = new Set();
+        for (const pattern of patterns) {
+            const matches = text.match(pattern) || [];
+            for (const match of matches) {
+                const normalized = String(match || '').trim();
+                if (normalized) candidates.add(normalized);
+            }
+        }
+
+        return Array.from(candidates);
     }
 
     _resolveArtifactPath(candidatePath) {
-        const trimmedPath = String(candidatePath || '').trim();
+        const trimmedPath = String(candidatePath || '')
+            .trim()
+            .replace(/^[`"']+|[`"']+$/g, '')
+            .replace(/[),.;:!?]+$/g, '')
+            .trim();
         if (!trimmedPath) return '';
 
         const candidatePaths = [];
@@ -1407,18 +2278,10 @@ class ChatSessionManager extends EventEmitter {
     }
 
     _isGeneratedArtifactPath(resolvedPath) {
-        if (!resolvedPath) return false;
-
-        const relativePath = path.relative(PROJECT_ROOT, resolvedPath).replace(/\\/g, '/');
-        if (!relativePath || relativePath.startsWith('..')) return false;
-
-        return [
-            'agentic-workflow/test-cases/',
-            'agentic-workflow/test-artifacts/',
-            'agentic-workflow/exploration-data/',
-            'test-results/',
-            'playwright-report/',
-        ].some((prefix) => relativePath.startsWith(prefix));
+        return isGeneratedArtifactPath(resolvedPath, {
+            projectRoot: PROJECT_ROOT,
+            roots: this._generatedArtifactRoots,
+        });
     }
 
     _extractAssistantContentArtifactAttachments(content) {
@@ -1445,7 +2308,10 @@ class ChatSessionManager extends EventEmitter {
         const toolName = event?.data?.toolName || event?.data?.name || 'unknown';
         const toolCallId = event?.data?.toolCallId || event?.data?.id || '';
         const rawResult = event?.data?.result;
-        const artifactAttachments = this._extractToolGeneratedAttachments(toolName, rawResult);
+        const success = event?.data?.success ?? true;
+        const artifactAttachments = success
+            ? this._extractToolGeneratedAttachments(toolName, rawResult, { success })
+            : [];
 
         if (artifactAttachments.length > 0) {
             this._queuePendingAssistantAttachments(entry, artifactAttachments, {
@@ -1458,29 +2324,39 @@ class ChatSessionManager extends EventEmitter {
             }
         }
 
+        if (entry?.activeToolCallIds) {
+            entry.activeToolCallIds.delete(toolCallId);
+        }
+        this._setExecutionState(
+            entry,
+            (entry?.activeToolCallIds?.size || 0) > 0 ? SESSION_EXECUTION_STATES.RUNNING : SESSION_EXECUTION_STATES.IDLE,
+            {
+                activeToolCount: entry?.activeToolCallIds?.size || 0,
+                lastError: success ? null : (event?.data?.error || `${toolName} failed`),
+            }
+        );
+
         this._broadcastToSSE(sessionId, CHAT_EVENTS.TOOL_COMPLETE, {
             toolName,
             toolCallId,
-            success: event?.data?.success ?? true,
-            result: typeof rawResult === 'string'
-                ? rawResult.substring(0, 500)
-                : '',
+            success,
+            attachments: artifactAttachments,
+            result: this._buildToolCompletionSummary(toolName, rawResult, artifactAttachments),
         });
     }
 
-    _extractToolGeneratedAttachments(toolName, rawResult) {
+    _extractToolGeneratedAttachments(toolName, rawResult, options = {}) {
         const descriptor = this._getGeneratedArtifactToolDescriptor(toolName);
-        if (!descriptor) return [];
-
         const parsed = this._coerceToolResultPayload(rawResult);
         if (!parsed) return [];
+        if (options.success === false || parsed?.success === false) return [];
 
-        const candidates = this._collectGeneratedArtifactCandidates(parsed, descriptor.pathFields);
+        const candidates = this._collectGeneratedArtifactCandidates(parsed, descriptor?.pathFields || []);
         if (candidates.length === 0) return [];
 
         const attachments = [];
         const seenPaths = new Set();
-        const baseLabel = String(parsed?.message || parsed?.label || descriptor.label || 'Generated artifact').trim();
+        const baseLabel = String(parsed?.message || parsed?.label || descriptor?.label || 'Generated artifact').trim();
 
         for (const candidate of candidates) {
             const normalizedPath = this._resolveArtifactPath(candidate.path);
@@ -1491,11 +2367,25 @@ class ChatSessionManager extends EventEmitter {
                 label: candidates.length > 1
                     ? `${baseLabel} (${candidate.displayName || path.basename(normalizedPath)})`
                     : baseLabel,
+                sourceTool: toolName,
             });
             if (attachment) attachments.push(attachment);
         }
 
         return attachments;
+    }
+
+    _buildToolCompletionSummary(toolName, rawResult, attachments = []) {
+        if (attachments.length > 0) {
+            if (attachments.length === 1) {
+                return `${attachments[0].label || 'Generated artifact ready'}: ${attachments[0].name}`;
+            }
+            return `${attachments.length} generated artifacts ready`;
+        }
+
+        return typeof rawResult === 'string'
+            ? rawResult.substring(0, 500)
+            : '';
     }
 
     _collectGeneratedArtifactCandidates(result, pathFields = []) {
@@ -1507,6 +2397,17 @@ class ChatSessionManager extends EventEmitter {
             'reportPath',
             'downloadPath',
             'savedPath',
+            'specPath',
+            'explorationPath',
+            'manifestPath',
+            'rawResultsPath',
+            'htmlPath',
+            'markdownPath',
+            'pdfPath',
+            'pptxPath',
+            'xlsxPath',
+            'videoPath',
+            'imagePath',
         ]));
 
         if (!result) return [];
@@ -1577,15 +2478,51 @@ class ChatSessionManager extends EventEmitter {
         return candidates;
     }
 
+    _sanitizeAssistantArtifactContent(content, attachments = []) {
+        if (typeof content !== 'string' || !content.trim()) return content;
+
+        const artifactAttachments = Array.isArray(attachments)
+            ? attachments.filter((attachment) => attachment?.kind === 'artifact' && (attachment?.path || attachment?.relativePath))
+            : [];
+        if (artifactAttachments.length === 0) return content;
+
+        const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        let sanitized = content;
+
+        for (const attachment of artifactAttachments) {
+            const replacementName = attachment.name || 'generated artifact';
+            const pathReferences = Array.from(new Set([
+                attachment.path,
+                attachment.relativePath,
+                typeof attachment.relativePath === 'string' ? attachment.relativePath.replace(/\//g, '\\\\') : '',
+            ].filter((value) => typeof value === 'string' && value.trim()))).sort((a, b) => b.length - a.length);
+
+            for (const reference of pathReferences) {
+                const escapedReference = escapeRegex(reference);
+                sanitized = sanitized.replace(new RegExp(`\\[([^\\]]+)\\]\\(${escapedReference}\\)`, 'g'), '$1');
+                sanitized = sanitized.replace(new RegExp(escapedReference, 'g'), replacementName);
+            }
+        }
+
+        return sanitized
+            .replace(/\s{2,}/g, ' ')
+            .replace(/\(\s+/g, '(')
+            .replace(/\s+\)/g, ')')
+            .trim();
+    }
+
     _createAssistantArtifactAttachment(filePath, options = {}) {
         const resolvedPath = path.resolve(String(filePath || '').trim());
         if (!resolvedPath || !fs.existsSync(resolvedPath)) return null;
+        if (!this._isGeneratedArtifactPath(resolvedPath)) return null;
 
         const stat = fs.statSync(resolvedPath);
         if (!stat.isFile()) return null;
 
         const ext = path.extname(resolvedPath).toLowerCase();
-        const mimeType = ChatSessionManager._DOC_MIME_BY_EXT[ext] || 'application/octet-stream';
+        const mimeType = ChatSessionManager._IMAGE_MIME_BY_EXT[ext]
+            || ChatSessionManager._DOC_MIME_BY_EXT[ext]
+            || 'application/octet-stream';
         const relativePath = path.relative(PROJECT_ROOT, resolvedPath).replace(/\\/g, '/');
 
         return {
@@ -1600,6 +2537,7 @@ class ChatSessionManager extends EventEmitter {
             relativePath,
             actionable: true,
             label: String(options.label || '').trim() || 'Generated artifact',
+            sourceTool: String(options.sourceTool || '').trim(),
             createdAt: new Date().toISOString(),
         };
     }
@@ -1696,10 +2634,20 @@ class ChatSessionManager extends EventEmitter {
         // ── Custom SDK Tools ──
         'execute_test': { phase: 'execution', message: 'Preparing test execution...' },
         'fetch_jira_ticket': { phase: 'jira', message: 'Fetching Jira ticket...' },
+        'get_jira_epic': { phase: 'jira', message: 'Fetching Jira epic...' },
+        'search_jira_epics': { phase: 'jira', message: 'Searching Jira epics...' },
+        'get_jira_epic_issues': { phase: 'jira', message: 'Fetching Jira epic issues...' },
+        'list_jira_issues_without_epic': { phase: 'jira', message: 'Listing Jira issues without epic...' },
+        'get_jira_ticket_capabilities': { phase: 'jira', message: 'Inspecting Jira ticket capabilities...' },
         'create_jira_ticket': { phase: 'jira', message: 'Creating Jira ticket...' },
+        'transition_jira_ticket': { phase: 'jira', message: 'Transitioning Jira ticket...' },
+        'log_jira_work': { phase: 'jira', message: 'Logging Jira work...' },
+        'update_jira_estimates': { phase: 'jira', message: 'Updating Jira estimates...' },
         'update_jira_ticket': { phase: 'jira', message: 'Updating Jira ticket...' },
         'generate_test_case_excel': { phase: 'excel', message: 'Generating Excel file...' },
         'generate_excel_report': { phase: 'excel', message: 'Generating Excel report...' },
+        'list_session_documents': { phase: 'document', message: 'Inspecting uploaded session documents...' },
+        'parse_session_document': { phase: 'document', message: 'Parsing uploaded document...' },
         'generate_docx': { phase: 'document', message: 'Generating Word document...' },
         'generate_pptx': { phase: 'document', message: 'Generating PowerPoint deck...' },
         'generate_pdf': { phase: 'document', message: 'Generating PDF document...' },
@@ -1713,6 +2661,11 @@ class ChatSessionManager extends EventEmitter {
         'get_feature_map': { phase: 'grounding', message: 'Loading feature map...' },
         'search_knowledge_base': { phase: 'kb', message: 'Searching knowledge base...' },
         'get_knowledge_base_page': { phase: 'kb', message: 'Fetching KB page...' },
+        'search_confluence_content': { phase: 'kb', message: 'Searching Confluence...' },
+        'get_confluence_page_details': { phase: 'kb', message: 'Fetching Confluence page...' },
+        'list_confluence_spaces': { phase: 'kb', message: 'Listing Confluence spaces...' },
+        'list_confluence_pages_in_space': { phase: 'kb', message: 'Listing Confluence pages...' },
+        'get_confluence_page_tree': { phase: 'kb', message: 'Loading Confluence page tree...' },
         'get_test_results': { phase: 'execution', message: 'Loading test results...' },
         'find_test_files': { phase: 'framework', message: 'Searching for test files...' },
         'get_selector_recommendations': { phase: 'grounding', message: 'Getting selector recommendations...' },
@@ -1803,28 +2756,69 @@ class ChatSessionManager extends EventEmitter {
      *
      * @param {string} question  - The question to display
      * @param {string[]} options - Clickable option buttons (may be empty)
-     * @param {Object} [meta]   - Additional metadata: { type: 'credentials'|'password'|'default' }
+     * @param {Object} [meta]   - Additional metadata: { type: 'credentials'|'password'|'confirmation'|'default', sessionId?: string }
      * @returns {Promise<{ answer: string|Object, wasFreeform: boolean }>}
      */
     requestUserInput(question, options = [], meta = {}) {
+        let preferredSessionId = isNonEmptyString(meta?.sessionId) ? meta.sessionId : null;
+        let normalizedRequest;
+
+        if (
+            isNonEmptyString(question)
+            && options
+            && typeof options === 'object'
+            && !Array.isArray(options)
+            && (isNonEmptyString(options.question) || isNonEmptyString(options.message) || Array.isArray(options.options) || isNonEmptyString(options.type))
+        ) {
+            preferredSessionId = question;
+            normalizedRequest = normalizeUserInputRequestPayload(options, meta?.type || 'default');
+            meta = {
+                ...(options.meta && typeof options.meta === 'object' ? options.meta : {}),
+                ...(meta && typeof meta === 'object' ? meta : {}),
+                sessionId: preferredSessionId,
+                type: normalizedRequest.type,
+            };
+        } else {
+            normalizedRequest = normalizeUserInputRequestPayload({ question, options, meta }, meta?.type || 'default');
+            meta = {
+                ...(meta && typeof meta === 'object' ? meta : {}),
+                type: normalizedRequest.type,
+            };
+        }
+
+        const promptQuestion = normalizedRequest.question;
+        const promptOptions = normalizedRequest.options;
+        const inputType = normalizedRequest.type;
+
         // Find the best target session: prefer the most recent non-archived session with SSE clients
         let targetSid = null;
         let targetEntry = null;
-        for (const [sid, entry] of this._sessions) {
-            if (!entry.archived && entry.sseClients.length > 0) {
-                targetSid = sid;
-                targetEntry = entry;
-                // Don't break — keep iterating to find the most recently created one
+        if (preferredSessionId) {
+            const preferredEntry = this._sessions.get(preferredSessionId);
+            if (preferredEntry && !preferredEntry.archived && preferredEntry.sseClients.length > 0) {
+                targetSid = preferredSessionId;
+                targetEntry = preferredEntry;
+            }
+        }
+        if (!targetSid || !targetEntry) {
+            for (const [sid, entry] of this._sessions) {
+                if (!entry.archived && entry.sseClients.length > 0) {
+                    targetSid = sid;
+                    targetEntry = entry;
+                    // Don't break — keep iterating to find the most recently created one
+                }
             }
         }
         if (!targetSid || !targetEntry) {
             console.warn('[ChatManager] requestUserInput: no active session with SSE clients — auto-answering');
-            return Promise.resolve({ answer: 'skip', wasFreeform: true });
+            return Promise.resolve({
+                answer: inputType === 'credentials' ? 'skip' : 'Continue with the best approach based on available context.',
+                wasFreeform: true,
+            });
         }
 
         const requestId = `uir_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const inputType = meta?.type || 'default';
-        console.log(`[ChatManager] 💬 Programmatic user input requested (${requestId}, type=${inputType}): ${question.slice(0, 120)}`);
+        console.log(`[ChatManager] 💬 Programmatic user input requested (${requestId}, type=${inputType}): ${promptQuestion.slice(0, 120)}`);
 
         return new Promise((resolve) => {
             // Auto-resolve timer — prevents hanging forever
@@ -1845,24 +2839,33 @@ class ChatSessionManager extends EventEmitter {
             }, USER_INPUT_TIMEOUT_MS);
 
             // Store the pending request (include meta for credential awareness in resolveUserInput)
-            targetEntry.pendingInputRequests.set(requestId, { resolve, question, options, timer, meta });
+            targetEntry.pendingInputRequests.set(requestId, {
+                resolve,
+                question: promptQuestion,
+                options: promptOptions,
+                timer,
+                meta,
+                type: inputType,
+            });
 
             // Record in message history so it replays on reconnect
             targetEntry.messages.push({
                 role: 'user_input_request',
-                content: question,
+                content: promptQuestion,
                 requestId,
-                options,
+                options: promptOptions,
                 type: inputType,
+                meta,
                 timestamp: new Date().toISOString(),
             });
 
             // Broadcast SSE event to the dashboard — include type for credential UI
             this._broadcastToSSE(targetSid, CHAT_EVENTS.USER_INPUT_REQUEST, {
                 requestId,
-                question,
-                options,
+                question: promptQuestion,
+                options: promptOptions,
                 type: inputType,
+                meta,
             });
 
             this._persistHistory();
@@ -1892,7 +2895,8 @@ class ChatSessionManager extends EventEmitter {
         entry.pendingInputRequests.delete(requestId);
 
         // Determine if this is a credential response — mask in history for security
-        const isCredential = pending.meta?.type === 'credentials' || pending.meta?.type === 'password';
+        const pendingType = pending.meta?.type || pending.type || 'default';
+        const isCredential = pendingType === 'credentials' || pendingType === 'password';
         const historyContent = isCredential
             ? '🔐 Credentials provided (hidden for security)'
             : (typeof answer === 'string' ? answer : JSON.stringify(answer));
@@ -1954,17 +2958,61 @@ class ChatSessionManager extends EventEmitter {
      */
     async sendMessage(sessionId, content, attachments) {
         const entry = this._sessions.get(sessionId);
-        if (!entry) throw new Error(`Session ${sessionId} not found`);
-        if (entry.archived) throw new Error(`Session ${sessionId} is archived (read-only). Create a new session to chat.`);
+        if (!entry) {
+            throw this._createSessionError('CHAT_SESSION_NOT_FOUND', `Session ${sessionId} not found`, 404, { recoverable: false });
+        }
+        if (entry.archived) {
+            throw this._createSessionError(
+                'CHAT_SESSION_ARCHIVED',
+                `Session ${sessionId} is archived (read-only). Create a new session to chat.`,
+                409,
+                { runtimeState: SESSION_RUNTIME_STATES.ARCHIVED, recoverable: false }
+            );
+        }
+
+        const bootstrapped = await this._awaitRuntimeBootstrap(sessionId, entry);
+        if (!bootstrapped && (!entry.session || this._getRuntimeState(entry) !== SESSION_RUNTIME_STATES.ACTIVE)) {
+            throw this._createSessionError(
+                'CHAT_SESSION_INITIALIZING',
+                entry.lastError || 'Session runtime is still starting. Try again in a moment.',
+                entry.runtimeState === SESSION_RUNTIME_STATES.FAILED ? 503 : 409,
+                {
+                    runtimeState: this._getRuntimeState(entry),
+                    recoverable: !entry.archived,
+                }
+            );
+        }
+
+        this._touchSession(entry);
+        const atlassianUrlContext = extractAtlassianUrlContext(content);
+        const userMessageTimestamp = new Date().toISOString();
+        const userMessageId = `user_msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const hasAttachableEvidence = Array.isArray(attachments) && attachments.some(att => {
+            if (att?.type === 'image') return isNonEmptyString(att?.data);
+            if (att?.type === 'video') return isNonEmptyString(att?.tempPath);
+            if (att?.type === 'video_link') return isNonEmptyString(att?.url);
+            return false;
+        });
+
+        // Convert attachments to temp files early — docTempFiles is needed by the session
+        // attachment persistence block below, before the SDK send block runs.
+        let docTempFiles = [];
+        let videoTempFiles = [];
+        let tempFiles = [];
+        let sdkAttachments = [];
+        if (attachments && attachments.length > 0) {
+            ({ sdkAttachments, tempFiles, docTempFiles, videoTempFiles } =
+                this._convertAttachmentsToTempFiles(attachments));
+        }
 
         // Track user message (store attachment metadata only — no base64 in history)
-        const historyMessage = { role: 'user', content, timestamp: new Date().toISOString() };
+        const historyMessage = { role: 'user', content, timestamp: userMessageTimestamp, messageId: userMessageId };
         if (attachments && attachments.length > 0) {
             historyMessage.attachmentMeta = attachments.map(att => ({
                 type: att.type,
                 media_type: att.media_type,
                 filename: att.filename || undefined,
-                size: att.data ? Math.ceil(att.data.length * 0.75) : 0, // estimated decoded size
+                size: Number.isFinite(att.size) ? att.size : (att.data ? Math.ceil(att.data.length * 0.75) : 0), // estimated decoded size
             }));
 
             // Persist attachment data in session for Jira ticket attachment forwarding
@@ -1976,22 +3024,56 @@ class ChatSessionManager extends EventEmitter {
                         type: att.type,
                         media_type: att.media_type,
                         data: att.data, // base64 — retained for Jira upload
-                        timestamp: new Date().toISOString(),
+                        messageId: userMessageId,
+                        timestamp: userMessageTimestamp,
+                    });
+                } else if (att.type === 'document' && att.filename && Array.isArray(docTempFiles)) {
+                    const match = docTempFiles.find(doc => doc.filename === att.filename);
+                    if (match) {
+                        entry.sessionAttachments.push({
+                            type: att.type,
+                            media_type: att.media_type,
+                            filename: att.filename,
+                            path: match.path,
+                            size: Number.isFinite(att.size) ? att.size : (att.data ? Math.ceil(att.data.length * 0.75) : 0),
+                            messageId: userMessageId,
+                            timestamp: userMessageTimestamp,
+                        });
+                        if (!Array.isArray(entry._documentTempFiles)) entry._documentTempFiles = [];
+                        if (!entry._documentTempFiles.includes(match.path)) {
+                            entry._documentTempFiles.push(match.path);
+                        }
+                    }
+                } else if (att.type === 'video' && att.tempPath) {
+                    entry.sessionAttachments.push({
+                        type: att.type,
+                        media_type: att.media_type,
+                        tempPath: att.tempPath,
+                        filename: att.filename || path.basename(att.tempPath),
+                        size: Number.isFinite(att.size) ? att.size : undefined,
+                        messageId: userMessageId,
+                        timestamp: userMessageTimestamp,
+                    });
+                } else if (att.type === 'video_link' && att.url) {
+                    entry.sessionAttachments.push({
+                        type: att.type,
+                        media_type: att.media_type,
+                        url: att.url,
+                        provider: att.provider || 'direct',
+                        filename: att.filename || undefined,
+                        messageId: userMessageId,
+                        timestamp: userMessageTimestamp,
                     });
                 }
             }
-            // Cap at 20 attachments per session to prevent memory bloat
-            // (supports up to 10 images per message with headroom for follow-up messages)
-            if (entry.sessionAttachments.length > 20) {
-                entry.sessionAttachments = entry.sessionAttachments.slice(-20);
+            // Cap retained attachments per session to prevent memory bloat while keeping recent uploads reusable.
+            if (entry.sessionAttachments.length > 30) {
+                entry.sessionAttachments = entry.sessionAttachments.slice(-30);
             }
         }
         entry.messages.push(historyMessage);
 
-        // Auto-set session title from first user message
-        if (!entry.title) {
-            entry.title = content.length > 60 ? content.substring(0, 57) + '...' : content;
-        }
+        this._refreshSessionTitle(entry);
 
         // Persist after user message
         this._persistHistory();
@@ -1999,16 +3081,42 @@ class ChatSessionManager extends EventEmitter {
         // Send to SDK session (non-blocking — response streams via events)
         // IMPORTANT: SDK MessageOptions requires { prompt }, not { content }
         let promptContent = content;
+        const attachmentRoutingText = Array.isArray(attachments)
+            ? attachments
+                .map(attachment => attachment?.filename || attachment?.displayName || attachment?.url || '')
+                .filter(Boolean)
+                .join(' ')
+            : '';
+        const skillRoutingMatches = detectProjectSkillsForMessage(
+            `${content || ''} ${attachmentRoutingText}`,
+            loadProjectSkillsCatalog(),
+        );
+        if (entry.sessionContext) {
+            entry.sessionContext.latestUserMessageId = userMessageId;
+            entry.sessionContext.latestUserMessageTimestamp = userMessageTimestamp;
+            if (hasAttachableEvidence) {
+                entry.sessionContext.activeEvidenceMessageId = userMessageId;
+                entry.sessionContext.activeEvidenceTimestamp = userMessageTimestamp;
+            }
+            entry.sessionContext.latestAtlassianUrlContext = atlassianUrlContext;
+            entry.sessionContext.latestProjectSkillMatches = skillRoutingMatches.slice(0, 3).map(match => ({
+                id: match.id,
+                name: match.name,
+                folderName: match.folderName,
+                score: match.score,
+                matchedKeywords: match.matchedKeywords,
+                matchedPhrases: match.matchedPhrases,
+                matchedTokens: match.matchedTokens,
+            }));
+            entry.sessionContext.latestProjectSkillMatchedAt = skillRoutingMatches.length > 0
+                ? userMessageTimestamp
+                : null;
+        }
 
-        // Convert base64 image/document attachments → temp files for SDK
-        // The Copilot SDK only accepts { type: 'file', path } attachments,
-        // NOT inline base64 data. We decode to temp files and clean up after.
-        let tempFiles = [];
+        // tempFiles, docTempFiles, videoTempFiles, sdkAttachments were already computed above
+        // (before the session attachment persistence block) — reuse those variables here.
         let imageSDKAttachments = [];
         if (attachments && attachments.length > 0) {
-            const { sdkAttachments, tempFiles: files, docTempFiles, videoTempFiles } = this._convertAttachmentsToTempFiles(attachments);
-            tempFiles = files;
-
             // Collect image-only SDK attachments (documents are not passed as SDK file attachments)
             imageSDKAttachments = sdkAttachments.filter(a => a.displayName && /\.(png|jpg|gif|webp)$/.test(a.displayName));
 
@@ -2043,6 +3151,11 @@ class ChatSessionManager extends EventEmitter {
                         }
 
                         if (!videoPath) continue;
+
+                        if (!entry._videoTempFiles) entry._videoTempFiles = [];
+                        if (!entry._videoTempFiles.includes(videoPath)) {
+                            entry._videoTempFiles.push(videoPath);
+                        }
 
                         const result = await analyzer.buildVideoContext(videoPath);
                         if (result && result.frames && result.frames.length > 0) {
@@ -2095,6 +3208,8 @@ class ChatSessionManager extends EventEmitter {
                             // Store ALL video frames in session for BugGenie tools (analyze_video_recording)
                             if (!entry.videoContext) entry.videoContext = [];
                             entry.videoContext.push({
+                                messageId: userMessageId,
+                                timestamp: userMessageTimestamp,
                                 videoPath,
                                 filename: video.filename,
                                 duration: result.metadata.duration,
@@ -2111,18 +3226,38 @@ class ChatSessionManager extends EventEmitter {
             }
         }
 
+        const routingHints = [];
+        if (atlassianUrlContext.atlassianUrls.length > 0) {
+            routingHints.push(buildAtlassianRoutingHint(atlassianUrlContext));
+        }
+
+        const projectSkillHint = buildProjectSkillRoutingHint(
+            `${content || ''} ${attachmentRoutingText}`,
+            loadProjectSkillsCatalog(),
+        );
+        if (projectSkillHint) {
+            routingHints.push(projectSkillHint);
+        }
+
+        if (routingHints.length > 0) {
+            promptContent = `${routingHints.filter(Boolean).join('\n\n')}\n\n${promptContent}`;
+        }
+
         const messageOptions = { prompt: promptContent };
         if (imageSDKAttachments.length > 0) {
             messageOptions.attachments = imageSDKAttachments;
             console.log(`[ChatManager] \u{1F4CE} Sending ${imageSDKAttachments.length} image(s) as file attachments to SDK`);
         }
 
-        const messageId = await entry.session.send(messageOptions);
+        const messageId = await this._sendRuntimeMessage(sessionId, entry, messageOptions, true);
 
         // Schedule temp file cleanup (60s delay to ensure SDK has read them)
         this._scheduleCleanup(tempFiles);
 
-        return { messageId };
+        return {
+            messageId,
+            session: this._buildSessionSnapshot(sessionId, entry),
+        };
     }
 
     /**
@@ -2133,7 +3268,7 @@ class ChatSessionManager extends EventEmitter {
     async getHistory(sessionId) {
         const entry = this._sessions.get(sessionId);
         if (!entry) throw new Error(`Session ${sessionId} not found`);
-        return entry.messages;
+        return entry.messages.map(message => normalizeUserInputHistoryMessage(message));
     }
 
     /**
@@ -2161,7 +3296,9 @@ class ChatSessionManager extends EventEmitter {
      */
     async abort(sessionId) {
         const entry = this._sessions.get(sessionId);
-        if (!entry) throw new Error(`Session ${sessionId} not found`);
+        if (!entry) {
+            throw this._createSessionError('CHAT_SESSION_NOT_FOUND', `Session ${sessionId} not found`, 404, { recoverable: false });
+        }
         if (entry.archived || !entry.session) return; // Nothing to abort for archived sessions
 
         // Auto-resolve any pending user-input requests so the agent doesn't hang
@@ -2186,17 +3323,19 @@ class ChatSessionManager extends EventEmitter {
             if (msg.role === 'user') {
                 type = 'user_message';
             } else if (msg.role === 'user_input_request') {
+                const normalizedMsg = normalizeUserInputHistoryMessage(msg);
                 // Replay the prompt — mark as resolved if no longer pending
-                const stillPending = entry.pendingInputRequests?.has(msg.requestId);
+                const stillPending = entry.pendingInputRequests?.has(normalizedMsg.requestId);
                 const event = {
                     type: CHAT_EVENTS.USER_INPUT_REQUEST,
                     sessionId,
-                    timestamp: msg.timestamp,
+                    timestamp: normalizedMsg.timestamp,
                     data: {
-                        requestId: msg.requestId,
-                        question: msg.content,
-                        options: msg.options || [],
-                        type: msg.type || 'default',
+                        requestId: normalizedMsg.requestId,
+                        question: normalizedMsg.content,
+                        options: normalizedMsg.options || [],
+                        type: normalizedMsg.type || 'default',
+                        meta: normalizedMsg.meta || {},
                         resolved: !stillPending,
                     },
                 };
@@ -2246,6 +3385,9 @@ class ChatSessionManager extends EventEmitter {
         const entry = this._sessions.get(sessionId);
         if (!entry) return;
 
+        entry._destroyRequested = true;
+        this._cancelQueuedRuntimeBootstrap(sessionId);
+
         // Auto-resolve any pending user-input requests before tearing down
         this._autoResolveAllPendingInputs(sessionId);
 
@@ -2281,6 +3423,18 @@ class ChatSessionManager extends EventEmitter {
             console.log(`[ChatManager] Cleaned ${entry._videoTempFiles.length} video temp files on session destroy`);
         }
 
+        if (entry._documentTempFiles && entry._documentTempFiles.length > 0) {
+            for (const fp of entry._documentTempFiles) {
+                try {
+                    if (fs.existsSync(fp)) {
+                        fs.unlinkSync(fp);
+                        console.log(`[ChatManager] \u{1F5D1}\uFE0F  Cleaned document temp file: ${path.basename(fp)}`);
+                    }
+                } catch { /* non-critical */ }
+            }
+            console.log(`[ChatManager] Cleaned ${entry._documentTempFiles.length} document temp files on session destroy`);
+        }
+
         // Clean up stale temp image files (older than 5 minutes)
         try {
             const tempDir = os.tmpdir();
@@ -2309,17 +3463,13 @@ class ChatSessionManager extends EventEmitter {
      */
     listSessions() {
         const sessions = [];
+        let historyUpdated = false;
         for (const [sessionId, entry] of this._sessions) {
-            sessions.push({
-                sessionId,
-                title: entry.title || null,
-                model: entry.model,
-                agentMode: entry.agentMode || null,
-                createdAt: entry.createdAt,
-                messageCount: entry.messages.length,
-                sseClients: entry.sseClients?.length || 0,
-                archived: entry.archived || false,
-            });
+            historyUpdated = this._refreshSessionTitle(entry) || historyUpdated;
+            sessions.push(this._buildSessionSnapshot(sessionId, entry));
+        }
+        if (historyUpdated) {
+            this._persistHistory();
         }
         // Sort: active sessions first, then by creation date descending
         sessions.sort((a, b) => {
@@ -2338,11 +3488,36 @@ class ChatSessionManager extends EventEmitter {
         }
     }
 
+    async prepareForShutdown() {
+        for (const [sessionId, entry] of this._sessions) {
+            this._autoResolveAllPendingInputs(sessionId);
+
+            for (const unsub of entry.unsubscribers || []) {
+                try { unsub(); } catch { /* ignore */ }
+            }
+            entry.unsubscribers = [];
+
+            for (const client of entry.sseClients || []) {
+                try { client.end(); } catch { /* ignore */ }
+            }
+            entry.sseClients = [];
+
+            if (entry.session && typeof entry.session.destroy === 'function') {
+                try { await entry.session.destroy(); } catch { /* ignore */ }
+            }
+
+            entry.session = null;
+            entry.runtimeSessionId = null;
+            entry.runtimeState = entry.archived ? SESSION_RUNTIME_STATES.ARCHIVED : SESSION_RUNTIME_STATES.RESUME_REQUIRED;
+        }
+        this._persistHistory();
+    }
+
     // ─── Chat History Persistence ───────────────────────────────────
 
     /**
-     * Load archived chat sessions from disk.
-     * Archived sessions have { archived: true } — they can be read but not messaged.
+     * Load persisted chat sessions from disk.
+     * Sessions are restored without a live SDK runtime and can be resumed on demand.
      */
     _loadHistory() {
         try {
@@ -2351,25 +3526,67 @@ class ChatSessionManager extends EventEmitter {
             if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
             const data = JSON.parse(content);
 
+            let historyUpdated = false;
             if (Array.isArray(data.sessions)) {
                 for (const saved of data.sessions) {
                     // Don't overwrite live sessions
                     if (this._sessions.has(saved.sessionId)) continue;
 
-                    this._sessions.set(saved.sessionId, {
-                        session: null, // No live SDK session — read-only
+                    const entry = {
+                        session: null,
                         title: saved.title || null,
                         model: saved.model || 'gpt-4o',
                         agentMode: saved.agentMode || null,
                         createdAt: saved.createdAt,
+                        lastActivityAt: saved.lastActivityAt || saved.createdAt,
                         sseClients: [],
-                        messages: saved.messages || [],
+                        messages: Array.isArray(saved.messages)
+                            ? saved.messages.map(message => normalizeUserInputHistoryMessage(message))
+                            : [],
                         unsubscribers: [],
-                        archived: true,
+                        archived: !!saved.archived,
+                        archivedReason: saved.archivedReason || null,
+                        runtimeSessionId: null,
+                        runtimeState: saved.archived
+                            ? SESSION_RUNTIME_STATES.ARCHIVED
+                            : (saved.runtimeState === SESSION_RUNTIME_STATES.FAILED
+                                ? SESSION_RUNTIME_STATES.FAILED
+                                : SESSION_RUNTIME_STATES.RESUME_REQUIRED),
+                        executionState: saved.executionState || SESSION_EXECUTION_STATES.IDLE,
+                        activeToolCount: 0,
+                        queuePosition: 0,
+                        lastError: saved.lastError || null,
+                        lastEventAt: saved.lastEventAt || saved.lastActivityAt || saved.createdAt,
+                        recoveryCount: saved.recoveryCount || 0,
+                        recoveredFromRuntimeFailure: !!saved.recoveredFromRuntimeFailure,
+                        sessionContext: {
+                            sessionId: saved.sessionId,
+                            runtimeSessionId: null,
+                            latestUserMessageId: null,
+                            latestUserMessageTimestamp: null,
+                            activeEvidenceMessageId: null,
+                            activeEvidenceTimestamp: null,
+                        },
+                        pendingInputRequests: new Map(),
+                        sessionAttachments: [],
                         pendingAssistantAttachments: [],
-                    });
+                        runtimeInitPromise: null,
+                        _destroyRequested: false,
+                        _documentTempFiles: [],
+                        activeToolCallIds: new Set(),
+                    };
+
+                    if (this._refreshSessionTitle(entry)) {
+                        historyUpdated = true;
+                    }
+
+                    this._sessions.set(saved.sessionId, entry);
                 }
-                console.log(`[ChatManager] Loaded ${data.sessions.length} archived chat session(s) from disk`);
+                console.log(`[ChatManager] Loaded ${data.sessions.length} persisted chat session(s) from disk`);
+
+                if (historyUpdated) {
+                    this._persistHistory();
+                }
             }
         } catch (error) {
             console.warn(`[ChatManager] Failed to load chat history: ${error.message}`);
@@ -2389,7 +3606,20 @@ class ChatSessionManager extends EventEmitter {
                     model: entry.model,
                     agentMode: entry.agentMode || null,
                     createdAt: entry.createdAt,
-                    messages: entry.messages,
+                    lastActivityAt: entry.lastActivityAt || entry.createdAt,
+                    archived: !!entry.archived,
+                    archivedReason: entry.archivedReason || null,
+                    runtimeState: entry.archived
+                        ? SESSION_RUNTIME_STATES.ARCHIVED
+                        : (entry.runtimeState === SESSION_RUNTIME_STATES.FAILED
+                            ? SESSION_RUNTIME_STATES.FAILED
+                            : SESSION_RUNTIME_STATES.RESUME_REQUIRED),
+                    executionState: entry.executionState || SESSION_EXECUTION_STATES.IDLE,
+                    lastError: entry.lastError || null,
+                    lastEventAt: entry.lastEventAt || entry.lastActivityAt || entry.createdAt,
+                    recoveryCount: entry.recoveryCount || 0,
+                    recoveredFromRuntimeFailure: !!entry.recoveredFromRuntimeFailure,
+                    messages: entry.messages.map(message => normalizeUserInputHistoryMessage(message)),
                 });
             }
 
@@ -2414,4 +3644,9 @@ class ChatSessionManager extends EventEmitter {
 
 // ─── Exports ────────────────────────────────────────────────────────────────
 
-module.exports = { ChatSessionManager, CHAT_EVENTS };
+module.exports = {
+    ChatSessionManager,
+    CHAT_EVENTS,
+    normalizeUserInputRequestPayload,
+    normalizeUserInputHistoryMessage,
+};

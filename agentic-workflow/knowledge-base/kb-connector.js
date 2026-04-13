@@ -518,6 +518,24 @@ class KnowledgeBaseConnector {
         return null;
     }
 
+    /**
+     * Get the first initialized provider matching a provider type.
+     *
+     * @param {string} providerType
+     * @returns {import('./kb-provider').KBProvider|null}
+     */
+    getProviderByType(providerType) {
+        this._ensureInitialized();
+
+        return this._providers.find(provider => {
+            try {
+                return provider?.getProviderType?.() === providerType;
+            } catch {
+                return false;
+            }
+        }) || null;
+    }
+
     // ─── Health & Stats ─────────────────────────────────────────────
 
     /**

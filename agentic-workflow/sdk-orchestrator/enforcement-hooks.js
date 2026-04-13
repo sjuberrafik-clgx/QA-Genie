@@ -1159,6 +1159,11 @@ class DocumentQualityAnalyzer {
 
         const issues = [];
         let score = 100;
+        const toolWarnings = [
+            ...(Array.isArray(result.warnings) ? result.warnings : []),
+            ...(Array.isArray(result.validation?.warnings) ? result.validation.warnings : []),
+        ].filter(Boolean);
+        const uniqueWarnings = [...new Set(toolWarnings)];
 
         // File size check (< 1KB is suspiciously small, > 50MB is excessive)
         if (result.fileSize && result.fileSize < 1024) {
@@ -1178,6 +1183,16 @@ class DocumentQualityAnalyzer {
         }
         if (count > this.maxSections) {
             issues.push(`${count} content items generated — exceeds maximum of ${this.maxSections}. Consider splitting.`);
+            score -= 10;
+        }
+
+        if (uniqueWarnings.length > 0) {
+            issues.push(...uniqueWarnings.slice(0, 5));
+            score -= Math.min(20, uniqueWarnings.length * 5);
+        }
+
+        if (Array.isArray(result.slideTypes) && count >= 6 && result.slideTypes.length < 3) {
+            issues.push('Deck uses very few slide types for a multi-slide presentation — output may feel repetitive or template-like.');
             score -= 10;
         }
 

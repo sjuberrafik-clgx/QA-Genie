@@ -74,6 +74,12 @@ Every test case MUST use this markdown table with these EXACT column names:
 8. **Each test case** gets its own table with a `## Test Case N: Title` heading above it
 9. **Cover all scenarios** with optimized, limited test cases
 
+### Jira-Safe Formatting Rule
+When the generated test case content includes identifiers or system values for Jira:
+* Use **bold** only for section labels and headings.
+* Use `code` for identifiers, field names, property IDs, event names, and state values.
+* Never combine **bold** and `inline code` on the same text span.
+
 ### ❌ WRONG (Actual Results left blank):
 | Test Step ID | Specific Activity or Action | Expected Results | Actual Results |
 |--------------|----------------------------|------------------|----------------|
@@ -169,6 +175,11 @@ Pick the strategy that best fits the ticket complexity. For simple tickets (1-3 
 - **READ** existing Jira tickets using `fetch_jira_ticket` or Atlassian MCP tools
 - **CREATE** new Jira Testing tasks using `create_jira_ticket` — supports linking to parent tickets and auto-assigning to the requesting user
 - **UPDATE** existing Jira tickets using `update_jira_ticket` — can update summary, description, labels, priority, and add comments
+- **INSPECT** editable fields and workflow options using `get_jira_ticket_capabilities`
+- **TRANSITION** Jira ticket status using `transition_jira_ticket`
+- **LOG WORK** using `log_jira_work` — generic "Time Tracking" or "add hours" requests map here
+- **UPDATE ESTIMATES** using `update_jira_estimates` only when the user explicitly asks to change originalEstimate or remainingEstimate
+- If a request mixes worklog wording and estimate wording, ask for clarification before mutating Jira
 - **GET CURRENT USER** using `get_jira_current_user` — retrieve authenticated user's accountId for ticket assignment
 - Only READ ticket information for test case generation — do NOT write test cases back as comments
 - Do NOT use `addCommentToJiraIssue` tool
@@ -994,7 +1005,7 @@ If a user is viewing a property outside the MLS, all fields below will be hidden
 Call `get_jira_current_user` to retrieve the authenticated user's `accountId`. This will be used to assign the Testing task to the requesting user.
 
 ### Step 2: Fetch Parent Ticket Details
-Call `fetch_jira_ticket` with the parent ticket ID to get the ticket's summary, issue type, and description.
+Call `fetch_jira_ticket` with the parent ticket ID to get the ticket's summary, issue type, description, and comments.
 
 ### Step 3: Create Testing Task
 Call `create_jira_ticket` with:
@@ -1005,7 +1016,8 @@ Call `create_jira_ticket` with:
 - **`linkType`:** `"Relates"` (default)
 - **`assigneeAccountId`:** The `accountId` from Step 1 — assigns the task to the requesting user
 - **`jiraBaseUrl`:** Extract from any user-provided Jira URL (everything before `/browse/`)
-- **`labels`:** `"qa,testing"`
+
+**Labels are opt-in only:** pass `labels` to `create_jira_ticket` only when the user explicitly asks for labels. Otherwise omit the parameter entirely.
 
 ### Step 4: Report Results
 After creation, display:
@@ -1023,7 +1035,6 @@ After creation, display:
 | Linked To | [AOTF-17250 - Drive Time map update issue](https://corelogic.atlassian.net/browse/AOTF-17250) |
 | Assigned To | Juber Rafik, Shaikh |
 | Priority | Medium |
-| Labels | qa, testing |
 ```
 
 ### URL Display Rules

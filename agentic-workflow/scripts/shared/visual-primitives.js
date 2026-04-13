@@ -13,6 +13,10 @@
 
 const { ELEVATION, BORDER_RADIUS, OPACITY, STATUS_BADGES, TYPOGRAPHY, blendColors, hexToRGBA } = require('../doc-design-system');
 
+function clonePptxShadow(shadow) {
+    return shadow && typeof shadow === 'object' ? { ...shadow } : shadow;
+}
+
 // ─── Card Primitive ─────────────────────────────────────────────────────────
 
 /**
@@ -119,11 +123,13 @@ function createAccentBar(opts) {
  * @returns {Object}
  */
 function createIconBadge(opts) {
+    const label = opts.label ?? opts.icon ?? opts.text ?? '';
+
     return {
         primitive: 'icon-badge',
         x: opts.x,
         y: opts.y,
-        label: String(opts.label),
+        label: String(label),
         color: opts.color,
         textColor: opts.textColor || '#FFFFFF',
         size: opts.size || 0.4,
@@ -374,7 +380,10 @@ const pptxRenderers = {
 
         // Shadow
         if (card.elevation !== 'none') {
-            shapeOpts.shadow = ELEVATION.pptx[card.elevation] || {};
+            const shadow = clonePptxShadow(ELEVATION.pptx[card.elevation] || {});
+            if (shadow && Object.keys(shadow).length > 0) {
+                shapeOpts.shadow = shadow;
+            }
         }
 
         slide.addShape(pres.ShapeType.roundRect, shapeOpts);

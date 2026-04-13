@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { MODEL_GROUPS, getModelLabel } from '@/lib/model-options';
 
 /**
@@ -10,14 +11,49 @@ import { MODEL_GROUPS, getModelLabel } from '@/lib/model-options';
 export default function ModelSelect({ value, onChange, className = '', groups = MODEL_GROUPS, loading = false, disabled = false }) {
     const [open, setOpen] = useState(false);
     const [search, setSearch] = useState('');
+    const [dropdownStyle, setDropdownStyle] = useState({});
+    const [listStyle, setListStyle] = useState({});
     const containerRef = useRef(null);
+    const triggerRef = useRef(null);
     const searchInputRef = useRef(null);
+
+    // Calculate fixed position from trigger button's viewport coordinates
+    const recalcPosition = useCallback(() => {
+        if (!triggerRef.current) return;
+        const rect = triggerRef.current.getBoundingClientRect();
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        const gutter = 16;
+        const dropdownWidth = Math.min(Math.max(rect.width, 220), Math.max(220, viewportWidth - (gutter * 2)));
+        const rightAlignedLeft = rect.right - dropdownWidth;
+        const left = Math.min(
+            Math.max(gutter, rightAlignedLeft),
+            Math.max(gutter, viewportWidth - dropdownWidth - gutter)
+        );
+        const top = Math.min(rect.bottom + 6, Math.max(gutter, viewportHeight - 80));
+        const availableHeight = Math.max(160, viewportHeight - top - gutter - 52);
+
+        setDropdownStyle({
+            position: 'fixed',
+            top,
+            left,
+            width: dropdownWidth,
+            maxWidth: `calc(100vw - ${gutter * 2}px)`,
+            zIndex: 9999,
+        });
+        setListStyle({
+            maxHeight: Math.min(320, availableHeight),
+        });
+    }, []);
 
     // Close on click outside
     useEffect(() => {
         if (!open) return;
         const handler = (e) => {
-            if (containerRef.current && !containerRef.current.contains(e.target)) {
+            if (
+                containerRef.current && !containerRef.current.contains(e.target) &&
+                !(e.target.closest && e.target.closest('[data-model-dropdown]'))
+            ) {
                 setOpen(false);
                 setSearch('');
             }
@@ -25,6 +61,18 @@ export default function ModelSelect({ value, onChange, className = '', groups = 
         document.addEventListener('mousedown', handler);
         return () => document.removeEventListener('mousedown', handler);
     }, [open]);
+
+    // Reposition on scroll or resize while open
+    useEffect(() => {
+        if (!open) return;
+        const handler = () => recalcPosition();
+        window.addEventListener('scroll', handler, true);
+        window.addEventListener('resize', handler);
+        return () => {
+            window.removeEventListener('scroll', handler, true);
+            window.removeEventListener('resize', handler);
+        };
+    }, [open, recalcPosition]);
 
     // Focus search input on open
     useEffect(() => {
@@ -78,8 +126,13 @@ export default function ModelSelect({ value, onChange, className = '', groups = 
         <div ref={containerRef} className={`relative ${className}`}>
             {/* Trigger button — matches custom-select styling */}
             <button
+                ref={triggerRef}
                 type="button"
-                onClick={() => !disabled && setOpen(!open)}
+                onClick={() => {
+                    if (disabled) return;
+                    if (!open) recalcPosition();
+                    setOpen(prev => !prev);
+                }}
                 disabled={disabled}
                 className={`w-full bg-white border rounded-xl px-4 py-2.5 pr-10 text-sm font-medium text-surface-800 cursor-pointer text-left transition-all duration-150 ${open
                     ? 'border-brand-400 ring-2 ring-brand-500/20'
@@ -104,9 +157,13 @@ export default function ModelSelect({ value, onChange, className = '', groups = 
                 </span>
             </button>
 
-            {/* Dropdown panel — always opens downward */}
-            {open && (
-                <div className="absolute left-0 right-0 top-full mt-1.5 z-[999] bg-white border border-surface-200 rounded-xl shadow-xl overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150">
+            {/* Dropdown panel — fixed viewport positioning to escape stacking contexts */}
+            {open && typeof document !== 'undefined' && createPortal(
+                <div
+                    data-model-dropdown
+                    className="bg-white border border-surface-200 rounded-xl shadow-xl overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150"
+                    style={dropdownStyle}
+                >
                     {/* Search input */}
                     <div className="p-2 border-b border-surface-100">
                         <div className="relative">
@@ -125,7 +182,7 @@ export default function ModelSelect({ value, onChange, className = '', groups = 
                     </div>
 
                     {/* Options list */}
-                    <div className="max-h-[280px] overflow-y-auto py-1">
+                    <div className="overflow-y-auto py-1" style={listStyle}>
                         {filteredGroups.length === 0 ? (
                             <div className="px-4 py-6 text-center text-xs text-surface-400">
                                 No models match &quot;{search}&quot;
@@ -171,7 +228,8 @@ export default function ModelSelect({ value, onChange, className = '', groups = 
                             ))
                         )}
                     </div>
-                </div>
+                </div>,
+                document.body
             )}
         </div>
     );

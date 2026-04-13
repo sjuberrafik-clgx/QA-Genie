@@ -425,13 +425,24 @@ Token-based URLs are constructed using `userTokens` from `tests/test-data/testDa
 ## Jira Interaction Policy
 * Agents may READ from Jira tickets (fetch ticket details)
 * Agents may CREATE new Jira tickets (bugs, testing tasks)
+* Agents may pass `labels` when creating Jira tickets only if the user explicitly asks for labels; otherwise new tickets must omit labels by default
 * Agents may UPDATE existing Jira tickets (edit description, summary, labels, priority, add comments) using the `update_jira_ticket` tool
+* Agents may INSPECT editable Jira fields and available transitions using the `get_jira_ticket_capabilities` tool
+* Agents may CHANGE Jira ticket status using the `transition_jira_ticket` tool
+* Agents may SEARCH Jira assignable users using the `search_jira_users` tool when the user wants assignment to a named person
+* Agents may DELETE Jira tickets using the `delete_jira_ticket` tool only when the user explicitly confirms deletion of the issue itself with `DELETE <ticketId>` or `DELETE <ticketId> WITH SUBTASKS` in the latest message
+* Agents may REMOVE Jira issue links using the `remove_jira_issue_link` tool when the user explicitly asks to unlink tickets or remove an associated link
+* Agents may LOG WORK on Jira tickets using the `log_jira_work` tool; treat generic "Time Tracking" or "add hours" requests as worklog intent
+* Agents may UPDATE Jira original and remaining estimates using the `update_jira_estimates` tool only when the user explicitly asks to change estimate fields
+* If a Jira request mixes worklog language and estimate language, agents must clarify before changing Jira time tracking data
 * BugGenie can create, read, and update tickets
 * TestGenie can read, update, and create tickets (Testing tasks with linking and auto-assignment)
 * When creating Testing tasks, agents MUST:
-  - Call `get_jira_current_user` to get the user's accountId for assignment
-  - Use `linkedIssueKey` parameter to link the Testing task to the parent ticket
-  - Use `assigneeAccountId` parameter to assign to the requesting user
+  - Call `get_jira_current_user` to get the user's accountId for self-assignment
+  - Call `search_jira_users` when assignment must go to a named user like Monica or Khushboo
+  - Use `linkedIssueKey` parameter to create a related linked Testing task
+  - Use `parentIssueKey` parameter to create a true Jira subtask under the parent ticket
+  - Use `assigneeAccountId` parameter to assign the created task or subtask
 * **Always display Jira URLs as clickable markdown hyperlinks** using `[text](url)` format
 
 ## Bug Ticket Format (BugGenie)
@@ -443,3 +454,10 @@ When creating defect tickets, use this structure:
 * **MLS:** Which MLS environment
 * **Environment:** UAT/INT/PROD
 * **Attachments:** Screenshots, logs, error traces
+
+## Jira-Safe Rich Text Formatting
+When creating or updating Jira descriptions, comments, or Testing task content through this workflow:
+* Use **bold** only for section labels and headings.
+* Use `code` only for identifiers, field names, property IDs, event names, and state values.
+* Never combine **bold** and `inline code` on the same text span.
+* Stay within the Jira-safe subset of rich formatting supported by this repo: headings, lists, tables, bold labels, and inline code-only identifiers.

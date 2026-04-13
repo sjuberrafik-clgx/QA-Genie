@@ -516,7 +516,10 @@ function generateFileName(baseName, extension) {
  * @returns {Object}
  */
 function resolveElevation(level, format = 'general') {
-    if (format === 'pptx') return ELEVATION.pptx[level] || ELEVATION.pptx.none;
+    if (format === 'pptx') {
+        const shadow = ELEVATION.pptx[level] || ELEVATION.pptx.none;
+        return shadow && typeof shadow === 'object' ? { ...shadow } : shadow;
+    }
     return ELEVATION[level] || ELEVATION.none;
 }
 
