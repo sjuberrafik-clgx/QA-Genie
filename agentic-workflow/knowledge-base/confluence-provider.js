@@ -149,12 +149,16 @@ class ConfluenceProvider extends KBProvider {
         const maxResults = options.maxResults || 10;
         const spaceKeys = options.spaceKey ? [options.spaceKey] : this.spaceKeys;
         const includeBody = options.includeBody !== false;
+        const configFilter = this._splitCqlFilter(this.cqlFilter);
+        const optionFilter = this._splitCqlFilter(options.cqlFilter);
 
         // Build CQL query
         const cqlParts = [];
 
         // Text search
-        cqlParts.push(`text ~ "${this._escapeCQL(query)}"`);
+        if (typeof query === 'string' && query.trim().length > 0) {
+            cqlParts.push(`text ~ "${this._escapeCQL(query.trim())}"`);
+        }
 
         // Type filter — pages only (exclude blog posts, comments by default)
         cqlParts.push('type = page');
@@ -173,16 +177,19 @@ class ConfluenceProvider extends KBProvider {
         }
 
         // Additional CQL filter from config
-        if (this.cqlFilter) {
-            cqlParts.push(`(${this.cqlFilter})`);
+        if (configFilter.filter) {
+            cqlParts.push(`(${configFilter.filter})`);
         }
 
         // Additional CQL filter from options
-        if (options.cqlFilter) {
-            cqlParts.push(`(${options.cqlFilter})`);
+        if (optionFilter.filter) {
+            cqlParts.push(`(${optionFilter.filter})`);
         }
 
-        const cql = cqlParts.join(' AND ');
+        const orderBy = optionFilter.orderBy || configFilter.orderBy;
+        const cql = orderBy
+            ? `${cqlParts.join(' AND ')} ORDER BY ${orderBy}`
+            : cqlParts.join(' AND ');
         this._log(`CQL query: ${cql}`);
 
         try {
@@ -442,6 +449,33 @@ class ConfluenceProvider extends KBProvider {
     _escapeCQL(text) {
         // Escape double quotes and backslashes in CQL
         return text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    }
+
+    /**
+     * Split a CQL fragment into filter and trailing ORDER BY clause.
+     *
+     * @param {string} text
+     * @returns {{ filter: string, orderBy: string }}
+     */
+    _splitCqlFilter(text) {
+        if (!text || typeof text !== 'string') {
+            return { filter: '', orderBy: '' };
+        }
+
+        const trimmed = text.trim();
+        if (!trimmed) {
+            return { filter: '', orderBy: '' };
+        }
+
+        const match = trimmed.match(/^(.*?)(?:\s+ORDER\s+BY\s+(.+))$/i);
+        if (!match) {
+            return { filter: trimmed, orderBy: '' };
+        }
+
+        return {
+            filter: match[1].trim(),
+            orderBy: match[2].trim(),
+        };
     }
 
     /**

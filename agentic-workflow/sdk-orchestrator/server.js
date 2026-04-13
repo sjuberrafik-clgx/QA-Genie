@@ -39,20 +39,12 @@ const { ChatSessionManager, CHAT_EVENTS } = require('./chat-session-manager');
 const { getFollowupProvider } = require('./followup-provider');
 const { ObservationRecorder } = require('./observation-recorder');
 const { setSessionRoot, getSessionRoot, BLOCKED_PATHS } = require('./filesystem-tools');
+const { isGeneratedArtifactPath } = require('./generated-artifact-policy');
 const {
     loadEnv, isValidTicketId, isValidMode, generateBatchId, truncate,
 } = require('./utils');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
-const ALLOWED_ARTIFACT_ROOTS = [
-    path.resolve(PROJECT_ROOT, 'agentic-workflow', 'test-artifacts'),
-    path.resolve(PROJECT_ROOT, 'agentic-workflow', 'exploration-data'),
-    path.resolve(PROJECT_ROOT, 'agentic-workflow', 'test-cases'),
-    path.resolve(PROJECT_ROOT, 'agentic-workflow', 'test-results'),
-    path.resolve(PROJECT_ROOT, 'test-results'),
-    path.resolve(PROJECT_ROOT, 'playwright-report'),
-    path.resolve(PROJECT_ROOT, 'web-app', 'playwright-report'),
-];
 
 // ─── Lightweight HTTP Router ────────────────────────────────────────────────
 
@@ -219,6 +211,14 @@ function ok(res, data) { json(res, 200, data); }
 function badRequest(res, msg) { json(res, 400, { error: msg }); }
 function notFound(res, msg) { json(res, 404, { error: msg || 'Not found' }); }
 function conflict(res, msg) { json(res, 409, { error: msg }); }
+function respondChatError(res, error, fallbackStatus = 500) {
+    const status = Number.isInteger(error?.status) ? error.status : fallbackStatus;
+    const payload = { error: error?.message || 'Unknown chat error' };
+    if (error?.code) payload.code = error.code;
+    if (error?.runtimeState) payload.runtimeState = error.runtimeState;
+    if (typeof error?.recoverable === 'boolean') payload.recoverable = error.recoverable;
+    json(res, status, payload);
+}
 
 function buildObservationSummary(run, observations, observationLogPath, options = {}) {
     const limit = options.limit || 50;
@@ -304,7 +304,7 @@ function _isPathInside(parentPath, candidatePath) {
     return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath));
 }
 
-function _isAllowedArtifactPath(filePath) {
+function _isAllowedArtifactPath(filePath, config = {}) {
     if (!filePath || typeof filePath !== 'string') return false;
 
     const resolved = path.resolve(filePath);
@@ -316,7 +316,7 @@ function _isAllowedArtifactPath(filePath) {
         }
     }
 
-    return ALLOWED_ARTIFACT_ROOTS.some(root => _isPathInside(root, resolved));
+    return isGeneratedArtifactPath(resolved, { projectRoot: PROJECT_ROOT, config });
 }
 
 function _getMimeType(filePath) {
@@ -605,48 +605,64 @@ function transformSuites(suiteList, opts = {}) {
 async function startServer(options = {}) {
     loadEnv();
 
-    const port = options.port || parseInt(process.env.SERVER_PORT, 10) || 3100;
+    const envPort = parseInt(process.env.SERVER_PORT, 10);
+    const port = options.port ?? (Number.isFinite(envPort) ? envPort : 3100);
     const verbose = options.verbose || false;
+    const disableSignalHandlers = options.disableSignalHandlers === true;
 
     // ─── Initialize Core Services ───────────────────────────────────
     const runStore = new RunStore();
     const eventBridge = getEventBridge();
     const learningStore = new LearningStore();
 
-    // Lazy-require to break circular dependency (index.js re-exports startServer)
-    const { SDKOrchestrator } = require('./index');
+    let SDKOrchestrator = null;
+    if (!options.orchestrator) {
+        // Lazy-require to break circular dependency (index.js re-exports startServer)
+        ({ SDKOrchestrator } = require('./index'));
+    }
 
     // Initialize SDK Orchestrator (singleton)
-    const orchestrator = new SDKOrchestrator({ verbose });
+    const orchestrator = options.orchestrator || new SDKOrchestrator({ verbose });
     let orchestratorReady = false;
 
     // Chat session manager — initialized after orchestrator starts
-    let chatManager = null;
+    let chatManager = options.chatManager || null;
 
-    // Start orchestrator in background — don't block server startup
-    orchestrator.start()
-        .then(async () => {
-            orchestratorReady = true;
-            log('SDK Orchestrator ready');
+    if (options.orchestrator && options.chatManager) {
+        orchestratorReady = true;
+        log('SDK Orchestrator ready (injected)');
+        log('Chat Session Manager ready (injected)');
+    } else {
+        // Start orchestrator in background — don't block server startup
+        Promise.resolve(typeof orchestrator.start === 'function' ? orchestrator.start() : undefined)
+            .then(async () => {
+                orchestratorReady = true;
+                log('SDK Orchestrator ready');
 
-            // Initialize chat manager with the live SDK client
-            try {
-                const sdk = await import('@github/copilot-sdk');
-                chatManager = new ChatSessionManager({
-                    client: orchestrator.client,
-                    defineTool: sdk.defineTool,
-                    model: orchestrator.options.model,
-                    config: orchestrator.config,
-                    learningStore,
-                });
-                log('Chat Session Manager ready');
-            } catch (err) {
-                log(`Chat Manager init failed: ${err.message}`, 'warn');
-            }
-        })
-        .catch(err => {
-            log(`SDK Orchestrator failed to start: ${err.message}`, 'error');
-        });
+                if (chatManager) {
+                    log('Chat Session Manager ready (injected)');
+                    return;
+                }
+
+                // Initialize chat manager with the live SDK client
+                try {
+                    const sdk = await import('@github/copilot-sdk');
+                    chatManager = new ChatSessionManager({
+                        client: orchestrator.client,
+                        defineTool: sdk.defineTool,
+                        model: orchestrator.options.model,
+                        config: orchestrator.config,
+                        learningStore,
+                    });
+                    log('Chat Session Manager ready');
+                } catch (err) {
+                    log(`Chat Manager init failed: ${err.message}`, 'warn');
+                }
+            })
+            .catch(err => {
+                log(`SDK Orchestrator failed to start: ${err.message}`, 'error');
+            });
+    }
 
     const router = new Router();
 
@@ -1068,7 +1084,7 @@ async function startServer(options = {}) {
 
         const filePath = path.resolve(requestedPath);
 
-        if (!_isAllowedArtifactPath(filePath)) {
+        if (!_isAllowedArtifactPath(filePath, orchestrator.config)) {
             return json(res, 403, { error: 'Artifact path is outside allowed evidence directories' });
         }
 
@@ -1931,6 +1947,24 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         ok(res, chatManager.listSessions());
     });
 
+    router.get('/api/chat/sessions/:sessionId/status', (req, res) => {
+        if (!chatManager) return json(res, 503, { error: 'Chat manager not ready' });
+        try {
+            ok(res, chatManager.getSessionStatus(req.params.sessionId));
+        } catch (error) {
+            respondChatError(res, error);
+        }
+    });
+
+    router.post('/api/chat/sessions/:sessionId/resume', async (req, res) => {
+        if (!chatManager) return json(res, 503, { error: 'Chat manager not ready' });
+        try {
+            ok(res, await chatManager.resumeSession(req.params.sessionId));
+        } catch (error) {
+            respondChatError(res, error);
+        }
+    });
+
     /**
      * POST /api/chat/sessions/:sessionId/messages
      * Body: { content, attachments? }
@@ -2041,8 +2075,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
             const result = await chatManager.sendMessage(sessionId, content || '', attachments);
             ok(res, result);
         } catch (error) {
-            if (error.message.includes('not found')) return notFound(res, error.message);
-            json(res, 500, { error: error.message });
+            respondChatError(res, error);
         }
     });
 
@@ -2056,8 +2089,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
             const followups = chatManager.getFollowups(req.params.sessionId);
             ok(res, { followups });
         } catch (error) {
-            if (error.message.includes('not found')) return notFound(res, error.message);
-            json(res, 500, { error: error.message });
+            respondChatError(res, error);
         }
     });
 
@@ -2109,8 +2141,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
             const history = await chatManager.getHistory(req.params.sessionId);
             ok(res, history);
         } catch (error) {
-            if (error.message.includes('not found')) return notFound(res, error.message);
-            json(res, 500, { error: error.message });
+            respondChatError(res, error);
         }
     });
 
@@ -2124,8 +2155,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
             await chatManager.abort(req.params.sessionId);
             ok(res, { aborted: true });
         } catch (error) {
-            if (error.message.includes('not found')) return notFound(res, error.message);
-            json(res, 500, { error: error.message });
+            respondChatError(res, error);
         }
     });
 
@@ -2269,13 +2299,15 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         log(`\n${signal} received. Shutting down...`);
         clearInterval(staleRunWatchdog);
         server.close();
-        if (chatManager) await chatManager.destroyAll().catch(() => { });
+        if (chatManager) await chatManager.prepareForShutdown().catch(() => { });
         await orchestrator.stop().catch(() => { });
         process.exit(0);
     };
 
-    process.on('SIGTERM', () => shutdown('SIGTERM'));
-    process.on('SIGINT', () => shutdown('SIGINT'));
+    if (!disableSignalHandlers) {
+        process.on('SIGTERM', () => shutdown('SIGTERM'));
+        process.on('SIGINT', () => shutdown('SIGINT'));
+    }
 
     return server;
 }

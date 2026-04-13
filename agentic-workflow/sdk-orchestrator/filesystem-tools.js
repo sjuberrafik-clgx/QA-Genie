@@ -192,15 +192,19 @@ async function requestConfirmation(deps, sessionId, description) {
         return true;
     }
 
-    const answer = await deps.chatManager.requestUserInput(sessionId, {
-        question: `⚠️ **FileGenie wants to perform a destructive operation:**\n\n${description}\n\nDo you approve?`,
-        options: ['Yes, proceed', 'No, cancel'],
-        type: 'confirmation',
-    });
+    const response = await deps.chatManager.requestUserInput(
+        `⚠️ **FileGenie wants to perform a destructive operation:**\n\n${description}\n\nDo you approve?`,
+        ['Yes, proceed', 'No, cancel'],
+        { type: 'confirmation', sessionId }
+    );
 
-    const approved = answer?.toLowerCase?.()?.includes('yes') ||
-        answer?.toLowerCase?.()?.includes('proceed') ||
-        answer?.toLowerCase?.()?.includes('approve');
+    const answer = typeof response === 'string' ? response : response?.answer;
+
+    const approved = typeof answer === 'string' && (
+        answer.toLowerCase().includes('yes') ||
+        answer.toLowerCase().includes('proceed') ||
+        answer.toLowerCase().includes('approve')
+    );
 
     return approved;
 }

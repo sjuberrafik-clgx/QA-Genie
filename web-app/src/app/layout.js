@@ -44,7 +44,7 @@ export default function RootLayout({ children }) {
             <body className="min-h-screen bg-surface-50">
                 <div className="flex min-h-screen">
                     <Sidebar />
-                    <div className="flex-1 ml-[260px] min-h-screen overflow-x-hidden">
+                    <div className="min-h-screen flex-1 overflow-x-hidden transition-[margin] duration-300 ml-[84px] sm:ml-[92px] 2xl:ml-[260px]">
                         <Suspense fallback={null}>
                             <RouteLoadingBar />
                         </Suspense>

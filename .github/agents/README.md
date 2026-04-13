@@ -15,8 +15,11 @@ This folder provides:
 - Agent definitions under [.github/agents](.)
 - Shared orchestration utilities under [.github/agents/lib](lib)
 - Agent usage notes under [.github/agents/docs](docs)
+- Project skills under [../skills](../skills) for reusable task-specific guidance such as PPT setup and professional deck generation
 
 The agent system is designed for VS Code custom-agent workflows, not as a standalone runtime by itself.
+
+Project skills complement the agent system. Use agents for deterministic workflows and use skills for reusable, task-scoped guidance that should load only when relevant.
 
 ---
 
@@ -117,6 +120,15 @@ Invoke agents explicitly in Copilot Chat with lowercase names:
 ```text
 @docgenie Create a summary presentation from the latest QA artifacts
 ```
+
+## Related Skills
+
+The repository also includes project skills for presentation work:
+
+- `use ppt-deck-setup` to calibrate shared deck style, audience preferences, and presentation rules
+- `use professional-ppt-generator` to generate a polished PowerPoint from a brief, workbook, report, or meeting summary
+
+Natural prompts such as "create an executive deck", "build a polished PowerPoint", or "turn this workbook into a slide deck" should also help Copilot discover the PPT skill in supported surfaces.
 
 ---
 

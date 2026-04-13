@@ -28,6 +28,98 @@ const { renderForEmbed, cleanupBrowser: cleanupDiagramBrowser } = require('./sha
 const { renderChartForEmbed, cleanupBrowser: cleanupChartBrowser } = require('./shared/chart-renderer');
 const { renderInfographicForEmbed, cleanupBrowser: cleanupInfographicBrowser } = require('./shared/infographic-components');
 
+function isPlainObject(value) {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeRichText(value, bulletizeArrays = false) {
+    if (typeof value === 'string') {
+        return value.trim();
+    }
+
+    if (Array.isArray(value)) {
+        const lines = value
+            .map(item => normalizeRichText(item, false))
+            .flatMap(text => (text ? text.split(/\n+/).map(line => line.trim()).filter(Boolean) : []));
+
+        if (!lines.length) {
+            return '';
+        }
+
+        return lines
+            .map(line => (bulletizeArrays ? `- ${line.replace(/^-\s*/, '')}` : line))
+            .join('\n');
+    }
+
+    if (isPlainObject(value)) {
+        if (Array.isArray(value.items) && value.items.length) {
+            return normalizeRichText(value.items, true);
+        }
+
+        const primary = [value.heading, value.title, value.label, value.name, value.text]
+            .map(item => normalizeRichText(item, false))
+            .find(Boolean) || '';
+
+        const secondary = [value.subtitle, value.description, value.content, value.value, value.note]
+            .map(item => normalizeRichText(item, false))
+            .find(Boolean) || '';
+
+        if (primary && secondary) {
+            return `${primary}: ${secondary}`;
+        }
+
+        return primary || secondary;
+    }
+
+    return '';
+}
+
+function resolveFirstTextValue(candidates) {
+    for (const candidate of candidates) {
+        const text = normalizeRichText(candidate, Array.isArray(candidate));
+        if (text) {
+            return text;
+        }
+    }
+
+    return '';
+}
+
+function resolveSideTitle(slide, side) {
+    if (side === 'left') {
+        return resolveFirstTextValue([slide.leftTitle, slide.leftLabel, slide.optionA]);
+    }
+
+    return resolveFirstTextValue([slide.rightTitle, slide.rightLabel, slide.optionB]);
+}
+
+function resolveSideBody(slide, side) {
+    return resolveFirstTextValue([
+        slide[`${side}Content`],
+        slide[side],
+        slide[`${side}Items`],
+        slide[`${side}Bullets`],
+        slide[`${side}Points`],
+    ]);
+}
+
+function resolveTableData(slide) {
+    const tableData = isPlainObject(slide.tableData) ? slide.tableData : {};
+    const rows = Array.isArray(tableData.rows) && tableData.rows.length
+        ? tableData.rows
+        : (Array.isArray(slide.rows) ? slide.rows : []);
+
+    let headers = Array.isArray(tableData.headers) && tableData.headers.length
+        ? tableData.headers
+        : (Array.isArray(slide.headers) ? slide.headers : []);
+
+    if (!headers.length && rows.length && isPlainObject(rows[0])) {
+        headers = Object.keys(rows[0]);
+    }
+
+    return { headers, rows };
+}
+
 // ─── Slide Renderers (v2 — Visual Primitives Engine) ────────────────────────
 
 function renderTitleSlide(pres, slide, theme, font) {
@@ -107,7 +199,7 @@ function renderContentSlide(pres, slide, theme, font) {
     const s = pres.addSlide();
     addSlideHeader(s, pres, slide.title, theme, font);
 
-    const content = slide.content || '';
+    const content = resolveFirstTextValue([slide.content, slide.text]);
     const density = analyzeTextDensity(content, SPACING.pptx.contentArea);
     const fontSize = TYPOGRAPHY.pptx.contentSlide.body + density.suggestedFontAdjust;
 
@@ -224,9 +316,21 @@ function renderTwoColumnSlide(pres, slide, theme, font) {
         accentEdge: 'top', accentColor: theme.primary,
     }));
 
-    const leftContent = slide.leftContent || slide.left || '';
+    const leftTitle = resolveSideTitle(slide, 'left');
+    const leftContent = resolveSideBody(slide, 'left');
+    if (leftTitle) {
+        s.addText(leftTitle, {
+            x: ca.x + 0.15, y: ca.y + 0.12, w: leftW - 0.3, h: 0.35,
+            fontSize: 13,
+            fontFace: font,
+            color: theme.primary,
+            bold: true,
+            valign: 'middle',
+        });
+    }
+
     s.addText(leftContent, {
-        x: ca.x + 0.15, y: ca.y + 0.15, w: leftW - 0.3, h: ca.h - 0.3,
+        x: ca.x + 0.15, y: leftTitle ? ca.y + 0.55 : ca.y + 0.15, w: leftW - 0.3, h: leftTitle ? ca.h - 0.7 : ca.h - 0.3,
         fontSize: TYPOGRAPHY.pptx.contentSlide.body,
         fontFace: font,
         color: theme.text,
@@ -243,9 +347,21 @@ function renderTwoColumnSlide(pres, slide, theme, font) {
         accentEdge: 'top', accentColor: theme.accent,
     }));
 
-    const rightContent = slide.rightContent || slide.right || '';
+    const rightTitle = resolveSideTitle(slide, 'right');
+    const rightContent = resolveSideBody(slide, 'right');
+    if (rightTitle) {
+        s.addText(rightTitle, {
+            x: rightX + 0.15, y: ca.y + 0.12, w: rightW - 0.3, h: 0.35,
+            fontSize: 13,
+            fontFace: font,
+            color: theme.accent,
+            bold: true,
+            valign: 'middle',
+        });
+    }
+
     s.addText(rightContent, {
-        x: rightX + 0.15, y: ca.y + 0.15, w: rightW - 0.3, h: ca.h - 0.3,
+        x: rightX + 0.15, y: rightTitle ? ca.y + 0.55 : ca.y + 0.15, w: rightW - 0.3, h: rightTitle ? ca.h - 0.7 : ca.h - 0.3,
         fontSize: TYPOGRAPHY.pptx.contentSlide.body,
         fontFace: font,
         color: theme.text,
@@ -261,9 +377,7 @@ function renderTableSlide(pres, slide, theme, font) {
     const s = pres.addSlide();
     addSlideHeader(s, pres, slide.title, theme, font);
 
-    const td = slide.tableData || {};
-    const headers = td.headers || [];
-    const rows = td.rows || [];
+    const { headers, rows } = resolveTableData(slide);
     const ca = SPACING.pptx.contentArea;
 
     const tableLayout = computeTableLayout({ headers, rows, areaW: ca.w });
@@ -282,7 +396,7 @@ function renderTableSlide(pres, slide, theme, font) {
     }));
 
     const dataRows = rows.map((row, ri) => {
-        const cells = Array.isArray(row) ? row : Object.values(row);
+        const cells = Array.isArray(row) ? row : headers.map(header => row?.[header]);
         return cells.map(cell => {
             const cellText = String(cell ?? '');
             // Status cell detection — apply badge colors
@@ -585,7 +699,7 @@ function renderComparisonSlide(pres, slide, theme, font) {
         accentEdge: 'top', accentColor: theme.primary,
     }));
 
-    const leftLabel = slide.leftLabel || slide.optionA || 'Option A';
+    const leftLabel = resolveSideTitle(slide, 'left') || 'Option A';
     // Label badge
     pptxRenderers.renderIconBadge(s, pres, createIconBadge({
         x: ca.x + 0.15, y: ca.y + 0.15, size: 0.35,
@@ -596,7 +710,7 @@ function renderComparisonSlide(pres, slide, theme, font) {
         fontSize: 14, fontFace: font, color: theme.primary, bold: true, valign: 'middle',
     });
 
-    s.addText(slide.leftContent || slide.left || '', {
+    s.addText(resolveSideBody(slide, 'left'), {
         x: ca.x + 0.2, y: ca.y + 0.7, w: halfW - 0.4, h: ca.h - 0.9,
         fontSize: 11, fontFace: font, color: theme.text, valign: 'top', wrap: true, lineSpacing: 18,
     });
@@ -616,7 +730,7 @@ function renderComparisonSlide(pres, slide, theme, font) {
         accentEdge: 'top', accentColor: theme.accent,
     }));
 
-    const rightLabel = slide.rightLabel || slide.optionB || 'Option B';
+    const rightLabel = resolveSideTitle(slide, 'right') || 'Option B';
     pptxRenderers.renderIconBadge(s, pres, createIconBadge({
         x: rightX + 0.15, y: ca.y + 0.15, size: 0.35,
         icon: 'B', color: theme.accent, textColor: '#FFFFFF',
@@ -626,7 +740,7 @@ function renderComparisonSlide(pres, slide, theme, font) {
         fontSize: 14, fontFace: font, color: theme.accent, bold: true, valign: 'middle',
     });
 
-    s.addText(slide.rightContent || slide.right || '', {
+    s.addText(resolveSideBody(slide, 'right'), {
         x: rightX + 0.2, y: ca.y + 0.7, w: halfW - 0.4, h: ca.h - 0.9,
         fontSize: 11, fontFace: font, color: theme.text, valign: 'top', wrap: true, lineSpacing: 18,
     });
@@ -664,7 +778,9 @@ function renderSummarySlide(pres, slide, theme, font) {
     });
 
     // Key highlights with check-mark bullets in card
-    const highlights = slide.highlights || slide.bullets || [];
+    const highlights = Array.isArray(slide.highlights) && slide.highlights.length
+        ? slide.highlights
+        : (Array.isArray(slide.summaryPoints) && slide.summaryPoints.length ? slide.summaryPoints : (slide.bullets || []));
     if (highlights.length) {
         const highlightY = ca.y + (metrics.length ? 2.2 : 0);
         const highlightH = ca.h - (metrics.length ? 2.2 : 0);
@@ -676,7 +792,7 @@ function renderSummarySlide(pres, slide, theme, font) {
         }));
 
         const textItems = highlights.map(h => ({
-            text: `  ${typeof h === 'string' ? h : h.text || ''}`,
+            text: `  ${normalizeRichText(h)}`,
             options: {
                 fontSize: 12, fontFace: font, color: theme.text,
                 bullet: { code: '2713' },
@@ -1550,7 +1666,7 @@ const SLIDE_RENDERERS = {
  * @param {string} options.title - Presentation title
  * @param {string} [options.subtitle] - Subtitle for metadata
  * @param {string} [options.author] - Author for metadata
- * @param {Array} options.slides - Array of slide definitions (27 types supported)
+ * @param {Array} options.slides - Array of slide definitions (28 types supported)
  * @param {string|Object} [options.theme] - Theme name or override object
  * @param {string} [options.font] - Font override
  * @param {string} [options.brandKit] - Brand kit name (loads from config/brand-kits/)

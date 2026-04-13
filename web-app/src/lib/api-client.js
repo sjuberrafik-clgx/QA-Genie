@@ -110,7 +110,12 @@ class ApiClient {
 
                 if (!res.ok) {
                     const body = await res.json().catch(() => ({}));
-                    throw new Error(body.error || `HTTP ${res.status}: ${res.statusText}`);
+                    const error = new Error(body.error || `HTTP ${res.status}: ${res.statusText}`);
+                    error.status = res.status;
+                    if (body.code) error.code = body.code;
+                    if (body.runtimeState) error.runtimeState = body.runtimeState;
+                    if (typeof body.recoverable === 'boolean') error.recoverable = body.recoverable;
+                    throw error;
                 }
                 return res.json();
             } catch (err) {
@@ -221,6 +226,14 @@ class ApiClient {
 
     async listChatSessions() {
         return this._fetch(EP.chatSessions);
+    }
+
+    async getChatSessionStatus(sessionId) {
+        return this._fetch(EP.chatStatus(sessionId), { retries: 0 });
+    }
+
+    async resumeChatSession(sessionId) {
+        return this._fetch(EP.chatResume(sessionId), { method: 'POST', retries: 0 });
     }
 
     async getChatHistory(sessionId) {

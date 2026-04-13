@@ -24,17 +24,17 @@
 // ─── Inline text parser ─────────────────────────────────────────────────────
 
 /**
- * Parse inline markdown formatting (bold, code, bold+code) into ADF text nodes.
- * Handles: **bold**, `code`, **`bold code`**, and plain text.
+ * Parse inline markdown formatting into Jira-safe ADF text nodes.
+ * Handles: **bold**, `code`, **`code`** (falls back to code-only), and plain text.
  *
  * @param {string} text - Raw inline text with potential markdown formatting
  * @returns {Array} Array of ADF text/inlineCode nodes
  */
 function parseInlineMarks(text) {
-    if (!text || typeof text !== 'string') return [{ type: 'text', text: text || '' }];
+    if (!text || typeof text !== 'string') return [{ type: 'text', text: '' }];
 
     const nodes = [];
-    // Regex: match **`code`** (bold+code), **bold**, `code`, or plain text
+    // Jira does not allow code+strong on the same node, so **`code`** degrades to code-only.
     const inlineRegex = /\*\*`([^`]+)`\*\*|\*\*([^*]+)\*\*|`([^`]+)`/g;
 
     let lastIndex = 0;
@@ -48,8 +48,7 @@ function parseInlineMarks(text) {
         }
 
         if (match[1] !== undefined) {
-            // **`bold code`** → text with both strong + code marks
-            nodes.push({ type: 'text', text: match[1], marks: [{ type: 'strong' }, { type: 'code' }] });
+            nodes.push({ type: 'text', text: match[1], marks: [{ type: 'code' }] });
         } else if (match[2] !== undefined) {
             // **bold** → text with strong mark
             nodes.push({ type: 'text', text: match[2], marks: [{ type: 'strong' }] });
@@ -67,12 +66,20 @@ function parseInlineMarks(text) {
         if (remaining) nodes.push({ type: 'text', text: remaining });
     }
 
-    // If nothing was parsed, return the original text as a single node
     if (nodes.length === 0) {
-        return [{ type: 'text', text }];
+        return [{ type: 'text', text: text || '' }];
     }
 
     return nodes;
+}
+
+function ensureInlineContent(nodes) {
+    if (!Array.isArray(nodes) || nodes.length === 0) {
+        return [{ type: 'text', text: '' }];
+    }
+
+    const normalized = nodes.filter(node => node && typeof node === 'object' && node.type === 'text');
+    return normalized.length > 0 ? normalized : [{ type: 'text', text: '' }];
 }
 
 /**
@@ -83,7 +90,7 @@ function parseInlineMarks(text) {
 function makeTextParagraph(text) {
     return {
         type: 'paragraph',
-        content: parseInlineMarks(text),
+        content: ensureInlineContent(parseInlineMarks(text)),
     };
 }
 
@@ -125,11 +132,20 @@ function parseMarkdownTable(tableLines) {
  */
 function tableToAdf(tableData) {
     const { headers, rows } = tableData;
+    const columnCount = Math.max(headers.length, 1);
+    const normalizedHeaders = headers.length > 0 ? headers : [''];
+    const normalizeRow = (row) => {
+        const cells = Array.isArray(row) ? row.slice(0, columnCount) : [];
+        while (cells.length < columnCount) {
+            cells.push('');
+        }
+        return cells;
+    };
 
     // Build header row
     const headerRow = {
         type: 'tableRow',
-        content: headers.map(h => ({
+        content: normalizedHeaders.map(h => ({
             type: 'tableHeader',
             attrs: {},
             content: [makeTextParagraph(h)],
@@ -139,7 +155,7 @@ function tableToAdf(tableData) {
     // Build data rows
     const dataRows = rows.map(row => ({
         type: 'tableRow',
-        content: row.map(cell => ({
+        content: normalizeRow(row).map(cell => ({
             type: 'tableCell',
             attrs: {},
             content: [makeTextParagraph(cell)],
@@ -184,7 +200,7 @@ function markdownToAdf(markdown) {
         return {
             type: 'doc',
             version: 1,
-            content: [{ type: 'paragraph', content: [{ type: 'text', text: markdown || '' }] }],
+            content: [{ type: 'paragraph', content: [{ type: 'text', text: '' }] }],
         };
     }
 
@@ -286,7 +302,7 @@ function markdownToAdf(markdown) {
 
     // Safeguard: ensure at least one content node
     if (content.length === 0) {
-        content.push({ type: 'paragraph', content: [{ type: 'text', text: markdown }] });
+        content.push({ type: 'paragraph', content: [{ type: 'text', text: markdown || '' }] });
     }
 
     return {

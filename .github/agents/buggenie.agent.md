@@ -42,8 +42,14 @@ user-invokable: true
 - **READ** existing Jira tickets using `fetch_jira_ticket` or Atlassian MCP tools
 - **CREATE** new Jira tickets using `create_jira_ticket`
 - **UPDATE** existing Jira tickets using `update_jira_ticket` — can update summary, description, labels, priority, and add comments
+- **INSPECT** editable fields and workflow options using `get_jira_ticket_capabilities`
+- **TRANSITION** Jira ticket status using `transition_jira_ticket`
+- **LOG WORK** using `log_jira_work` — generic "Time Tracking" or "add hours" requests map here
+- **UPDATE ESTIMATES** using `update_jira_estimates` only when the user explicitly asks to change originalEstimate or remainingEstimate
+- If a request mixes worklog wording and estimate wording, ask for clarification before mutating Jira
 - When user asks to edit, update, or modify a Jira ticket, use the `update_jira_ticket` tool
 - When user asks to add a comment to a ticket, use `update_jira_ticket` with the `comment` parameter
+- Labels are opt-in only. Pass `labels` to `create_jira_ticket` only when the user explicitly asks for labels. Otherwise omit the parameter entirely.
 
 ---
 
@@ -52,7 +58,7 @@ user-invokable: true
 When you need to READ existing Jira ticket details (e.g., to create a Testing task, check issue type, or extract acceptance criteria):
 
 **Preferred tools (in priority order):**
-1. **`fetch_jira_ticket` custom tool** — Calls Jira REST API directly. Pass `ticketId` (e.g., `"AOTF-16514"`). Returns full ticket payload: summary, description, issue type, status, priority, labels, acceptance criteria, components.
+1. **`fetch_jira_ticket` custom tool** — Calls Jira REST API directly. Pass `ticketId` (e.g., `"AOTF-16514"`). Returns full ticket payload: summary, description, issue type, status, priority, labels, acceptance criteria, comments, and components.
 2. **Atlassian MCP tools** — `atl_getJiraIssue`, `atl_searchJiraIssuesUsingJql` — available when Atlassian MCP server is connected.
 
 **NEVER do this:**
@@ -116,9 +122,9 @@ REASONING (Enhanced with video evidence):
 ### Video + Jira Integration
 
 After creating the bug ticket:
-1. **Call `attach_video_frames_to_jira`** to upload key frames (timestamps where bug is visible) to the Jira ticket
-2. **Call `attach_session_images_to_jira`** if the user also provided separate screenshots
-3. Reference the attached frames in the ticket description: "See attached video frames at 0:23s and 0:28s"
+1. **`create_jira_ticket` automatically attaches the active chat evidence** for Bug tickets, including screenshots and the original recording when it fits Jira limits
+2. **Call `attach_session_evidence_to_jira`** only when you need to retry or add the active chat evidence to an already-created Jira ticket
+3. **Call `attach_video_frames_to_jira` only when frame images are explicitly needed** for the Jira ticket; frame JPGs are not attached by default
 
 ## 🧠 COGNITIVE REASONING — Root Cause Diagnosis
 
@@ -243,22 +249,24 @@ When generating bug tickets, format section titles in **bold**:
 - **Environment :-**
 - **Attachments :-**
 
-Make each data-field label in Description or Steps bold and code-formatted:
-- **`BuildingName`**
-- **`ComplexName`**
-- **`PropertyType`**
+Keep section labels bold-only. When you mention field names, identifiers, property IDs, or event names, use code-only formatting:
+- `BuildingName`
+- `ComplexName`
+- `PropertyType`
 
-This formatting must be present in the generated ticket text every time.
+Never combine bold and inline code on the same text span.
 
 ### 5. Jira Formatting Preservation
 
 The `create_jira_ticket` tool automatically converts markdown formatting to Atlassian Document Format (ADF). You should write the description using standard markdown:
 - Use `**bold**` for section titles and labels
-- Use `` `code` `` for inline code/field names
+- Use `` `code` `` for inline code, field names, identifiers, and event names
 - Use markdown tables (`| col1 | col2 |`) for test case steps
 - Use `##` headings for section structure
 - Use numbered lists (`1. item`) for steps
 - Use bullet lists (`- item`) for lists
+
+For Jira compatibility, keep labels bold-only and keep identifiers code-only. Do not write patterns like `**`value`**`.
 
 All markdown will be automatically converted to rich Jira formatting (bold, tables, headings, code) — no manual ADF conversion needed.
 
@@ -319,7 +327,7 @@ When creating bug tickets, grounding gives you:
 
 **Steps to Reproduce :-**
 1. Navigate to the UAT environment URL (from `.env` UAT_URL)
-2. Search for property with ID **`12345678`**
+2. Search for property with ID `12345678`
 3. Click on property to open detail page
 4. Observe image gallery section
 

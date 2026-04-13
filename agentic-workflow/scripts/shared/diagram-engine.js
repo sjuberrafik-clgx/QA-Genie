@@ -189,6 +189,42 @@ function buildRenderPage(mermaidCode, themeName) {
 </html>`;
 }
 
+function normalizeMermaidCode(mermaidCode) {
+    return String(mermaidCode || '')
+        .replace(/\\r\\n/g, '\n')
+        .replace(/\\n/g, '\n')
+        .replace(/\\t/g, '\t');
+}
+
+function sanitizeSvgContent(svgContent) {
+    const rawSvg = String(svgContent || '').trim();
+    if (!rawSvg) {
+        return rawSvg;
+    }
+
+    return rawSvg.replace(/<svg\b([^>]*)>/i, (match, attrs) => {
+        let cleanedAttrs = attrs
+            .replace(/\sxmlns="[^"]*"/gi, '')
+            .replace(/\sxmlns:xlink="[^"]*"/gi, '')
+            .replace(/\sstyle="([^"]*)"/i, (styleMatch, styleValue) => {
+                const cleanedStyle = styleValue
+                    .replace(/(?:^|;)\s*max-width\s*:[^;]*/gi, '')
+                    .replace(/^;+|;+$/g, '')
+                    .trim();
+
+                return cleanedStyle ? ` style="${cleanedStyle}"` : '';
+            })
+            .replace(/\s{2,}/g, ' ')
+            .trim();
+
+        if (cleanedAttrs) {
+            cleanedAttrs = ` ${cleanedAttrs}`;
+        }
+
+        return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"${cleanedAttrs}>`;
+    });
+}
+
 // ─── Core Rendering ─────────────────────────────────────────────────────────
 
 /**
@@ -217,11 +253,13 @@ async function renderDiagram(opts) {
         maxWidth,
     } = opts;
 
+    const normalizedCode = normalizeMermaidCode(mermaidCode);
+
     // ── Input validation ──
     if (!mermaidCode || typeof mermaidCode !== 'string') {
         return { success: false, error: 'mermaidCode is required and must be a string' };
     }
-    if (mermaidCode.length > MAX_CODE_LENGTH) {
+    if (normalizedCode.length > MAX_CODE_LENGTH) {
         return { success: false, error: `mermaidCode exceeds max length of ${MAX_CODE_LENGTH} characters` };
     }
 
@@ -238,7 +276,7 @@ async function renderDiagram(opts) {
         page = await context.newPage();
 
         // Load the Mermaid rendering page
-        const html = buildRenderPage(mermaidCode, theme);
+        const html = buildRenderPage(normalizedCode, theme);
         await page.setContent(html, { waitUntil: 'networkidle' });
 
         // Wait for Mermaid to finish rendering
@@ -263,13 +301,10 @@ async function renderDiagram(opts) {
 
         // Extract SVG content
         const svgContent = await diagramEl.evaluate(el => el.outerHTML);
+        const cleanSvg = sanitizeSvgContent(svgContent);
 
         // ── SVG Export ──
         if (exportSvg) {
-            // Clean up SVG: add xmlns, viewBox, remove max-width constraints
-            const cleanSvg = svgContent
-                .replace(/<svg /, `<svg xmlns="http://www.w3.org/2000/svg" `)
-                .replace(/style="[^"]*max-width:[^;"]*;?/g, (match) => match.replace(/max-width:[^;"]*;?/, ''));
             fs.writeFileSync(svgPath, cleanSvg, 'utf-8');
         }
 
@@ -293,7 +328,7 @@ async function renderDiagram(opts) {
             success: true,
             svgPath: exportSvg ? svgPath : undefined,
             pngPath: exportPng ? pngPath : undefined,
-            svgContent: exportSvg ? svgContent : undefined,
+            svgContent: exportSvg ? cleanSvg : undefined,
             width,
             height,
         };
@@ -419,12 +454,36 @@ async function renderForEmbed(opts) {
     };
 }
 
+/**
+ * Render a Mermaid diagram for hybrid outputs that need both a portable fallback
+ * and richer runtime behavior, such as generated HTML reports.
+ *
+ * @param {Object} opts
+ * @param {string} opts.mermaidCode - Mermaid DSL
+ * @param {string} [opts.theme] - Document theme
+ * @param {string} [opts.outputName] - Base filename without extension
+ * @returns {Promise<{success: boolean, svgPath?: string, pngPath?: string, svgContent?: string, width?: number, height?: number, error?: string}>}
+ */
+async function renderForHybridOutput(opts) {
+    const { mermaidCode, theme, outputName } = opts;
+
+    return renderDiagram({
+        mermaidCode,
+        theme,
+        outputName: outputName || `hybrid-${Date.now()}`,
+        svg: true,
+        png: true,
+        scale: 2,
+    });
+}
+
 // ─── Exports ────────────────────────────────────────────────────────────────
 
 module.exports = {
     renderDiagram,
     renderDiagramBatch,
     renderForEmbed,
+    renderForHybridOutput,
     cleanupBrowser,
     detectDiagramType,
     validateMermaidCode,

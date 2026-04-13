@@ -2,7 +2,8 @@
 
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { getToolDisplay, getCategoryColorClasses } from '@/lib/tool-display-names';
-import { WrenchIcon, CheckIcon, XIcon } from '@/components/Icons';
+import { WrenchIcon, CheckIcon, ExclamationIcon, XIcon } from '@/components/Icons';
+import { FileAttachmentCard } from '@/components/FilePreview';
 
 // ─── Category Badge ──────────────────────────────────────────────────────────
 
@@ -12,6 +13,109 @@ function CategoryBadge({ category, color }) {
         <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide border ${classes.bg} ${classes.text} ${classes.border}`}>
             {category}
         </span>
+    );
+}
+
+function getEffectBadgeClasses(effect) {
+    if (effect === 'delete') {
+        return 'bg-red-50 text-red-600 border-red-200';
+    }
+    if (effect === 'write') {
+        return 'bg-amber-50 text-amber-700 border-amber-200';
+    }
+    return 'bg-slate-100 text-slate-600 border-slate-200';
+}
+
+function getImpactHint(display) {
+    if (display.effect === 'delete') {
+        return display.requiresConfirmation
+            ? 'destructive change, explicit confirmation required'
+            : 'destructive change';
+    }
+    if (display.effect === 'write' && display.impactLevel === 'high') {
+        return display.requiresConfirmation
+            ? 'high-impact write, approval required'
+            : 'high-impact write';
+    }
+    if (display.effect === 'write' && display.impactLevel === 'medium') {
+        return 'write operation';
+    }
+    return null;
+}
+
+function parseToolResultPayload(result) {
+    if (!result) return null;
+    if (typeof result === 'object') return result;
+    if (typeof result !== 'string') return null;
+
+    try {
+        return JSON.parse(result);
+    } catch {
+        return null;
+    }
+}
+
+function getStructuredMutationPayload(resultPayload) {
+    if (!resultPayload || typeof resultPayload !== 'object') return null;
+    if (resultPayload.receipt && typeof resultPayload.receipt === 'object') return resultPayload.receipt;
+    if (resultPayload.preview && typeof resultPayload.preview === 'object') return resultPayload.preview;
+    return null;
+}
+
+function MutationPayloadBlock({ payload, isFailed }) {
+    if (!payload) return null;
+
+    const subjectLabel = payload.subject?.label || payload.subject?.id || payload.subject?.title || 'Target resource';
+    const changes = Array.isArray(payload.changes) ? payload.changes : [];
+    const notes = Array.isArray(payload.notes) ? payload.notes : [];
+    const accentClasses = isFailed
+        ? 'border-red-100/80 bg-red-50/50'
+        : 'border-surface-200/70 bg-white/70';
+
+    return (
+        <div className={`mt-2 ml-[26px] rounded-lg border px-3 py-2.5 space-y-2 ${accentClasses}`}>
+            <div className="flex items-center justify-between gap-3 text-[10px] uppercase tracking-wide text-surface-500 font-semibold">
+                <span>{payload.title || (payload.kind === 'mutation-receipt' ? 'Mutation receipt' : 'Mutation preview')}</span>
+                <span className="normal-case text-surface-600">{subjectLabel}</span>
+            </div>
+
+            {changes.length > 0 && (
+                <div className="space-y-1.5">
+                    {changes.map((change, index) => (
+                        <div key={`${change.field || 'field'}_${index}`} className="rounded-md border border-surface-200/70 bg-surface-50/80 px-2.5 py-2">
+                            <div className="text-[11px] font-semibold text-surface-700">{change.label || change.field || 'Field'}</div>
+                            <div className="mt-1 grid grid-cols-1 gap-1 text-[11px] text-surface-600 sm:grid-cols-2 sm:gap-2">
+                                <div>
+                                    <span className="font-medium text-surface-500">Before: </span>
+                                    <span>{change.beforeDisplay || '(empty)'}</span>
+                                </div>
+                                <div>
+                                    <span className="font-medium text-surface-500">After: </span>
+                                    <span>{change.afterDisplay || '(empty)'}</span>
+                                </div>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {notes.length > 0 && (
+                <div className="space-y-1">
+                    {notes.map((note, index) => (
+                        <div key={`note_${index}`} className="text-[11px] text-surface-600 leading-relaxed">
+                            {note}
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {payload.outcome && (
+                <div className="text-[11px] text-surface-600 leading-relaxed">
+                    <span className="font-medium text-surface-700">Outcome: </span>
+                    {payload.outcome}
+                </div>
+            )}
+        </div>
     );
 }
 
@@ -47,24 +151,34 @@ function ToolCallItem({ tool }) {
     const startTimeRef = useRef(tool.status === 'running' ? Date.now() : null);
     const display = useMemo(() => getToolDisplay(tool.name), [tool.name]);
     const isRunning = tool.status === 'running';
+    const isApprovalPending = isRunning && tool.progressPhase === 'approval';
     const isFailed = tool.status === 'complete' && tool.success === false;
     const isComplete = tool.status === 'complete' && tool.success !== false;
+    const effectClasses = getEffectBadgeClasses(display.effect);
+    const impactHint = getImpactHint(display);
+    const resultPayload = useMemo(() => parseToolResultPayload(tool.result), [tool.result]);
+    const mutationPayload = useMemo(() => getStructuredMutationPayload(resultPayload), [resultPayload]);
+    const artifactAttachments = Array.isArray(tool.attachments) ? tool.attachments : [];
 
     // Card border/bg styling
-    const cardStyle = isRunning
-        ? tool.progressPhase
-            ? 'border-brand-200/80 bg-brand-50/40 py-2'
-            : 'border-brand-200/80 bg-brand-50/40 py-2.5'
-        : isFailed
-            ? 'border-red-200/80 bg-red-50/30 py-2.5'
-            : 'border-accent-200/80 bg-accent-50/30 py-2.5';
+    const cardStyle = isApprovalPending
+        ? 'border-amber-300/80 bg-amber-50/60 py-3 shadow-sm shadow-amber-100/60'
+        : isRunning
+            ? tool.progressPhase
+                ? 'border-brand-200/80 bg-brand-50/40 py-2'
+                : 'border-brand-200/80 bg-brand-50/40 py-2.5'
+            : isFailed
+                ? 'border-red-200/80 bg-red-50/30 py-2.5'
+                : 'border-accent-200/80 bg-accent-50/30 py-2.5';
 
     return (
         <div className={`rounded-xl px-4 text-xs border transition-all ${cardStyle}`}>
             {/* Main row: icon + name + category + status */}
             <div className="flex items-center gap-2">
                 {/* Status icon */}
-                {isRunning ? (
+                {isApprovalPending ? (
+                    <ExclamationIcon className="w-4 h-4 flex-shrink-0 text-amber-500" />
+                ) : isRunning ? (
                     <div className="w-4 h-4 flex-shrink-0">
                         <div className="w-4 h-4 rounded-full border-2 border-brand-400 border-t-transparent animate-spin" />
                     </div>
@@ -85,6 +199,12 @@ function ToolCallItem({ tool }) {
                 {/* Category badge */}
                 <CategoryBadge category={display.categoryLabel} color={display.color} />
 
+                {display.effect !== 'read' && (
+                    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide border ${effectClasses}`}>
+                        {display.effect}
+                    </span>
+                )}
+
                 {/* Elapsed timer for running tools */}
                 {isRunning && (
                     <ElapsedTimer startTime={startTimeRef.current} isRunning={isRunning} />
@@ -103,8 +223,8 @@ function ToolCallItem({ tool }) {
                         </span>
                     )}
                     {isRunning && tool.progressPhase && (
-                        <span className="text-brand-500 text-[10px] font-semibold truncate max-w-[200px]">
-                            {tool.progressPhase.replace(/_/g, ' ').toUpperCase()}
+                        <span className={`${isApprovalPending ? 'text-amber-600' : 'text-brand-500'} text-[10px] font-semibold truncate max-w-[200px]`}>
+                            {isApprovalPending ? 'AWAITING APPROVAL' : tool.progressPhase.replace(/_/g, ' ').toUpperCase()}
                         </span>
                     )}
                     {isComplete && (
@@ -117,7 +237,19 @@ function ToolCallItem({ tool }) {
             </div>
 
             {/* Live progress detail for running tools */}
-            {isRunning && tool.progressMessage && (
+            {isApprovalPending && (
+                <div className="mt-2 ml-[26px] rounded-lg border border-amber-200/80 bg-white/80 px-3 py-2.5 text-[11px] leading-relaxed text-amber-800 shadow-[0_1px_2px_rgba(120,53,15,0.06)]">
+                    <div className="font-semibold text-amber-700">Approval gate is holding this action.</div>
+                    <div className="mt-1 text-surface-600">
+                        {tool.progressMessage || 'The tool is waiting for an explicit user decision.'}
+                    </div>
+                    <div className="mt-1 text-surface-500">
+                        Review the approval card in the timeline to approve or cancel the mutation.
+                    </div>
+                </div>
+            )}
+
+            {isRunning && tool.progressMessage && !isApprovalPending && (
                 <div className="mt-1.5 ml-[26px] space-y-1">
                     {/* Step progress bar */}
                     {tool.stepNum && tool.totalSteps && (
@@ -142,6 +274,27 @@ function ToolCallItem({ tool }) {
                     <div className="flex items-center gap-2 text-[10px] text-brand-600/80 leading-tight">
                         <span className="truncate">{tool.stepDescription || tool.progressMessage}</span>
                     </div>
+                </div>
+            )}
+
+            {impactHint && (
+                <div className="mt-1.5 ml-[26px] text-[10px] leading-tight text-surface-500">
+                    {impactHint}
+                </div>
+            )}
+
+            {!isRunning && mutationPayload && (
+                <MutationPayloadBlock payload={mutationPayload} isFailed={isFailed} />
+            )}
+
+            {!isRunning && artifactAttachments.length > 0 && (
+                <div className="mt-2 ml-[26px] flex flex-wrap gap-2">
+                    {artifactAttachments.map((attachment, index) => (
+                        <FileAttachmentCard
+                            key={attachment.id || `${tool.id || tool.name}_artifact_${index}`}
+                            attachment={attachment}
+                        />
+                    ))}
                 </div>
             )}
 

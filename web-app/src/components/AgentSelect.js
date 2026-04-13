@@ -9,6 +9,7 @@ const ICON_MAP = {
     sparkle: SparkleIcon,
     tpm: TPMIcon,
     document: DocumentIcon,
+    docgenie: DocumentIcon,
     code: CodeIcon,
     bug: BugIcon,
     task: TaskIcon,
@@ -47,8 +48,8 @@ export default function AgentSelect({ value, onChange, disabled = false, classNa
     };
 
     return (
-        <div ref={containerRef} className={`relative flex items-center ${className}`}>
-            <div className={`flex items-center gap-0.5 p-0.5 rounded-xl border bg-surface-50/80 overflow-x-auto ${disabled ? 'opacity-60 pointer-events-none' : ''} border-surface-200/60`}>
+        <div ref={containerRef} className={`relative flex min-w-0 items-center ${className}`}>
+            <div className={`flex w-full max-w-full items-center gap-0.5 rounded-xl border bg-surface-50/80 p-0.5 overflow-x-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] lg:flex-wrap lg:overflow-visible 2xl:flex-nowrap 2xl:overflow-x-auto ${disabled ? 'opacity-60 pointer-events-none' : ''} border-surface-200/60`}>
                 {AGENT_MODES.map((agent) => {
                     const isActive = agent.value === value;
                     return (
@@ -59,7 +60,7 @@ export default function AgentSelect({ value, onChange, disabled = false, classNa
                             onMouseEnter={(e) => handleMouseEnter(e, agent)}
                             onMouseLeave={() => setTooltipAgent(null)}
                             className={`
-                                relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-[10px] text-[11px] font-semibold
+                                relative flex shrink-0 items-center gap-1.5 px-2 py-1.5 rounded-[10px] text-[10.5px] font-semibold sm:px-2.5 sm:text-[11px] lg:flex-[0_0_auto]
                                 transition-all duration-150 cursor-pointer select-none whitespace-nowrap
                                 ${isActive
                                     ? `${agent.activeClass} shadow-sm`

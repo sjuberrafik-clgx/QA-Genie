@@ -203,20 +203,20 @@ const TOOL_DISPLAY_MAP = {
     // ── Atlassian MCP Tools ──
     'mcp_atlassian_atl_searchJiraIssuesUsingJql': { label: 'Search Jira (JQL)', category: 'jira' },
     'mcp_atlassian_atl_getJiraIssue': { label: 'Get Jira Issue', category: 'jira' },
-    'mcp_atlassian_atl_createJiraIssue': { label: 'Create Jira Issue', category: 'jira' },
-    'mcp_atlassian_atl_editJiraIssue': { label: 'Edit Jira Issue', category: 'jira' },
-    'mcp_atlassian_atl_addCommentToJiraIssue': { label: 'Add Jira Comment', category: 'jira' },
+    'mcp_atlassian_atl_createJiraIssue': { label: 'Create Jira Issue', category: 'jira', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
+    'mcp_atlassian_atl_editJiraIssue': { label: 'Edit Jira Issue', category: 'jira', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
+    'mcp_atlassian_atl_addCommentToJiraIssue': { label: 'Add Jira Comment', category: 'jira', effect: 'write', impactLevel: 'medium', requiresConfirmation: false },
     'mcp_atlassian_atl_getVisibleJiraProjects': { label: 'List Jira Projects', category: 'jira' },
     'mcp_atlassian_atl_getTransitionsForJiraIssue': { label: 'Get Jira Transitions', category: 'jira' },
-    'mcp_atlassian_atl_transitionJiraIssue': { label: 'Transition Jira Issue', category: 'jira' },
+    'mcp_atlassian_atl_transitionJiraIssue': { label: 'Transition Jira Issue', category: 'jira', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
     'mcp_atlassian_atl_lookupJiraAccountId': { label: 'Lookup Jira Account', category: 'jira' },
     'mcp_atlassian_atl_search': { label: 'Search Atlassian', category: 'jira' },
     'mcp_atlassian_atl_fetch': { label: 'Fetch Atlassian API', category: 'jira' },
     'mcp_atlassian_atl_atlassianUserInfo': { label: 'Atlassian User Info', category: 'jira' },
     'mcp_atlassian_atl_getConfluencePage': { label: 'Get Confluence Page', category: 'kb' },
     'mcp_atlassian_atl_searchConfluenceUsingCql': { label: 'Search Confluence', category: 'kb' },
-    'mcp_atlassian_atl_createConfluencePage': { label: 'Create Confluence Page', category: 'kb' },
-    'mcp_atlassian_atl_updateConfluencePage': { label: 'Update Confluence Page', category: 'kb' },
+    'mcp_atlassian_atl_createConfluencePage': { label: 'Create Confluence Page', category: 'kb', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
+    'mcp_atlassian_atl_updateConfluencePage': { label: 'Update Confluence Page', category: 'kb', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
     'mcp_atlassian_atl_getConfluenceSpaces': { label: 'List Confluence Spaces', category: 'kb' },
 
     // ── Custom SDK Tools ──
@@ -232,9 +232,24 @@ const TOOL_DISPLAY_MAP = {
     'get_test_results': { label: 'Get Test Results', category: 'execution' },
     'fetch_jira_ticket': { label: 'Fetch Jira Ticket', category: 'jira' },
     'get_jira_current_user': { label: 'Get Jira User', category: 'jira' },
-    'create_jira_ticket': { label: 'Create Jira Ticket', category: 'jira' },
+    'search_jira_issues': { label: 'Search Jira Issues', category: 'jira' },
+    'search_jira_epics': { label: 'Search Jira Epics', category: 'jira' },
+    'get_jira_epic': { label: 'Get Jira Epic', category: 'jira' },
+    'get_jira_epic_issues': { label: 'Get Jira Epic Issues', category: 'jira' },
+    'list_jira_issues_without_epic': { label: 'List Jira Issues Without Epic', category: 'jira' },
+    'search_jira_users': { label: 'Search Assignable Jira Users', category: 'jira' },
+    'assign_jira_ticket': { label: 'Assign Jira Ticket', category: 'jira', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
+    'get_jira_ticket_capabilities': { label: 'Inspect Jira Capabilities', category: 'jira' },
+    'create_jira_ticket': { label: 'Create Jira Ticket', category: 'jira', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
+    'remove_jira_issue_link': { label: 'Remove Jira Issue Link', category: 'jira', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
+    'attach_session_evidence_to_jira': { label: 'Attach Evidence to Jira', category: 'jira' },
     'attach_session_images_to_jira': { label: 'Attach Images to Jira', category: 'jira' },
-    'update_jira_ticket': { label: 'Update Jira Ticket', category: 'jira' },
+    'attach_video_frames_to_jira': { label: 'Attach Video Evidence to Jira', category: 'jira' },
+    'delete_jira_ticket': { label: 'Delete Jira Ticket', category: 'jira', effect: 'delete', impactLevel: 'destructive', requiresConfirmation: true },
+    'transition_jira_ticket': { label: 'Transition Jira Ticket', category: 'jira', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
+    'log_jira_work': { label: 'Log Jira Work (Time Tracking)', category: 'jira', effect: 'write', impactLevel: 'medium', requiresConfirmation: false },
+    'update_jira_estimates': { label: 'Update Jira Estimates (Original/Remaining)', category: 'jira', effect: 'write', impactLevel: 'medium', requiresConfirmation: false },
+    'update_jira_ticket': { label: 'Update Jira Ticket', category: 'jira', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
     'generate_test_case_excel': { label: 'Generate Test Case Excel', category: 'excel' },
     'find_test_files': { label: 'Find Test Files', category: 'framework' },
     'execute_test': { label: 'Execute Test Suite', category: 'execution' },
@@ -249,10 +264,20 @@ const TOOL_DISPLAY_MAP = {
     'get_snapshot_quality': { label: 'Get Snapshot Quality', category: 'validation' },
     'search_knowledge_base': { label: 'Search Knowledge Base', category: 'kb' },
     'get_knowledge_base_page': { label: 'Get KB Page', category: 'kb' },
+    'search_confluence_content': { label: 'Search Confluence Content', category: 'kb' },
+    'get_confluence_page_details': { label: 'Get Confluence Page Details', category: 'kb' },
+    'list_confluence_spaces': { label: 'List Confluence Spaces', category: 'kb' },
+    'list_confluence_pages_in_space': { label: 'List Confluence Pages', category: 'kb' },
+    'get_confluence_page_tree': { label: 'Get Confluence Page Tree', category: 'kb' },
+    'create_confluence_page': { label: 'Create Confluence Page', category: 'kb', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
+    'update_confluence_page': { label: 'Update Confluence Page', category: 'kb', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
+    'delete_confluence_page': { label: 'Delete Confluence Page', category: 'kb', effect: 'delete', impactLevel: 'destructive', requiresConfirmation: true },
     'refresh_grounding_context': { label: 'Refresh Grounding Context', category: 'grounding' },
     'write_agent_note': { label: 'Write Agent Note', category: 'context' },
     'get_agent_notes': { label: 'Get Agent Notes', category: 'context' },
     'get_context_budget': { label: 'Get Context Budget', category: 'context' },
+    'list_session_documents': { label: 'List Session Documents', category: 'context' },
+    'parse_session_document': { label: 'Parse Session Document', category: 'context' },
 
     // ── Filesystem Tools (FileGenie) ──
     'set_workspace_root': { label: 'Set Workspace Root', category: 'filesystem' },
@@ -278,7 +303,7 @@ const TOOL_DISPLAY_MAP = {
  * Falls back to a cleaned-up version of the raw name if not in the registry.
  *
  * @param {string} rawName - The raw tool name (e.g., 'mcp_unified-autom_unified_navigate')
- * @returns {{ label: string, category: string, categoryLabel: string, color: string }}
+ * @returns {{ label: string, category: string, categoryLabel: string, color: string, effect: string, impactLevel: string, requiresConfirmation: boolean }}
  */
 export function getToolDisplay(rawName) {
     const entry = TOOL_DISPLAY_MAP[rawName];
@@ -290,6 +315,9 @@ export function getToolDisplay(rawName) {
             category: entry.category,
             categoryLabel: cat.label,
             color: cat.color,
+            effect: entry.effect || 'read',
+            impactLevel: entry.impactLevel || 'low',
+            requiresConfirmation: entry.requiresConfirmation === true,
         };
     }
 
@@ -320,6 +348,9 @@ export function getToolDisplay(rawName) {
         category,
         categoryLabel: cat.label,
         color: cat.color,
+        effect: 'read',
+        impactLevel: 'low',
+        requiresConfirmation: false,
     };
 }
 

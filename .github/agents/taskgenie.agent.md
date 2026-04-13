@@ -37,7 +37,7 @@ user-invokable: true
 When you need to READ existing Jira ticket details:
 
 **Preferred tools (in priority order):**
-1. **`fetch_jira_ticket` custom tool** — Calls Jira REST API directly. Pass `ticketId` (e.g., `"AOTF-16514"`). Returns full ticket payload: summary, description, issue type, status, priority, labels, acceptance criteria, components.
+1. **`fetch_jira_ticket` custom tool** — Calls Jira REST API directly. Pass `ticketId` (e.g., `"AOTF-16514"`). Returns full ticket payload: summary, description, issue type, status, priority, labels, acceptance criteria, comments, and components.
 2. **Atlassian MCP tools** — `atl_getJiraIssue`, `atl_searchJiraIssuesUsingJql` — available when Atlassian MCP server is connected.
 
 **NEVER do this:**
@@ -51,6 +51,14 @@ When you need to READ existing Jira ticket details:
 - **READ** existing Jira tickets using `fetch_jira_ticket` or Atlassian MCP tools
 - **CREATE** new Jira tickets using `create_jira_ticket`
 - **UPDATE** existing Jira tickets using `update_jira_ticket` — can update summary, description, labels, priority, and add comments
+- **INSPECT** editable fields and workflow options using `get_jira_ticket_capabilities`
+- **SEARCH ASSIGNABLE USERS** using `search_jira_users` before assigning work to a named user like Monica or Khushboo
+- **REMOVE ISSUE LINKS** using `remove_jira_issue_link` when the user explicitly asks to unlink tickets or remove an associated link
+- **TRANSITION** Jira ticket status using `transition_jira_ticket`
+- **LOG WORK** using `log_jira_work` — generic "Time Tracking" or "add hours" requests map here
+- **UPDATE ESTIMATES** using `update_jira_estimates` only when the user explicitly asks to change originalEstimate or remainingEstimate
+- If a request mixes worklog wording and estimate wording, ask for clarification before mutating Jira
+- Labels are opt-in only. Pass `labels` to `create_jira_ticket` only when the user explicitly asks for labels. Otherwise omit the parameter entirely.
 
 ---
 
@@ -69,7 +77,43 @@ When user asks to "create testing task" for a ticket:
    - `linkType: "Relates"` (default)
    - `assigneeAccountId: "<accountId from step 1>"` — assigns to the requesting user
    - `jiraBaseUrl: "<extracted from user URL>"`
-   - `labels: "qa,testing"`
+
+### True Jira Subtask Under Parent Ticket
+
+When the user explicitly wants a **subtask** under an existing Jira issue:
+
+1. **Call `fetch_jira_ticket`** to inspect the parent ticket and confirm the target issue
+2. **Call `search_jira_users`** if the assignee is a named person rather than the current user
+3. **Call `create_jira_ticket`** with:
+  - `parentIssueKey: "<parent ticket key>"`
+  - `summary: "Testing - <Original Title>"`
+  - `assigneeAccountId: "<resolved accountId>"`
+  - Optional `issueType` only if the user specifically requests a particular subtask type
+
+**Important:**
+- `parentIssueKey` creates a true Jira subtask
+- `linkedIssueKey` creates a loose Jira relationship
+- Never send both in the same request
+
+### Named User Assignment
+
+When the user asks to assign a Testing task or subtask to a specific person:
+
+1. **Call `search_jira_users`** with the name or email fragment
+2. If there is a single exact or recommended match, use that `accountId`
+3. If multiple plausible matches remain, ask the user to clarify before creating the ticket
+
+Use `get_jira_current_user` only when the assignee is explicitly the requesting user.
+
+### Removing an Associated Link
+
+When the user asks to remove an existing associated link:
+
+1. **Call `fetch_jira_ticket`** to inspect current `issueLinks`
+2. **Call `remove_jira_issue_link`** with either:
+  - `ticketId` + `relatedIssueKey`, or
+  - explicit `linkId` when already known
+3. If multiple links exist between the same tickets, provide `linkType` or clarify with the user
 
 ### Bug-Type Parent → Embedded Test Cases
 
@@ -86,7 +130,7 @@ When embedding test cases for Bug-type parents, use this exact markdown table fo
 ```
 ## Test Cases
 
-**Parent Ticket:** AOTF-XXXXX
+**Parent Ticket:** `AOTF-XXXXX`
 **Context:** <brief context from the bug ticket>
 
 **Pre-Conditions (If any):** 1: For Consumer: User is authenticated
@@ -99,7 +143,7 @@ When embedding test cases for Bug-type parents, use this exact markdown table fo
 | 1.2 | <step description> | <expected result> | <actual result> |
 ```
 
-**IMPORTANT:** The `create_jira_ticket` tool automatically converts markdown formatting (tables, bold, headings, lists) into Jira's native ADF format. Write your description using markdown, and it will render correctly in Jira with proper tables, bold text, and structure.
+**IMPORTANT:** Follow the repo's Jira-safe rich text rule. Keep labels bold-only, keep identifiers like `AOTF-XXXXX` code-only, and never combine bold with inline code on the same text span. The `create_jira_ticket` tool converts the supported Jira-safe markdown subset (tables, headings, lists, bold labels, inline code) into Jira's native ADF format.
 
 ### Batch Testing Task Creation
 
