@@ -30,6 +30,9 @@ const fs = require('fs');
 const fsP = fs.promises;
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
+const { URL } = require('url');
+const { WebSocketServer } = require('ws');
 // NOTE: SDKOrchestrator is lazy-required inside startServer() to avoid
 // circular dependency with index.js which re-exports startServer.
 const { RunStore, RUN_STATUS } = require('./run-store');
@@ -40,11 +43,32 @@ const { getFollowupProvider } = require('./followup-provider');
 const { ObservationRecorder } = require('./observation-recorder');
 const { setSessionRoot, getSessionRoot, BLOCKED_PATHS } = require('./filesystem-tools');
 const { isGeneratedArtifactPath } = require('./generated-artifact-policy');
+const { StudioWorkspaceRegistry, ensureSkillFrontmatter } = require('./studio-workspace-registry');
+const { detectProjectSkillsForMessage, buildProjectSkillRoutingHint } = require('./project-skills-catalog');
+const { StudioAssetGenerator } = require('./studio-asset-generator');
+const { AgentSessionFactory } = require('./agent-sessions');
+const { AgentCatalogService } = require('./agent-catalog');
+const { AgentTemplateRegistry } = require('./agent-template-registry');
+const { exportAgent, importAgent, SUPPORTED_EXPORT_FORMATS } = require('./agent-config-exporter');
+const { McpConnectionManager } = require('./mcp-connection-manager');
+const { validateAgent } = require('./agent-validator');
+const { AgentAnalyticsStore } = require('./agent-analytics-store');
+const { JiraWebhookLifecycleService } = require('./jira-webhook-lifecycle');
+const { TerminalSessionManager } = require('./terminal-session-manager');
+const {
+    JiraWebhookReliabilityStore,
+    normalizeJiraWebhookIngestionConfig,
+    normalizeJiraWebhookStartupSyncConfig,
+    runJiraWebhookStartupSync,
+    createQueueError,
+} = require('./jira-webhook-reliability');
 const {
     loadEnv, isValidTicketId, isValidMode, generateBatchId, truncate,
 } = require('./utils');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
+const CUSTOM_RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{1,79}$/;
+const FRAMEWORK_MODES = new Set(['existing', 'manual']);
 
 // ─── Lightweight HTTP Router ────────────────────────────────────────────────
 
@@ -66,6 +90,7 @@ class Router {
     post(pattern, handler) { this._routes.push({ method: 'POST', pattern, handler }); }
     /** Register a POST route that receives the raw request stream (no JSON parsing). */
     postRaw(pattern, handler) { this._routes.push({ method: 'POST', pattern, handler, rawBody: true }); }
+    put(pattern, handler) { this._routes.push({ method: 'PUT', pattern, handler }); }
     delete(pattern, handler) { this._routes.push({ method: 'DELETE', pattern, handler }); }
 
     /**
@@ -130,9 +155,14 @@ class Router {
             });
             req.on('end', () => {
                 const raw = Buffer.concat(chunks).toString();
-                if (!raw) return resolve({});
+                if (!raw) {
+                    return resolve({ parsedBody: {}, rawBody: '' });
+                }
                 try {
-                    resolve(JSON.parse(raw));
+                    resolve({
+                        parsedBody: JSON.parse(raw),
+                        rawBody: raw,
+                    });
                 } catch (e) {
                     reject(new Error('Invalid JSON body'));
                 }
@@ -150,7 +180,7 @@ class Router {
         const allowedOrigin = this._corsOrigins.includes('*') || this._corsOrigins.includes(origin)
             ? origin : this._corsOrigins[0];
         res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Filename');
 
         // Preflight
@@ -175,6 +205,7 @@ class Router {
             // Raw-body routes receive the request stream directly (e.g. streaming file uploads)
             if (route.rawBody) {
                 req.body = {};
+                req.rawBody = '';
                 await route.handler(req, res);
                 return;
             }
@@ -183,11 +214,12 @@ class Router {
             // Supports up to 10 images × 5 MB + 5 docs × 50 MB × 1.37 base64 overhead
             const isMessageRoute = req.url.includes('/messages');
             const maxBodyBytes = isMessageRoute ? 400 * 1024 * 1024 : 1024 * 1024;
-            const body = ['POST', 'PUT', 'PATCH'].includes(req.method)
+            const parsed = ['POST', 'PUT', 'PATCH'].includes(req.method)
                 ? await this._readBody(req, maxBodyBytes)
-                : {};
+                : { parsedBody: {}, rawBody: '' };
 
-            req.body = body;
+            req.body = parsed.parsedBody;
+            req.rawBody = parsed.rawBody;
 
             await route.handler(req, res);
         } catch (error) {
@@ -218,6 +250,223 @@ function respondChatError(res, error, fallbackStatus = 500) {
     if (error?.runtimeState) payload.runtimeState = error.runtimeState;
     if (typeof error?.recoverable === 'boolean') payload.recoverable = error.recoverable;
     json(res, status, payload);
+}
+
+function respondLifecycleError(res, error, fallbackStatus = 500) {
+    const status = Number.isInteger(error?.status) ? error.status : fallbackStatus;
+    const payload = { error: error?.message || 'Jira webhook lifecycle request failed' };
+    if (error?.details !== undefined) payload.details = error.details;
+    json(res, status, payload);
+}
+
+function respondWebhookQueueError(res, error, fallbackStatus = 500) {
+    const status = Number.isInteger(error?.status) ? error.status : fallbackStatus;
+    const payload = { error: error?.message || 'Jira webhook queue request failed' };
+    if (error?.code) payload.code = error.code;
+    if (typeof error?.retryable === 'boolean') payload.retryable = error.retryable;
+    if (error?.details !== undefined) payload.details = error.details;
+    json(res, status, payload);
+}
+
+function normalizeWebhookStatusFilters(value) {
+    if (Array.isArray(value)) {
+        return value
+            .map(item => (typeof item === 'string' ? item.trim() : ''))
+            .filter(Boolean);
+    }
+
+    if (typeof value === 'string') {
+        return value
+            .split(',')
+            .map(item => item.trim())
+            .filter(Boolean);
+    }
+
+    return [];
+}
+
+function resolveJiraWebhookRuntimeConfig(orchestratorConfig = {}) {
+    const configured = orchestratorConfig?.sdk?.webhooks?.jira || {};
+    const triggerStatuses = normalizeWebhookStatusFilters(configured.triggerOnStatus);
+
+    return {
+        enabled: configured.enabled === true,
+        defaultMode: isValidMode(configured.defaultMode) ? configured.defaultMode : 'full',
+        triggerStatuses: triggerStatuses.length > 0
+            ? triggerStatuses
+            : ['Ready for QA', 'Ready for Testing', 'QA'],
+        secretEnv: typeof configured.secretEnv === 'string' && configured.secretEnv.trim()
+            ? configured.secretEnv.trim()
+            : 'JIRA_WEBHOOK_SECRET',
+    };
+}
+
+function parsePositiveInteger(value, fallback) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function normalizeOptionalString(value) {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed || null;
+}
+
+function isValidCustomRunId(runId) {
+    return typeof runId === 'string' && CUSTOM_RUN_ID_PATTERN.test(runId);
+}
+
+function normalizeHybridRunInput(body = {}) {
+    const frameworkModeInput = normalizeOptionalString(body.frameworkMode);
+    const frameworkMode = (frameworkModeInput || 'existing').toLowerCase();
+
+    if (!FRAMEWORK_MODES.has(frameworkMode)) {
+        return {
+            error: `Invalid frameworkMode: "${body.frameworkMode}". Use: existing, manual`,
+            hybridContext: null,
+        };
+    }
+
+    let testDataOverride = body.testDataOverride;
+    if (typeof testDataOverride === 'string') {
+        const trimmed = testDataOverride.trim();
+        if (!trimmed) {
+            testDataOverride = null;
+        } else {
+            try {
+                testDataOverride = JSON.parse(trimmed);
+            } catch {
+                testDataOverride = trimmed;
+            }
+        }
+    } else if (testDataOverride === undefined) {
+        testDataOverride = null;
+    }
+
+    const hybridContext = {
+        frameworkMode,
+        appUrl: normalizeOptionalString(body.appUrl),
+        testCaseSource: normalizeOptionalString(body.testCaseSource),
+        testDataOverride,
+        executionTarget: normalizeOptionalString(body.executionTarget),
+        requestedTicketId: normalizeOptionalString(body.ticketId),
+        requestedRunId: normalizeOptionalString(body.runId),
+    };
+
+    if (frameworkMode === 'manual' && !hybridContext.appUrl) {
+        return {
+            error: 'appUrl is required when frameworkMode is "manual"',
+            hybridContext: null,
+        };
+    }
+
+    if (frameworkMode === 'manual' && !hybridContext.testCaseSource) {
+        return {
+            error: 'testCaseSource is required when frameworkMode is "manual"',
+            hybridContext: null,
+        };
+    }
+
+    return {
+        error: null,
+        hybridContext,
+    };
+}
+
+function resolveChatVideoRetentionConfig(orchestratorConfig = {}) {
+    const configured = orchestratorConfig?.chatEvidence?.video || {};
+    const unclaimedTtlMs = parsePositiveInteger(
+        process.env.CHAT_VIDEO_UNCLAIMED_TTL_MS || configured.unclaimedTtlMs,
+        10 * 60 * 1000
+    );
+    const claimedMaxAgeMs = parsePositiveInteger(
+        process.env.CHAT_VIDEO_CLAIMED_MAX_AGE_MS || configured.claimedMaxAgeMs,
+        24 * 60 * 60 * 1000
+    );
+    const cleanupIntervalMs = parsePositiveInteger(
+        process.env.CHAT_VIDEO_CLEANUP_INTERVAL_MS || configured.cleanupIntervalMs,
+        60 * 1000
+    );
+
+    return {
+        unclaimedTtlMs,
+        claimedMaxAgeMs: Math.max(claimedMaxAgeMs, unclaimedTtlMs),
+        cleanupIntervalMs,
+    };
+}
+
+function parseJiraWebhookSignature(signatureHeader) {
+    if (typeof signatureHeader !== 'string' || !signatureHeader.trim()) return null;
+
+    const value = signatureHeader.trim();
+    const separatorIndex = value.indexOf('=');
+    if (separatorIndex <= 0 || separatorIndex === value.length - 1) return null;
+
+    const method = value.slice(0, separatorIndex).trim().toLowerCase();
+    const digest = value.slice(separatorIndex + 1).trim().toLowerCase();
+
+    if (!method || !digest) return null;
+    if (!/^[a-z0-9-]+$/i.test(method)) return null;
+    if (!/^[a-f0-9]+$/i.test(digest) || digest.length % 2 !== 0) return null;
+
+    return { method, digest };
+}
+
+function verifyJiraWebhookSignature(rawBody, signatureHeader, secret) {
+    if (typeof secret !== 'string' || !secret.trim()) {
+        return { ok: false, reason: 'missing-secret' };
+    }
+
+    const parsed = parseJiraWebhookSignature(signatureHeader);
+    if (!parsed) {
+        return { ok: false, reason: 'missing-signature' };
+    }
+
+    let expectedDigest;
+    try {
+        expectedDigest = crypto
+            .createHmac(parsed.method, secret)
+            .update(typeof rawBody === 'string' ? rawBody : '', 'utf8')
+            .digest('hex');
+    } catch {
+        return { ok: false, reason: 'unsupported-method' };
+    }
+
+    const expected = Buffer.from(expectedDigest, 'hex');
+    const actual = Buffer.from(parsed.digest, 'hex');
+
+    if (expected.length === 0 || actual.length === 0 || expected.length !== actual.length) {
+        return { ok: false, reason: 'mismatch' };
+    }
+
+    const signatureMatches = crypto.timingSafeEqual(expected, actual);
+    return {
+        ok: signatureMatches,
+        reason: signatureMatches ? null : 'mismatch',
+        method: parsed.method,
+    };
+}
+
+function buildJiraWebhookReplayKey(payload, headers = {}) {
+    const identifierHeader = headers['x-atlassian-webhook-identifier'];
+    if (typeof identifierHeader === 'string' && identifierHeader.trim()) {
+        return `id:${identifierHeader.trim()}`;
+    }
+
+    const issueKey = payload?.issue?.key || 'unknown';
+    const webhookEvent = payload?.webhookEvent || 'unknown';
+    const timestamp = payload?.timestamp || 'unknown';
+    const changelogId = payload?.changelog?.id || 'none';
+
+    return `fallback:${issueKey}:${webhookEvent}:${timestamp}:${changelogId}`;
+}
+
+function pruneJiraWebhookReplayCache(cache, now, ttlMs) {
+    for (const [key, seenAt] of cache.entries()) {
+        if ((now - seenAt) > ttlMs) {
+            cache.delete(key);
+        }
+    }
 }
 
 function buildObservationSummary(run, observations, observationLogPath, options = {}) {
@@ -592,6 +841,53 @@ function transformSuites(suiteList, opts = {}) {
     return { suites, stats };
 }
 
+function normalizePlaywrightErrors(errorList, context = {}) {
+    if (!Array.isArray(errorList)) return [];
+    return errorList
+        .map((error, index) => {
+            const message = (error && typeof error === 'object')
+                ? (error.message || '')
+                : String(error || '');
+            if (!message) return null;
+            return {
+                message,
+                stack: (error && typeof error === 'object' && error.stack) ? error.stack : '',
+                snippet: (error && typeof error === 'object' && error.snippet) ? error.snippet : '',
+                ticketId: context.ticketId || null,
+                runId: context.runId || null,
+                specPath: context.specPath || null,
+                timestamp: context.timestamp || null,
+                index,
+            };
+        })
+        .filter(Boolean);
+}
+
+function buildRunnerErrorSuite(ticketId, specPath, runnerErrors) {
+    if (!Array.isArray(runnerErrors) || runnerErrors.length === 0) return null;
+    const safeTicketId = ticketId || 'UNKNOWN';
+    return {
+        title: `${safeTicketId} - Runner Errors`,
+        file: specPath || null,
+        ticketId: safeTicketId,
+        specs: runnerErrors.map((error, index) => ({
+            title: `Runner Error ${index + 1}`,
+            status: 'broken',
+            isBroken: true,
+            isFlaky: false,
+            duration: 0,
+            retries: 0,
+            error: {
+                message: error.message,
+                stack: error.stack || '',
+                snippet: error.snippet || '',
+            },
+            steps: [],
+        })),
+        suites: [],
+    };
+}
+
 // ─── Server Factory ─────────────────────────────────────────────────────────
 
 /**
@@ -614,6 +910,48 @@ async function startServer(options = {}) {
     const runStore = new RunStore();
     const eventBridge = getEventBridge();
     const learningStore = new LearningStore();
+    const terminalSessionManager = new TerminalSessionManager({
+        workspaceRoot: PROJECT_ROOT,
+        allowExternalCwd: String(process.env.TERMINAL_ALLOW_EXTERNAL_CWD || '').toLowerCase() === 'true',
+        defaultShell: process.env.TERMINAL_DEFAULT_SHELL || undefined,
+        maxSessions: parseInt(process.env.TERMINAL_MAX_SESSIONS, 10) || 20,
+        bufferLimit: parseInt(process.env.TERMINAL_BUFFER_LIMIT, 10) || 1200,
+    });
+    const studioWorkspaceRegistry = new StudioWorkspaceRegistry();
+    const agentCatalog = new AgentCatalogService({ workspaceRegistry: studioWorkspaceRegistry });
+    const agentTemplateRegistry = new AgentTemplateRegistry();
+    const mcpConnectionManager = new McpConnectionManager();
+    const agentAnalyticsStore = new AgentAnalyticsStore();
+
+    // Lazy AgentSessionFactory used by the Studio description generator.
+    // Built on first call so it picks up the initialized orchestrator.client / defineTool.
+    let _studioGeneratorFactory = null;
+    async function getStudioSessionFactory() {
+        if (_studioGeneratorFactory) return _studioGeneratorFactory;
+        if (!orchestratorReady || !orchestrator?.client) {
+            const err = new Error('SDK orchestrator is still initializing. Try again in a moment.');
+            err.status = 503;
+            throw err;
+        }
+        const sdk = await import('@github/copilot-sdk');
+        _studioGeneratorFactory = new AgentSessionFactory({
+            client: orchestrator.client,
+            defineTool: sdk.defineTool,
+            model: orchestrator.options.model,
+            provider: orchestrator.options.provider || null,
+            config: orchestrator.config || {},
+            learningStore,
+            verbose: false,
+        });
+        return _studioGeneratorFactory;
+    }
+    const studioAssetGenerator = new StudioAssetGenerator({
+        getFactory: getStudioSessionFactory,
+        defaultModel: process.env.STUDIO_GENERATOR_MODEL || 'gpt-5.4',
+        verbose,
+    });
+
+    await studioWorkspaceRegistry.ensureBaseStructure();
 
     let SDKOrchestrator = null;
     if (!options.orchestrator) {
@@ -623,6 +961,16 @@ async function startServer(options = {}) {
 
     // Initialize SDK Orchestrator (singleton)
     const orchestrator = options.orchestrator || new SDKOrchestrator({ verbose });
+    const jiraWebhookLifecycle = new JiraWebhookLifecycleService({
+        orchestratorConfig: orchestrator?.config || {},
+    });
+    const initialWebhookIngestionConfig = normalizeJiraWebhookIngestionConfig(orchestrator?.config || {});
+    const jiraWebhookReliabilityStore = new JiraWebhookReliabilityStore({
+        storeFile: initialWebhookIngestionConfig.storeFile,
+        maxQueueSize: initialWebhookIngestionConfig.maxQueueSize,
+        maxDeadLetterEntries: initialWebhookIngestionConfig.maxDeadLetterEntries,
+        maxRecentEntries: initialWebhookIngestionConfig.maxRecentEntries,
+    });
     let orchestratorReady = false;
 
     // Chat session manager — initialized after orchestrator starts
@@ -653,6 +1001,7 @@ async function startServer(options = {}) {
                         model: orchestrator.options.model,
                         config: orchestrator.config,
                         learningStore,
+                        agentCatalog,
                     });
                     log('Chat Session Manager ready');
                 } catch (err) {
@@ -665,6 +1014,14 @@ async function startServer(options = {}) {
     }
 
     const router = new Router();
+
+    function getWebhookIngestionConfig() {
+        return normalizeJiraWebhookIngestionConfig(orchestrator?.config || {});
+    }
+
+    function getWebhookStartupSyncConfig() {
+        return normalizeJiraWebhookStartupSyncConfig(orchestrator?.config || {});
+    }
 
     async function resolveModelSelection(requestedModel) {
         const catalog = await orchestrator.getModelCatalog();
@@ -690,9 +1047,44 @@ async function startServer(options = {}) {
     const corsOrigins = (process.env.CORS_ORIGINS || '*').split(',').map(s => s.trim());
     router.setCorsOrigins(corsOrigins);
 
+    // ─── Terminal session auth helpers ──────────────────────────────
+    // Per-session tokens are issued by TerminalSessionManager.createSession.
+    // They protect write paths (input/command/resize/terminate) and the
+    // WS upgrade against CSRF and cross-tab hijack. Can be disabled for
+    // local dev via `TERMINAL_REQUIRE_TOKEN=false`.
+    const terminalRequireToken = String(process.env.TERMINAL_REQUIRE_TOKEN || 'true')
+        .toLowerCase() !== 'false';
+
+    const isTerminalOriginAllowed = (origin) => {
+        if (!origin) return true; // same-origin / non-browser clients
+        if (corsOrigins.includes('*')) return true;
+        return corsOrigins.some((allowed) => allowed === origin);
+    };
+
+    const requireTerminalToken = (req, res, sessionId) => {
+        if (!terminalRequireToken) return true;
+        const headerToken = req.headers?.['x-terminal-token']
+            || req.headers?.['X-Terminal-Token'];
+        const queryToken = req.query?.token;
+        const token = typeof headerToken === 'string' && headerToken
+            ? headerToken
+            : (typeof queryToken === 'string' ? queryToken : '');
+
+        if (!token || !terminalSessionManager.verifySessionToken(sessionId, token)) {
+            json(res, 401, { error: 'Invalid or missing terminal session token' });
+            return false;
+        }
+        return true;
+    };
+
     // ─── Active Pipeline Tracking ───────────────────────────────────
     // Map of runId → { cancel: Function }
     const activePipelines = new Map();
+    const jiraWebhookReplayCache = new Map();
+    const JIRA_WEBHOOK_REPLAY_TTL_MS = 24 * 60 * 60 * 1000;
+    let videoUploadCleanupInterval = null;
+    let jiraWebhookQueueTimer = null;
+    let jiraWebhookQueueProcessing = false;
 
     // ─── Stale Run Watchdog ─────────────────────────────────────────
     // Every 5 minutes, check for runs stuck in running/queued that have no
@@ -716,6 +1108,152 @@ async function startServer(options = {}) {
         }
     }, STALE_RUN_CHECK_INTERVAL);
 
+    async function runJiraWebhookLifecycleSync(trigger = 'startup', startupConfigOverride = {}) {
+        return runJiraWebhookStartupSync({
+            lifecycleService: jiraWebhookLifecycle,
+            store: jiraWebhookReliabilityStore,
+            orchestratorConfig: orchestrator?.config || {},
+            startupConfig: {
+                ...getWebhookStartupSyncConfig(),
+                ...(startupConfigOverride || {}),
+            },
+            trigger,
+        });
+    }
+
+    function scheduleJiraWebhookQueueProcessing(delayMs = 0) {
+        if (jiraWebhookQueueTimer) return;
+
+        const safeDelay = Math.max(0, Number.isFinite(delayMs) ? delayMs : 0);
+        jiraWebhookQueueTimer = setTimeout(() => {
+            jiraWebhookQueueTimer = null;
+            processJiraWebhookQueue().catch(error => {
+                log(`Jira webhook queue processor error: ${error.message}`, 'error');
+            });
+        }, safeDelay);
+    }
+
+    function triggerPipelineFromWebhookDelivery(delivery) {
+        if (!orchestratorReady) {
+            throw createQueueError('SDK Orchestrator not ready yet.', {
+                status: 503,
+                retryable: true,
+                code: 'orchestrator-not-ready',
+            });
+        }
+
+        if (!delivery?.issueKey || !isValidTicketId(delivery.issueKey)) {
+            throw createQueueError(`Invalid or missing ticketId in webhook delivery: "${delivery?.issueKey || ''}"`, {
+                status: 400,
+                retryable: false,
+                code: 'invalid-ticket-id',
+            });
+        }
+
+        const webhookConfig = resolveJiraWebhookRuntimeConfig(orchestrator?.config || {});
+        if (!webhookConfig.enabled) {
+            return {
+                action: 'ignored',
+                reason: 'Jira webhook trigger is disabled in workflow-config.',
+            };
+        }
+
+        const activeRun = runStore.getActiveRun(delivery.issueKey);
+        if (activeRun) {
+            return {
+                action: 'ignored',
+                reason: `Pipeline already running for ${delivery.issueKey}`,
+                activeRunId: activeRun.runId,
+            };
+        }
+
+        const mode = isValidMode(delivery.mode) ? delivery.mode : webhookConfig.defaultMode;
+
+        const run = runStore.createRun({
+            ticketId: delivery.issueKey,
+            mode,
+            environment: 'UAT',
+            triggeredBy: 'webhook',
+        });
+
+        runStore.updateMission(run.runId, {
+            evidence: {
+                eventLogPath: eventBridge.getRunEventLogPath(run.runId),
+            },
+        });
+
+        _executePipeline(run.runId, delivery.issueKey, mode, orchestrator, runStore, eventBridge, activePipelines);
+
+        return {
+            action: 'triggered',
+            runId: run.runId,
+            ticketId: delivery.issueKey,
+            mode,
+            triggeredBy: 'jira-webhook-queue',
+            webhookId: delivery?.headers?.identifier || null,
+            retryCount: delivery?.headers?.retryCount || null,
+        };
+    }
+
+    async function processJiraWebhookQueue() {
+        if (jiraWebhookQueueProcessing) return;
+
+        const ingestionConfig = getWebhookIngestionConfig();
+        if (!ingestionConfig.enabled) {
+            return;
+        }
+
+        if (!orchestratorReady) {
+            scheduleJiraWebhookQueueProcessing(ingestionConfig.retryDelayMs);
+            return;
+        }
+
+        jiraWebhookQueueProcessing = true;
+        try {
+            let loopCount = 0;
+
+            while (loopCount < ingestionConfig.processingLoopLimit) {
+                const delivery = jiraWebhookReliabilityStore.claimNextDelivery();
+                if (!delivery) break;
+
+                try {
+                    const result = triggerPipelineFromWebhookDelivery(delivery);
+                    jiraWebhookReliabilityStore.completeDelivery(delivery.deliveryId, result);
+                } catch (error) {
+                    const failure = jiraWebhookReliabilityStore.failDelivery(delivery.deliveryId, error, {
+                        maxAttempts: ingestionConfig.maxAttempts,
+                        retryDelayMs: ingestionConfig.retryDelayMs,
+                    });
+
+                    if (failure.deadLettered) {
+                        log(`Webhook delivery ${delivery.deliveryId} moved to DLQ: ${failure.delivery?.lastError?.message || error.message}`, 'warn');
+                    }
+                }
+
+                loopCount += 1;
+            }
+        } finally {
+            jiraWebhookQueueProcessing = false;
+        }
+
+        const nextDelay = jiraWebhookReliabilityStore.getNextPendingDelayMs();
+        if (nextDelay !== null) {
+            scheduleJiraWebhookQueueProcessing(nextDelay);
+        }
+    }
+
+    runJiraWebhookLifecycleSync('startup')
+        .then(summary => {
+            log(`Jira webhook lifecycle startup sync [${summary.status}] ${summary.message}`);
+        })
+        .catch(error => {
+            log(`Jira webhook lifecycle startup sync failed: ${error.message}`, 'warn');
+        });
+
+    if (jiraWebhookReliabilityStore.getNextPendingDelayMs() !== null) {
+        scheduleJiraWebhookQueueProcessing(0);
+    }
+
     // ═════════════════════════════════════════════════════════════════
     // HEALTH & READINESS
     // ═════════════════════════════════════════════════════════════════
@@ -729,11 +1267,16 @@ async function startServer(options = {}) {
     });
 
     router.get('/ready', (req, res) => {
+        const terminalSessions = terminalSessionManager.listSessions();
         ok(res, {
             ready: orchestratorReady,
             orchestrator: orchestratorReady ? 'started' : 'starting',
             runStore: 'ok',
             eventBridge: 'ok',
+            terminal: {
+                sessions: terminalSessions.length,
+                activeSessions: terminalSessions.filter(session => session.status === 'running').length,
+            },
             timestamp: new Date().toISOString(),
         });
     });
@@ -751,31 +1294,608 @@ async function startServer(options = {}) {
     });
 
     // ═════════════════════════════════════════════════════════════════
+    // TERMINAL SESSIONS
+    // ═════════════════════════════════════════════════════════════════
+
+    router.get('/api/terminal/sessions', (req, res) => {
+        ok(res, {
+            items: terminalSessionManager.listSessions(),
+            wsEndpoint: '/api/terminal/ws?sessionId={sessionId}',
+        });
+    });
+
+    router.post('/api/terminal/sessions', (req, res) => {
+        try {
+            const session = terminalSessionManager.createSession({
+                shell: req.body?.shell,
+                cwd: req.body?.cwd,
+                cols: req.body?.cols,
+                rows: req.body?.rows,
+                env: req.body?.env,
+            });
+
+            const tokenQuery = session.sessionToken
+                ? `&token=${encodeURIComponent(session.sessionToken)}`
+                : '';
+
+            json(res, 201, {
+                ...session,
+                wsPath: `/api/terminal/ws?sessionId=${encodeURIComponent(session.sessionId)}${tokenQuery}`,
+            });
+        } catch (error) {
+            badRequest(res, error.message);
+        }
+    });
+
+    router.get('/api/terminal/sessions/:sessionId', (req, res) => {
+        const session = terminalSessionManager.getSession(req.params.sessionId);
+        if (!session) return notFound(res, 'Terminal session not found');
+        ok(res, session);
+    });
+
+    router.get('/api/terminal/sessions/:sessionId/output', (req, res) => {
+        const limit = Math.max(1, Math.min(parseInt(req.query.limit, 10) || 300, 1200));
+        const payload = terminalSessionManager.getSessionOutput(req.params.sessionId, { limit });
+        if (!payload) return notFound(res, 'Terminal session not found');
+        ok(res, payload);
+    });
+
+    router.post('/api/terminal/sessions/:sessionId/input', (req, res) => {
+        try {
+            if (!requireTerminalToken(req, res, req.params.sessionId)) return;
+            const appendNewline = req.body?.appendNewline === true;
+            const incoming = req.body?.input;
+            const text = typeof incoming === 'string' ? incoming : String(incoming || '');
+            if (!text) return badRequest(res, 'input is required');
+
+            const payload = appendNewline ? `${text}\n` : text;
+            const snapshot = terminalSessionManager.writeInput(req.params.sessionId, payload, { recordInput: true });
+            ok(res, snapshot);
+        } catch (error) {
+            if (error.message.includes('not found')) {
+                return notFound(res, error.message);
+            }
+            badRequest(res, error.message);
+        }
+    });
+
+    router.post('/api/terminal/sessions/:sessionId/command', (req, res) => {
+        try {
+            if (!requireTerminalToken(req, res, req.params.sessionId)) return;
+            const command = typeof req.body?.command === 'string' ? req.body.command : String(req.body?.command || '');
+            if (!command.trim()) return badRequest(res, 'command is required');
+            const snapshot = terminalSessionManager.sendCommand(req.params.sessionId, command);
+            ok(res, snapshot);
+        } catch (error) {
+            if (error.message.includes('not found')) {
+                return notFound(res, error.message);
+            }
+            badRequest(res, error.message);
+        }
+    });
+
+    router.post('/api/terminal/sessions/:sessionId/resize', (req, res) => {
+        try {
+            if (!requireTerminalToken(req, res, req.params.sessionId)) return;
+            const snapshot = terminalSessionManager.resizeSession(req.params.sessionId, req.body?.cols, req.body?.rows);
+            ok(res, snapshot);
+        } catch (error) {
+            if (error.message.includes('not found')) {
+                return notFound(res, error.message);
+            }
+            badRequest(res, error.message);
+        }
+    });
+
+    router.post('/api/terminal/sessions/:sessionId/terminate', async (req, res) => {
+        try {
+            if (!requireTerminalToken(req, res, req.params.sessionId)) return;
+            const snapshot = await terminalSessionManager.terminateSession(req.params.sessionId, {
+                force: req.body?.force !== false,
+                reason: req.body?.reason || 'Terminate requested via API',
+            });
+            ok(res, snapshot);
+        } catch (error) {
+            if (error.message.includes('not found')) {
+                return notFound(res, error.message);
+            }
+            badRequest(res, error.message);
+        }
+    });
+
+    router.get('/api/chat/agents', async (req, res) => {
+        try {
+            const includeInactive = String(req.query.includeInactive || '').toLowerCase() === 'true';
+            const includeDraft = String(req.query.includeDraft || '').toLowerCase() === 'true';
+            ok(res, { items: await agentCatalog.listChatAgents({ includeInactive, includeDraft }) });
+        } catch (error) {
+            json(res, error?.status || 500, { error: `Failed to load chat agents: ${error.message}` });
+        }
+    });
+
+    // ═════════════════════════════════════════════════════════════════
+    // AGENT STUDIO WORKSPACES
+    // ═════════════════════════════════════════════════════════════════
+
+    router.get('/api/studio/workspaces', async (req, res) => {
+        try {
+            ok(res, {
+                items: await studioWorkspaceRegistry.listWorkspaces(),
+                sourceRoot: studioWorkspaceRegistry.sourceRootRelative,
+                runtimeRoot: studioWorkspaceRegistry.runtimeRootRelative,
+            });
+        } catch (error) {
+            json(res, error?.status || 500, { error: `Failed to list studio workspaces: ${error.message}` });
+        }
+    });
+
+    router.post('/api/studio/workspaces', async (req, res) => {
+        try {
+            const workspace = await studioWorkspaceRegistry.createWorkspace(req.body || {});
+            json(res, 201, workspace);
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.get('/api/studio/workspaces/:workspaceId/catalog', async (req, res) => {
+        try {
+            ok(res, await studioWorkspaceRegistry.getWorkspaceCatalog(req.params.workspaceId));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.get('/api/studio/workspaces/:workspaceId/tree', async (req, res) => {
+        try {
+            ok(res, await studioWorkspaceRegistry.getWorkspaceTree(req.params.workspaceId, { depth: req.query.depth }));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.post('/api/studio/workspaces/:workspaceId/assets', async (req, res) => {
+        try {
+            json(res, 201, await studioWorkspaceRegistry.createAsset(req.params.workspaceId, req.body || {}));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.post('/api/studio/generate-description', async (req, res) => {
+        try {
+            const body = req.body || {};
+            const result = await studioAssetGenerator.generateAssetDescription({
+                type: body.type,
+                name: body.name,
+                intent: body.intent,
+                model: body.model,
+            });
+            ok(res, {
+                description: result.summary,
+                longContext: result.longContext,
+                sections: result.sections,
+                type: result.type,
+                name: result.name,
+                intent: result.intent,
+            });
+        } catch (error) {
+            json(res, error?.status || 500, {
+                error: error.message,
+                code: error.code,
+                details: error.details,
+            });
+        }
+    });
+
+    router.post('/api/studio/workspaces/:workspaceId/agents/:agentId/publish', async (req, res) => {
+        try {
+            ok(res, await studioWorkspaceRegistry.publishAgent(req.params.workspaceId, req.params.agentId, req.body || {}));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.post('/api/studio/workspaces/:workspaceId/agents/:agentId/activation', async (req, res) => {
+        try {
+            ok(res, await studioWorkspaceRegistry.setAgentActivation(req.params.workspaceId, req.params.agentId, req.body?.active));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.get('/api/studio/workspaces/:workspaceId/file', async (req, res) => {
+        try {
+            ok(res, await studioWorkspaceRegistry.readWorkspaceFile(req.params.workspaceId, req.query.path));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.post('/api/studio/workspaces/:workspaceId/file', async (req, res) => {
+        try {
+            ok(res, await studioWorkspaceRegistry.writeWorkspaceFile(req.params.workspaceId, req.body?.path, req.body?.content));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.delete('/api/studio/workspaces/:workspaceId', async (req, res) => {
+        try {
+            ok(res, await studioWorkspaceRegistry.deleteWorkspace(req.params.workspaceId, { force: req.query.force }));
+        } catch (error) {
+            json(res, error?.status || 500, {
+                error: error.message,
+                code: error.code || null,
+                details: error.details || null,
+            });
+        }
+    });
+
+    router.delete('/api/studio/workspaces/:workspaceId/agents/:agentId', async (req, res) => {
+        try {
+            ok(res, await studioWorkspaceRegistry.deleteAsset(req.params.workspaceId, 'agent', req.params.agentId));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message, code: error.code || null });
+        }
+    });
+
+    router.delete('/api/studio/workspaces/:workspaceId/skills/:skillId', async (req, res) => {
+        try {
+            ok(res, await studioWorkspaceRegistry.deleteAsset(req.params.workspaceId, 'skill', req.params.skillId));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message, code: error.code || null });
+        }
+    });
+
+    router.delete('/api/studio/workspaces/:workspaceId/mcp-servers/:mcpId', async (req, res) => {
+        try {
+            ok(res, await studioWorkspaceRegistry.deleteAsset(req.params.workspaceId, 'mcp-server', req.params.mcpId));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message, code: error.code || null });
+        }
+    });
+
+    router.delete('/api/studio/workspaces/:workspaceId/file', async (req, res) => {
+        try {
+            ok(res, await studioWorkspaceRegistry.deleteFile(req.params.workspaceId, req.query.path));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message, code: error.code || null });
+        }
+    });
+
+    // ─── Skill CRUD Endpoints ──────────────────────────────────────────
+
+    router.get('/api/studio/workspaces/:workspaceId/skills/:skillId', async (req, res) => {
+        try {
+            ok(res, await studioWorkspaceRegistry.getSkill(req.params.workspaceId, req.params.skillId));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message, code: error.code || null });
+        }
+    });
+
+    router.put('/api/studio/workspaces/:workspaceId/skills/:skillId', async (req, res) => {
+        try {
+            ok(res, await studioWorkspaceRegistry.updateSkill(req.params.workspaceId, req.params.skillId, req.body || {}));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message, code: error.code || null });
+        }
+    });
+
+    router.post('/api/studio/workspaces/:workspaceId/skills/:skillId/validate', async (req, res) => {
+        try {
+            ok(res, await studioWorkspaceRegistry.validateSkill(req.params.workspaceId, req.params.skillId));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message, code: error.code || null });
+        }
+    });
+
+    // Auto-fix SKILL.md format compliance (adds/fixes YAML frontmatter)
+    router.post('/api/studio/workspaces/:workspaceId/skills/:skillId/auto-fix-format', async (req, res) => {
+        try {
+            const skill = await studioWorkspaceRegistry.getSkill(req.params.workspaceId, req.params.skillId);
+            const { content, modified } = ensureSkillFrontmatter(skill.richBody || '', {
+                name: skill.name || req.params.skillId,
+                description: skill.description || '',
+            });
+            if (modified) {
+                await studioWorkspaceRegistry.updateSkill(req.params.workspaceId, req.params.skillId, {
+                    richBody: content,
+                });
+            }
+            ok(res, { modified, content });
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message, code: error.code || null });
+        }
+    });
+
+    // Test skill matching for a given message (skill test sandbox)
+    router.post('/api/studio/skills/test-match', async (req, res) => {
+        try {
+            const { message, activeAgent } = req.body || {};
+            if (!message || typeof message !== 'string') {
+                return json(res, 400, { error: 'message (string) is required' });
+            }
+            const result = buildProjectSkillRoutingHint(message, { activeAgent: activeAgent || null });
+            ok(res, {
+                hint: result.hint,
+                activatedSkills: result.activatedSkills,
+                matches: (result.matches || []).map(m => ({
+                    name: m.name,
+                    folderName: m.folderName,
+                    score: m.score,
+                    confidence: m.confidence,
+                    source: m.source,
+                    matchedKeywords: m.matchedKeywords,
+                    matchedPhrases: m.matchedPhrases,
+                    matchedTokens: m.matchedTokens?.slice(0, 10),
+                })),
+            });
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message, code: error.code || null });
+        }
+    });
+
+    // ═════════════════════════════════════════════════════════════════
+    // AGENT TEMPLATE REGISTRY
+    // ═════════════════════════════════════════════════════════════════
+
+    router.get('/api/studio/templates', async (req, res) => {
+        try {
+            ok(res, await agentTemplateRegistry.listTemplates({
+                category: req.query.category || null,
+                search: req.query.search || null,
+                source: req.query.source || null,
+            }));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.get('/api/studio/templates/:templateId', async (req, res) => {
+        try {
+            ok(res, await agentTemplateRegistry.getTemplate(req.params.templateId));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.post('/api/studio/templates', async (req, res) => {
+        try {
+            json(res, 201, await agentTemplateRegistry.createTemplate(req.body || {}));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.post('/api/studio/templates/:templateId/fork', async (req, res) => {
+        try {
+            const forked = await agentTemplateRegistry.forkTemplate(req.params.templateId, req.body || {});
+            ok(res, forked);
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.delete('/api/studio/templates/:templateId', async (req, res) => {
+        try {
+            ok(res, await agentTemplateRegistry.deleteTemplate(req.params.templateId));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    // ═════════════════════════════════════════════════════════════════
+    // AGENT EXPORT / IMPORT
+    // ═════════════════════════════════════════════════════════════════
+
+    router.get('/api/studio/workspaces/:workspaceId/agents/:agentId/export', async (req, res) => {
+        try {
+            const format = req.query.format || 'json';
+            const agent = await studioWorkspaceRegistry.getWorkspaceAgent(req.params.workspaceId, req.params.agentId);
+
+            // Read the agent prompt content
+            let promptContent = '';
+            if (agent.promptPath) {
+                try {
+                    const fileResult = await studioWorkspaceRegistry.readWorkspaceFile(
+                        req.params.workspaceId,
+                        agent.promptPath.replace(/^studio-workspaces\/[^/]+\//, '')
+                    );
+                    promptContent = fileResult.content || '';
+                } catch { /* prompt may not exist */ }
+            }
+
+            const exported = exportAgent(agent, promptContent, format);
+            ok(res, exported);
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.post('/api/studio/import-agent', async (req, res) => {
+        try {
+            const { content, format, workspaceId } = req.body || {};
+            if (!content) {
+                return json(res, 400, { error: 'Missing content to import' });
+            }
+
+            const imported = importAgent(content, format);
+
+            // If workspaceId is provided, create the agent in that workspace
+            if (workspaceId) {
+                const asset = await studioWorkspaceRegistry.createAsset(workspaceId, {
+                    type: 'agent',
+                    name: imported.name,
+                    description: imported.description,
+                    longContext: imported.systemPrompt,
+                });
+                ok(res, { imported, asset });
+            } else {
+                ok(res, { imported });
+            }
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.get('/api/studio/export-formats', (req, res) => {
+        ok(res, { formats: SUPPORTED_EXPORT_FORMATS });
+    });
+
+    // ═════════════════════════════════════════════════════════════════
+    // MCP CONNECTION MANAGER
+    // ═════════════════════════════════════════════════════════════════
+
+    router.get('/api/studio/mcp-registry', (req, res) => {
+        try {
+            ok(res, mcpConnectionManager.listServers({ category: req.query.category || null }));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.get('/api/studio/mcp-registry/:serverId', (req, res) => {
+        try {
+            ok(res, mcpConnectionManager.getServer(req.params.serverId));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.post('/api/studio/mcp-registry/test', async (req, res) => {
+        try {
+            const { serverId, connection } = req.body || {};
+            const result = await mcpConnectionManager.testServer(serverId || connection);
+            ok(res, result);
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    // ═════════════════════════════════════════════════════════════════
+    // AGENT VALIDATION
+    // ═════════════════════════════════════════════════════════════════
+
+    router.post('/api/studio/workspaces/:workspaceId/agents/:agentId/validate', async (req, res) => {
+        try {
+            const agent = await studioWorkspaceRegistry.getWorkspaceAgent(req.params.workspaceId, req.params.agentId);
+
+            // Read prompt content
+            let promptContent = '';
+            if (agent.promptPath) {
+                try {
+                    const fileResult = await studioWorkspaceRegistry.readWorkspaceFile(
+                        req.params.workspaceId,
+                        agent.promptPath.replace(/^studio-workspaces\/[^/]+\//, '')
+                    );
+                    promptContent = fileResult.content || '';
+                } catch { /* prompt may not exist */ }
+            }
+
+            // Read manifest
+            const manifestFile = await studioWorkspaceRegistry.readWorkspaceFile(
+                req.params.workspaceId,
+                `agents/${req.params.agentId}/agent.json`
+            );
+            const manifest = JSON.parse(manifestFile.content);
+
+            ok(res, validateAgent(manifest, promptContent));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    // ═════════════════════════════════════════════════════════════════
+    // AGENT ANALYTICS
+    // ═════════════════════════════════════════════════════════════════
+
+    router.get('/api/studio/analytics', async (req, res) => {
+        try {
+            ok(res, await agentAnalyticsStore.getSummary());
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.get('/api/studio/analytics/:agentId', async (req, res) => {
+        try {
+            const detail = await agentAnalyticsStore.getAgentDetail(req.params.agentId);
+            if (!detail) return json(res, 404, { error: `No analytics for agent: ${req.params.agentId}` });
+            ok(res, detail);
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    router.post('/api/studio/analytics/record', async (req, res) => {
+        try {
+            ok(res, await agentAnalyticsStore.recordEvent(req.body || {}));
+        } catch (error) {
+            json(res, error?.status || 500, { error: error.message });
+        }
+    });
+
+    // ═════════════════════════════════════════════════════════════════
     // PIPELINE EXECUTION
     // ═════════════════════════════════════════════════════════════════
 
     /**
      * POST /api/pipeline/run
-     * Body: { ticketId, mode?, environment?, model?, triggeredBy? }
+        * Body: { ticketId?, runId?, mode?, environment?, model?, triggeredBy?, frameworkMode?, appUrl?, testCaseSource?, testDataOverride?, executionTarget? }
      * Returns: { runId, status }
      */
     router.post('/api/pipeline/run', (req, res) => {
-        const { ticketId, mode, environment, model, triggeredBy, mission } = req.body;
+        const {
+            ticketId: rawTicketId,
+            runId: rawRunId,
+            mode,
+            environment,
+            model,
+            triggeredBy,
+            mission,
+        } = req.body || {};
 
-        if (!ticketId || !isValidTicketId(ticketId)) {
-            return badRequest(res, `Invalid or missing ticketId: "${ticketId}"`);
+        const ticketId = normalizeOptionalString(rawTicketId);
+        const customRunId = normalizeOptionalString(rawRunId);
+
+        if (!ticketId && !customRunId) {
+            return badRequest(res, 'Either ticketId or runId is required');
         }
+
+        if (ticketId && !isValidTicketId(ticketId)) {
+            return badRequest(res, `Invalid ticketId: "${ticketId}"`);
+        }
+
+        if (!ticketId && customRunId && !isValidCustomRunId(customRunId)) {
+            return badRequest(res, `Invalid runId: "${customRunId}". Allowed: letters, numbers, dot, underscore, dash (2-80 chars, must start alphanumeric)`);
+        }
+
         if (mode && !isValidMode(mode)) {
             return badRequest(res, `Invalid mode: "${mode}". Use: full, testcase, generate, heal, execute`);
         }
+
+        const { error: hybridError, hybridContext } = normalizeHybridRunInput({
+            ...(req.body || {}),
+            ticketId,
+            runId: customRunId,
+        });
+        if (hybridError) {
+            return badRequest(res, hybridError);
+        }
+
         if (!orchestratorReady) {
             return json(res, 503, { error: 'SDK Orchestrator not ready yet. Try again shortly.' });
         }
 
+        const pipelineIdentifier = ticketId || customRunId;
+        const identifierType = ticketId ? 'ticket' : 'custom';
+        const effectiveMode = mode || (identifierType === 'custom' ? 'generate' : 'full');
+
         // Dedup — prevent duplicate runs
-        const activeRun = runStore.getActiveRun(ticketId);
+        const activeRun = runStore.getActiveRun(pipelineIdentifier);
         if (activeRun) {
-            return conflict(res, `Pipeline already running for ${ticketId} (runId: ${activeRun.runId})`);
+            return conflict(res, `Pipeline already running for ${pipelineIdentifier} (runId: ${activeRun.runId})`);
         }
 
         resolveModelSelection(model)
@@ -785,11 +1905,14 @@ async function startServer(options = {}) {
                 }
 
                 const run = runStore.createRun({
-                    ticketId,
-                    mode: mode || 'full',
+                    ticketId: pipelineIdentifier,
+                    inputIdentifier: pipelineIdentifier,
+                    identifierType,
+                    mode: effectiveMode,
                     environment: environment || 'UAT',
                     triggeredBy: triggeredBy || 'api',
                     model: effectiveModel,
+                    hybridContext,
                     mission,
                 });
                 runStore.updateMission(run.runId, {
@@ -798,12 +1921,33 @@ async function startServer(options = {}) {
                     },
                 });
 
-                _executePipeline(run.runId, ticketId, mode || 'full', orchestrator, runStore, eventBridge, activePipelines, effectiveModel);
+                _executePipeline(
+                    run.runId,
+                    pipelineIdentifier,
+                    effectiveMode,
+                    orchestrator,
+                    runStore,
+                    eventBridge,
+                    activePipelines,
+                    effectiveModel,
+                    {
+                        frameworkMode: hybridContext.frameworkMode,
+                        appUrl: hybridContext.appUrl,
+                        testCaseSource: hybridContext.testCaseSource,
+                        testDataOverride: hybridContext.testDataOverride,
+                        executionTarget: hybridContext.executionTarget,
+                        hybridContext,
+                        identifierType,
+                        inputIdentifier: pipelineIdentifier,
+                    }
+                );
 
                 accepted(res, {
                     runId: run.runId,
                     status: run.status,
-                    ticketId,
+                    ticketId: pipelineIdentifier,
+                    identifierType,
+                    mode: effectiveMode,
                     model: effectiveModel,
                     mission: run.mission,
                 });
@@ -953,8 +2097,40 @@ async function startServer(options = {}) {
             completedAt: run.completedAt,
             duration: run.duration,
             error: run.error,
+            artifacts: run.artifacts,
             mission: run.mission,
         });
+    });
+
+    /**
+     * GET /api/pipeline/command-output/:runId
+     * Query:
+     *   ?limit=300          — Max entries when `since` is not provided.
+     *   ?since=<seq>        — Return only entries with seq > <seq> (incremental tail).
+     *   ?kinds=chunk,progress — Comma list of kinds to include. Defaults to all.
+     */
+    router.get('/api/pipeline/command-output/:runId', (req, res) => {
+        const run = runStore.getRun(req.params.runId);
+        if (!run) return notFound(res);
+
+        const limit = Math.max(1, Math.min(parseInt(req.query.limit, 10) || 300, 1000));
+        const sinceRaw = req.query.since;
+        const sinceSeq = sinceRaw !== undefined && sinceRaw !== null && sinceRaw !== ''
+            ? Number.parseInt(sinceRaw, 10)
+            : null;
+        const kindsRaw = typeof req.query.kinds === 'string' ? req.query.kinds : '';
+        const kinds = kindsRaw
+            ? kindsRaw.split(',').map((s) => s.trim()).filter(Boolean)
+            : null;
+
+        const payload = runStore.getCommandOutput(req.params.runId, {
+            limit,
+            sinceSeq: Number.isFinite(sinceSeq) ? sinceSeq : null,
+            kinds: kinds && kinds.length > 0 ? kinds : undefined,
+        });
+        if (!payload) return notFound(res);
+
+        ok(res, payload);
     });
 
     /**
@@ -1176,6 +2352,13 @@ async function startServer(options = {}) {
                     const raw = JSON.parse(buf);
                     const pw = raw.playwrightResult || {};
                     const { stats } = transformSuites(pw.suites || []);
+                    const runnerErrors = normalizePlaywrightErrors(pw.errors, {
+                        ticketId: raw.ticketId,
+                        runId: raw.runId,
+                        specPath: raw.specPath,
+                        timestamp: raw.timestamp,
+                    });
+                    const promoteRunnerErrors = stats.total === 0 && runnerErrors.length > 0;
 
                     return {
                         fileName: file,
@@ -1184,11 +2367,12 @@ async function startServer(options = {}) {
                         mode: raw.mode,
                         specPath: raw.specPath,
                         timestamp: raw.timestamp,
+                        runnerErrors: runnerErrors.length,
                         summary: {
-                            totalSpecs: stats.total,
+                            totalSpecs: stats.total + (promoteRunnerErrors ? runnerErrors.length : 0),
                             passed: stats.passed,
                             failed: stats.failed,
-                            broken: stats.broken,
+                            broken: stats.broken + (promoteRunnerErrors ? runnerErrors.length : 0),
                             skipped: stats.skipped,
                             flaky: stats.flaky,
                             retried: stats.retried,
@@ -1211,7 +2395,7 @@ async function startServer(options = {}) {
      */
     router.get('/api/reports/consolidated', async (req, res) => {
         try {
-            if (!fs.existsSync(reportsDir)) return ok(res, { total: 0, suites: [], filter: null });
+            if (!fs.existsSync(reportsDir)) return ok(res, { total: 0, suites: [], errors: [], filter: null });
 
             const sinceParam = req.query.since;
             const runIdParam = req.query.runId;
@@ -1246,19 +2430,39 @@ async function startServer(options = {}) {
             // Aggregate using the unified transformSuites helper
             const aggregateStats = { total: 0, passed: 0, failed: 0, broken: 0, skipped: 0, flaky: 0, retried: 0, totalDuration: 0 };
             const allSuites = [];
+            const globalErrors = [];
 
             for (const [ticketId, raw] of latestByTicket) {
                 const pw = raw.playwrightResult || {};
+                const runnerErrors = normalizePlaywrightErrors(pw.errors, {
+                    ticketId,
+                    runId: raw.runId,
+                    specPath: raw.specPath,
+                    timestamp: raw.timestamp,
+                });
+                globalErrors.push(...runnerErrors);
+
                 const { suites, stats } = transformSuites(pw.suites || [], { ticketId });
-                allSuites.push(...suites);
-                for (const k of Object.keys(aggregateStats)) {
-                    aggregateStats[k] += stats[k];
+
+                if (stats.total === 0 && runnerErrors.length > 0) {
+                    const runnerSuite = buildRunnerErrorSuite(ticketId, raw.specPath, runnerErrors);
+                    if (runnerSuite) {
+                        allSuites.push(runnerSuite);
+                        aggregateStats.total += runnerErrors.length;
+                        aggregateStats.broken += runnerErrors.length;
+                    }
+                } else {
+                    allSuites.push(...suites);
+                    for (const k of Object.keys(aggregateStats)) {
+                        aggregateStats[k] += stats[k];
+                    }
                 }
             }
 
             ok(res, {
                 ...aggregateStats,
                 suites: allSuites,
+                errors: globalErrors,
                 reportCount: latestByTicket.size,
                 timestamp: new Date().toISOString(),
                 filter: sinceParam || runIdParam ? { since: sinceParam || null, runId: runIdParam || null } : null,
@@ -1286,7 +2490,17 @@ async function startServer(options = {}) {
             const buf = await fsP.readFile(filePath, 'utf-8');
             const raw = JSON.parse(buf);
             const pw = raw.playwrightResult || {};
-            const { suites } = transformSuites(pw.suites || [], { includeAttachments: true });
+            const runnerErrors = normalizePlaywrightErrors(pw.errors, {
+                ticketId: raw.ticketId,
+                runId: raw.runId,
+                specPath: raw.specPath,
+                timestamp: raw.timestamp,
+            });
+            let { suites } = transformSuites(pw.suites || [], { includeAttachments: true });
+            if (suites.length === 0 && runnerErrors.length > 0) {
+                const runnerSuite = buildRunnerErrorSuite(raw.ticketId || fileName, raw.specPath, runnerErrors);
+                if (runnerSuite) suites = [runnerSuite];
+            }
 
             ok(res, {
                 ticketId: raw.ticketId,
@@ -1294,7 +2508,7 @@ async function startServer(options = {}) {
                 mode: raw.mode,
                 specPath: raw.specPath,
                 timestamp: raw.timestamp,
-                errors: pw.errors || [],
+                errors: runnerErrors,
                 suites,
             });
         } catch (err) {
@@ -1410,10 +2624,235 @@ async function startServer(options = {}) {
     // ═════════════════════════════════════════════════════════════════
 
     /**
+     * GET /api/webhooks/jira/lifecycle/config
+     * Returns lifecycle runtime configuration without exposing secrets.
+     */
+    router.get('/api/webhooks/jira/lifecycle/config', (req, res) => {
+        try {
+            jiraWebhookLifecycle.updateOrchestratorConfig(orchestrator?.config || {});
+            ok(res, {
+                ...jiraWebhookLifecycle.getRuntimeConfig(),
+                startupSync: getWebhookStartupSyncConfig(),
+                persistedState: jiraWebhookReliabilityStore.getLifecycleState(),
+            });
+        } catch (error) {
+            respondLifecycleError(res, error);
+        }
+    });
+
+    /**
+     * POST /api/webhooks/jira/lifecycle/sync
+     * Runs a manual lifecycle startup sync (refresh persisted IDs + register if needed).
+     */
+    router.post('/api/webhooks/jira/lifecycle/sync', async (req, res) => {
+        try {
+            const startupDefaults = getWebhookStartupSyncConfig();
+            const summary = await runJiraWebhookLifecycleSync('manual', {
+                refreshPersistedIds: typeof req.body?.refreshPersistedIds === 'boolean'
+                    ? req.body.refreshPersistedIds
+                    : startupDefaults.refreshPersistedIds,
+                registerIfMissing: typeof req.body?.registerIfMissing === 'boolean'
+                    ? req.body.registerIfMissing
+                    : startupDefaults.registerIfMissing,
+            });
+            ok(res, summary);
+        } catch (error) {
+            respondLifecycleError(res, error);
+        }
+    });
+
+    /**
+     * GET /api/webhooks/jira/lifecycle
+     * Lists currently registered Jira dynamic webhooks.
+     */
+    router.get('/api/webhooks/jira/lifecycle', async (req, res) => {
+        try {
+            jiraWebhookLifecycle.updateOrchestratorConfig(orchestrator?.config || {});
+            ok(res, await jiraWebhookLifecycle.listWebhooks({
+                startAt: req.query.startAt,
+                maxResults: req.query.maxResults,
+            }));
+        } catch (error) {
+            respondLifecycleError(res, error);
+        }
+    });
+
+    /**
+     * POST /api/webhooks/jira/lifecycle/register
+     * Body: { jqlFilter, events, url?, callbackBaseUrl?, callbackPath?, excludeBody?, fieldIdsFilter?, issuePropertyKeysFilter? }
+     */
+    router.post('/api/webhooks/jira/lifecycle/register', async (req, res) => {
+        try {
+            jiraWebhookLifecycle.updateOrchestratorConfig(orchestrator?.config || {});
+            const result = await jiraWebhookLifecycle.registerWebhook(req.body || {});
+            if (Array.isArray(result.createdWebhookIds) && result.createdWebhookIds.length > 0) {
+                jiraWebhookReliabilityStore.addPersistedWebhookIds(result.createdWebhookIds, {
+                    source: 'manual-register',
+                });
+            }
+            json(res, 201, result);
+        } catch (error) {
+            respondLifecycleError(res, error);
+        }
+    });
+
+    /**
+     * POST /api/webhooks/jira/lifecycle/refresh
+     * Body: { webhookIds?: string[], refreshAll?: boolean }
+     */
+    router.post('/api/webhooks/jira/lifecycle/refresh', async (req, res) => {
+        try {
+            jiraWebhookLifecycle.updateOrchestratorConfig(orchestrator?.config || {});
+            const refreshAll = req.body?.refreshAll === true || req.query.refreshAll === 'true';
+            const result = await jiraWebhookLifecycle.refreshWebhooks({
+                webhookIds: req.body?.webhookIds,
+                refreshAll,
+            });
+
+            if (Array.isArray(result.refreshedWebhookIds) && result.refreshedWebhookIds.length > 0) {
+                jiraWebhookReliabilityStore.setPersistedWebhookIds(result.refreshedWebhookIds, {
+                    source: 'manual-refresh',
+                });
+            }
+
+            ok(res, result);
+        } catch (error) {
+            respondLifecycleError(res, error);
+        }
+    });
+
+    /**
+     * GET /api/webhooks/jira/lifecycle/failed
+     * Returns Jira failed webhook deliveries.
+     */
+    router.get('/api/webhooks/jira/lifecycle/failed', async (req, res) => {
+        try {
+            jiraWebhookLifecycle.updateOrchestratorConfig(orchestrator?.config || {});
+            ok(res, await jiraWebhookLifecycle.getFailedWebhooks({
+                maxResults: req.query.maxResults,
+            }));
+        } catch (error) {
+            respondLifecycleError(res, error);
+        }
+    });
+
+    /**
+     * POST /api/webhooks/jira/lifecycle/delete
+     * Body: { webhookIds: string[] }
+     */
+    router.post('/api/webhooks/jira/lifecycle/delete', async (req, res) => {
+        try {
+            jiraWebhookLifecycle.updateOrchestratorConfig(orchestrator?.config || {});
+            const result = await jiraWebhookLifecycle.deleteWebhooks({
+                webhookIds: req.body?.webhookIds,
+            });
+
+            if (Array.isArray(result.deletedWebhookIds) && result.deletedWebhookIds.length > 0) {
+                jiraWebhookReliabilityStore.removePersistedWebhookIds(result.deletedWebhookIds, {
+                    source: 'manual-delete',
+                });
+            }
+
+            ok(res, result);
+        } catch (error) {
+            respondLifecycleError(res, error);
+        }
+    });
+
+    /**
+     * GET /api/webhooks/jira/queue
+     * Returns queue/processing/DLQ state for Jira webhook ingestion.
+     */
+    router.get('/api/webhooks/jira/queue', (req, res) => {
+        try {
+            const ingestionConfig = getWebhookIngestionConfig();
+            const { storeFile, ...publicIngestionConfig } = ingestionConfig;
+
+            ok(res, {
+                ingestion: publicIngestionConfig,
+                lifecycle: jiraWebhookReliabilityStore.getLifecycleState(),
+                queue: jiraWebhookReliabilityStore.getQueueSnapshot({
+                    includePayload: req.query.includePayload === 'true',
+                    limit: req.query.limit,
+                }),
+            });
+        } catch (error) {
+            respondWebhookQueueError(res, error);
+        }
+    });
+
+    /**
+     * GET /api/webhooks/jira/dlq
+     * Lists dead-lettered Jira webhook deliveries.
+     */
+    router.get('/api/webhooks/jira/dlq', (req, res) => {
+        try {
+            ok(res, jiraWebhookReliabilityStore.listDeadLetters({
+                limit: req.query.limit,
+                offset: req.query.offset,
+                includePayload: req.query.includePayload === 'true',
+            }));
+        } catch (error) {
+            respondWebhookQueueError(res, error);
+        }
+    });
+
+    /**
+     * POST /api/webhooks/jira/dlq/replay
+     * Body: { deliveryIds?: string[], replayAll?: boolean, limit?: number }
+     */
+    router.post('/api/webhooks/jira/dlq/replay', (req, res) => {
+        try {
+            const replayAll = req.body?.replayAll === true || req.query.replayAll === 'true';
+            const replayResult = jiraWebhookReliabilityStore.replayDeadLetters({
+                deliveryIds: req.body?.deliveryIds,
+                replayAll,
+                limit: req.body?.limit || req.query.limit,
+            });
+
+            if (replayResult.replayedCount > 0) {
+                scheduleJiraWebhookQueueProcessing(0);
+            }
+
+            ok(res, replayResult);
+        } catch (error) {
+            respondWebhookQueueError(res, error);
+        }
+    });
+
+    /**
      * POST /api/webhooks/jira
      * Receives Jira webhook events for auto-triggering pipelines.
      */
     router.post('/api/webhooks/jira', async (req, res) => {
+        const webhookConfig = resolveJiraWebhookRuntimeConfig(orchestrator?.config || {});
+        if (!webhookConfig.enabled) {
+            return ok(res, {
+                acknowledged: true,
+                action: 'ignored',
+                reason: 'Jira webhook trigger is disabled in workflow-config.',
+            });
+        }
+
+        const webhookSecret = process.env[webhookConfig.secretEnv];
+        const signatureHeader = req.headers['x-hub-signature'] || req.headers['x-hub-signature-256'];
+        const signatureResult = verifyJiraWebhookSignature(
+            typeof req.rawBody === 'string' ? req.rawBody : '',
+            signatureHeader,
+            webhookSecret
+        );
+
+        if (!signatureResult.ok) {
+            const status = signatureResult.reason === 'missing-secret' ? 503 : 401;
+            const message = signatureResult.reason === 'missing-secret'
+                ? `Jira webhook secret is not configured. Set ${webhookConfig.secretEnv} in environment.`
+                : 'Invalid Jira webhook signature.';
+            return json(res, status, {
+                error: message,
+                reason: signatureResult.reason,
+            });
+        }
+
         const payload = req.body;
 
         // Validate basic structure
@@ -1425,6 +2864,23 @@ async function startServer(options = {}) {
         if (!issueKey) {
             return badRequest(res, 'Missing issue key in webhook payload');
         }
+        if (!isValidTicketId(issueKey)) {
+            return badRequest(res, `Invalid issue key in webhook payload: "${issueKey}"`);
+        }
+
+        const now = Date.now();
+        pruneJiraWebhookReplayCache(jiraWebhookReplayCache, now, JIRA_WEBHOOK_REPLAY_TTL_MS);
+
+        const webhookReplayKey = buildJiraWebhookReplayKey(payload, req.headers || {});
+        if (jiraWebhookReplayCache.has(webhookReplayKey)) {
+            return ok(res, {
+                acknowledged: true,
+                action: 'ignored',
+                reason: 'Duplicate webhook delivery ignored.',
+                webhookId: req.headers['x-atlassian-webhook-identifier'] || null,
+                retryCount: req.headers['x-atlassian-webhook-retry'] || null,
+            });
+        }
 
         // Check for status transition to configured trigger status
         const changelog = payload.changelog;
@@ -1432,13 +2888,15 @@ async function startServer(options = {}) {
 
         if (!statusChange) {
             // Not a status change — acknowledge but don't trigger
+            jiraWebhookReplayCache.set(webhookReplayKey, now);
             return ok(res, { acknowledged: true, action: 'ignored', reason: 'No status change' });
         }
 
         const newStatus = statusChange.toString || '';
-        const triggerStatuses = ['Ready for QA', 'Ready for Testing', 'QA'];
+        const triggerStatuses = webhookConfig.triggerStatuses;
 
         if (!triggerStatuses.some(s => newStatus.toLowerCase().includes(s.toLowerCase()))) {
+            jiraWebhookReplayCache.set(webhookReplayKey, now);
             return ok(res, {
                 acknowledged: true,
                 action: 'ignored',
@@ -1446,27 +2904,84 @@ async function startServer(options = {}) {
             });
         }
 
-        if (!orchestratorReady) {
-            return json(res, 503, { error: 'SDK Orchestrator not ready' });
+        const mode = webhookConfig.defaultMode;
+
+        const ingestionConfig = getWebhookIngestionConfig();
+        const deliveryHeaders = {
+            identifier: req.headers['x-atlassian-webhook-identifier'] || null,
+            retryCount: req.headers['x-atlassian-webhook-retry'] || null,
+            event: payload.webhookEvent || null,
+        };
+
+        if (!ingestionConfig.enabled) {
+            try {
+                const directResult = triggerPipelineFromWebhookDelivery({
+                    issueKey,
+                    mode,
+                    headers: deliveryHeaders,
+                });
+                jiraWebhookReplayCache.set(webhookReplayKey, now);
+
+                if (directResult.action === 'ignored') {
+                    return ok(res, {
+                        acknowledged: true,
+                        ...directResult,
+                        ticketId: issueKey,
+                        mode,
+                        webhookId: deliveryHeaders.identifier,
+                        retryCount: deliveryHeaders.retryCount,
+                    });
+                }
+
+                return accepted(res, {
+                    acknowledged: true,
+                    ...directResult,
+                });
+            } catch (error) {
+                return respondWebhookQueueError(res, error);
+            }
         }
 
-        // Dedup
-        const activeRun = runStore.getActiveRun(issueKey);
-        if (activeRun) {
-            return conflict(res, `Pipeline already running for ${issueKey}`);
+        let enqueueResult;
+        try {
+            enqueueResult = jiraWebhookReliabilityStore.enqueueDelivery({
+                issueKey,
+                mode,
+                webhookReplayKey,
+                payload,
+                headers: deliveryHeaders,
+            });
+        } catch (error) {
+            return respondWebhookQueueError(res, error);
         }
 
-        // Create and start
-        const run = runStore.createRun({
+        jiraWebhookReplayCache.set(webhookReplayKey, now);
+
+        if (enqueueResult.duplicate) {
+            return ok(res, {
+                acknowledged: true,
+                action: 'ignored',
+                reason: 'Duplicate webhook delivery already exists in queue state.',
+                deliveryId: enqueueResult.delivery?.deliveryId || null,
+                queueDepth: enqueueResult.queueDepth,
+                webhookId: deliveryHeaders.identifier,
+                retryCount: deliveryHeaders.retryCount,
+            });
+        }
+
+        scheduleJiraWebhookQueueProcessing(0);
+
+        return accepted(res, {
+            acknowledged: true,
+            action: 'queued',
+            deliveryId: enqueueResult.delivery?.deliveryId || null,
+            queueDepth: enqueueResult.queueDepth,
             ticketId: issueKey,
-            mode: 'full',
-            environment: 'UAT',
-            triggeredBy: 'webhook',
+            mode,
+            triggeredBy: 'jira-webhook',
+            webhookId: deliveryHeaders.identifier,
+            retryCount: deliveryHeaders.retryCount,
         });
-
-        _executePipeline(run.runId, issueKey, 'full', orchestrator, runStore, eventBridge, activePipelines);
-
-        accepted(res, { runId: run.runId, ticketId: issueKey, triggeredBy: 'jira-webhook' });
     });
 
     // ═════════════════════════════════════════════════════════════════
@@ -1789,9 +3304,212 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         'video/mp4', 'video/webm', 'video/quicktime',
         'video/x-msvideo', 'video/x-matroska',
     ];
+    const videoRetentionConfig = resolveChatVideoRetentionConfig(orchestrator?.config || {});
     const MAX_VIDEO_UPLOAD_BYTES = 200 * 1024 * 1024; // 200 MB
     const VIDEO_UPLOAD_DIR = path.join(os.tmpdir(), 'qa-video-uploads');
-    const VIDEO_TEMP_TTL_MS = 10 * 60 * 1000; // 10 minutes
+    const VIDEO_UNCLAIMED_TTL_MS = videoRetentionConfig.unclaimedTtlMs;
+    const VIDEO_CLAIMED_MAX_AGE_MS = videoRetentionConfig.claimedMaxAgeMs;
+    const VIDEO_CLEANUP_INTERVAL_MS = videoRetentionConfig.cleanupIntervalMs;
+    const videoUploadClaims = new Map();
+    let videoClaimHydrated = false;
+
+    function getVideoClaimKey(filePath) {
+        const resolved = path.resolve(filePath);
+        return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+    }
+
+    function isNonEmptySessionId(value) {
+        return typeof value === 'string' && value.trim().length > 0;
+    }
+
+    function getFileCreatedAtMs(filePath) {
+        try {
+            const stat = fs.statSync(filePath);
+            if (Number.isFinite(stat.birthtimeMs) && stat.birthtimeMs > 0) {
+                return stat.birthtimeMs;
+            }
+            if (Number.isFinite(stat.mtimeMs) && stat.mtimeMs > 0) {
+                return stat.mtimeMs;
+            }
+        } catch {
+            // Ignore stat failures and fall back to now
+        }
+        return Date.now();
+    }
+
+    function ensureVideoClaimRecord(filePath) {
+        const resolvedPath = path.resolve(filePath);
+        const key = getVideoClaimKey(resolvedPath);
+        const now = Date.now();
+
+        let record = videoUploadClaims.get(key);
+        if (!record) {
+            record = {
+                path: resolvedPath,
+                createdAtMs: getFileCreatedAtMs(resolvedPath),
+                lastSeenAtMs: now,
+                claimedBySessionId: null,
+                claimedAtMs: null,
+            };
+            videoUploadClaims.set(key, record);
+            return record;
+        }
+
+        record.lastSeenAtMs = now;
+        return record;
+    }
+
+    function isSessionActiveForVideoRetention(sessionId) {
+        if (!chatManager || !chatManager._sessions || !(chatManager._sessions instanceof Map)) {
+            return false;
+        }
+
+        const entry = chatManager._sessions.get(sessionId);
+        return !!entry && entry.archived !== true;
+    }
+
+    function claimVideoUploadForSession(sessionId, filePath) {
+        if (!isNonEmptySessionId(sessionId)) {
+            return { ok: false, error: 'Invalid session for video evidence claim.' };
+        }
+
+        const resolvedPath = path.resolve(filePath);
+        const uploadRoot = path.resolve(VIDEO_UPLOAD_DIR);
+
+        if (!_isPathInside(uploadRoot, resolvedPath)) {
+            return { ok: false, error: 'Video attachment path is outside the managed upload directory.' };
+        }
+
+        if (!fs.existsSync(resolvedPath)) {
+            return { ok: false, error: 'Video attachment source file is no longer available. Please re-upload the recording.' };
+        }
+
+        const record = ensureVideoClaimRecord(resolvedPath);
+        record.claimedBySessionId = sessionId;
+        record.claimedAtMs = Date.now();
+        record.lastSeenAtMs = Date.now();
+
+        return { ok: true, path: resolvedPath };
+    }
+
+    function hydrateVideoClaimsFromSessions() {
+        if (!chatManager || !chatManager._sessions || !(chatManager._sessions instanceof Map)) {
+            return;
+        }
+
+        let claimedCount = 0;
+
+        for (const [sessionId, entry] of chatManager._sessions.entries()) {
+            if (!entry || entry.archived) continue;
+
+            const candidatePaths = [];
+
+            if (Array.isArray(entry.sessionAttachments)) {
+                for (const attachment of entry.sessionAttachments) {
+                    if (attachment?.type === 'video' && typeof attachment?.tempPath === 'string') {
+                        candidatePaths.push(attachment.tempPath);
+                    }
+                }
+            }
+
+            if (Array.isArray(entry.videoContext)) {
+                for (const ctx of entry.videoContext) {
+                    if (typeof ctx?.videoPath === 'string' && ctx.videoPath.trim().length > 0) {
+                        candidatePaths.push(ctx.videoPath);
+                    }
+                }
+            }
+
+            for (const candidatePath of candidatePaths) {
+                const claimResult = claimVideoUploadForSession(sessionId, candidatePath);
+                if (claimResult.ok) {
+                    claimedCount++;
+                }
+            }
+        }
+
+        videoClaimHydrated = true;
+        if (claimedCount > 0) {
+            log(`Video retention: claimed ${claimedCount} session-bound upload(s) from persisted sessions`);
+        }
+    }
+
+    function cleanupVideoUploadClaims(reason = 'scheduled') {
+        if (!chatManager || !chatManager._sessions || !(chatManager._sessions instanceof Map)) {
+            return;
+        }
+
+        if (!videoClaimHydrated) {
+            hydrateVideoClaimsFromSessions();
+        }
+
+        if (!fs.existsSync(VIDEO_UPLOAD_DIR)) {
+            return;
+        }
+
+        let entries;
+        try {
+            entries = fs.readdirSync(VIDEO_UPLOAD_DIR, { withFileTypes: true });
+        } catch {
+            return;
+        }
+
+        const presentPaths = new Set();
+        for (const entry of entries) {
+            if (!entry.isFile()) continue;
+            const fullPath = path.join(VIDEO_UPLOAD_DIR, entry.name);
+            presentPaths.add(getVideoClaimKey(fullPath));
+            ensureVideoClaimRecord(fullPath);
+        }
+
+        for (const [key] of videoUploadClaims.entries()) {
+            if (!presentPaths.has(key)) {
+                videoUploadClaims.delete(key);
+            }
+        }
+
+        const now = Date.now();
+        let cleanedCount = 0;
+
+        for (const [key, record] of videoUploadClaims.entries()) {
+            const fileExists = fs.existsSync(record.path);
+            if (!fileExists) {
+                videoUploadClaims.delete(key);
+                continue;
+            }
+
+            const ageMs = Math.max(0, now - record.createdAtMs);
+            const claimedActive = isNonEmptySessionId(record.claimedBySessionId)
+                && isSessionActiveForVideoRetention(record.claimedBySessionId);
+
+            let shouldDelete = false;
+            if (claimedActive) {
+                shouldDelete = ageMs > VIDEO_CLAIMED_MAX_AGE_MS;
+            } else {
+                shouldDelete = ageMs > VIDEO_UNCLAIMED_TTL_MS;
+            }
+
+            if (!shouldDelete) continue;
+
+            try {
+                fs.unlinkSync(record.path);
+                cleanedCount++;
+                videoUploadClaims.delete(key);
+            } catch {
+                // Ignore transient cleanup errors.
+            }
+        }
+
+        if (cleanedCount > 0) {
+            log(`Video retention: cleaned ${cleanedCount} upload file(s) (${reason})`);
+        }
+    }
+
+    // Sweep upload dir on a fixed cadence. Claimed files are retained for active sessions.
+    videoUploadCleanupInterval = setInterval(() => {
+        cleanupVideoUploadClaims('interval');
+    }, VIDEO_CLEANUP_INTERVAL_MS);
+    cleanupVideoUploadClaims('startup');
 
     // Video magic bytes for validation
     const VIDEO_MAGIC = {
@@ -1892,10 +3610,8 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
 
             const stat = await fsP.stat(tempPath);
 
-            // Schedule cleanup — delete after TTL if not claimed
-            setTimeout(async () => {
-                try { await fsP.unlink(tempPath); } catch { /* already cleaned */ }
-            }, VIDEO_TEMP_TTL_MS);
+            // Track upload path in retention map as unclaimed until a chat session references it.
+            ensureVideoClaimRecord(tempPath);
 
             ok(res, {
                 tempPath,
@@ -1917,24 +3633,24 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
 
     /**
      * POST /api/chat/sessions
-     * Body: { model?, agentMode? }
-     * Returns: { sessionId, model, createdAt, agentMode }
+     * Body: { model?, agentId?, agentMode? }
+     * Returns: { sessionId, model, createdAt, agentMode, agentId }
      */
     router.post('/api/chat/sessions', async (req, res) => {
         if (!chatManager) {
             return json(res, 503, { error: 'Chat manager not ready. SDK Orchestrator may still be starting.' });
         }
         try {
-            const { model, agentMode } = req.body;
+            const { model, agentId, agentMode } = req.body;
             const selection = await resolveModelSelection(model);
             if (!selection.ok) {
                 return badRequest(res, selection.error);
             }
 
-            const session = await chatManager.createSession({ model: selection.effectiveModel, agentMode });
+            const session = await chatManager.createSession({ model: selection.effectiveModel, agentId, agentMode });
             ok(res, session);
         } catch (error) {
-            json(res, 500, { error: `Failed to create chat session: ${error.message}` });
+            json(res, error?.status || 500, { error: `Failed to create chat session: ${error.message}` });
         }
     });
 
@@ -1967,7 +3683,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
 
     /**
      * POST /api/chat/sessions/:sessionId/messages
-     * Body: { content, attachments? }
+     * Body: { content, attachments?, model? }
      * Returns: { messageId }
      *
      * Attachments are optional base64-encoded images or documents:
@@ -1993,9 +3709,18 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
     router.post('/api/chat/sessions/:sessionId/messages', async (req, res) => {
         if (!chatManager) return json(res, 503, { error: 'Chat manager not ready' });
         const { sessionId } = req.params;
-        const { content, attachments } = req.body;
+        const { content, attachments, model } = req.body;
         if (!content && (!attachments || attachments.length === 0)) {
             return badRequest(res, 'Message content or attachments required');
+        }
+
+        let selectedModel = null;
+        if (typeof model === 'string' && model.trim()) {
+            const selection = await resolveModelSelection(model.trim());
+            if (!selection.ok) {
+                return badRequest(res, selection.error);
+            }
+            selectedModel = selection.effectiveModel;
         }
 
         // Validate attachments if present
@@ -2021,6 +3746,14 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
                     if (!resolved.startsWith(path.resolve(VIDEO_UPLOAD_DIR))) {
                         return badRequest(res, 'Invalid video tempPath');
                     }
+                    if (!fs.existsSync(resolved)) {
+                        return badRequest(res, 'Video attachment source file is no longer available. Please re-upload the recording.');
+                    }
+                    const claimResult = claimVideoUploadForSession(sessionId, resolved);
+                    if (!claimResult.ok) {
+                        return badRequest(res, claimResult.error);
+                    }
+                    att.tempPath = claimResult.path;
                     // Sanitize filename
                     if (att.filename) {
                         att.filename = String(att.filename).replace(/[\\/]/g, '').replace(/\.\./g, '');
@@ -2072,7 +3805,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         }
 
         try {
-            const result = await chatManager.sendMessage(sessionId, content || '', attachments);
+            const result = await chatManager.sendMessage(sessionId, content || '', attachments, selectedModel);
             ok(res, result);
         } catch (error) {
             respondChatError(res, error);
@@ -2254,6 +3987,76 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
     // ═════════════════════════════════════════════════════════════════
 
     const server = http.createServer((req, res) => router.handle(req, res));
+    const terminalWss = new WebSocketServer({ noServer: true });
+
+    terminalWss.on('connection', (socket, _req, context = {}) => {
+        const sessionId = context.sessionId;
+        if (!sessionId) {
+            socket.close(1008, 'Missing sessionId');
+            return;
+        }
+
+        try {
+            terminalSessionManager.attachWebSocket(sessionId, socket);
+        } catch (error) {
+            try {
+                socket.send(JSON.stringify({
+                    event: 'terminal_error',
+                    data: { message: error.message },
+                }));
+            } catch {
+                // ignore
+            }
+            socket.close(1011, 'Terminal attach failed');
+        }
+    });
+
+    server.on('upgrade', (req, socket, head) => {
+        let parsedUrl;
+        try {
+            parsedUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+        } catch {
+            socket.destroy();
+            return;
+        }
+
+        if (parsedUrl.pathname !== '/api/terminal/ws') {
+            socket.destroy();
+            return;
+        }
+
+        // Origin check — reject cross-origin WS handshakes when a
+        // specific allow-list is configured (production posture). In
+        // `*` mode (default local dev) we remain permissive.
+        const origin = req.headers.origin;
+        if (!isTerminalOriginAllowed(origin)) {
+            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+            socket.destroy();
+            return;
+        }
+
+        const sessionId = parsedUrl.searchParams.get('sessionId');
+        if (!sessionId || !terminalSessionManager.getSession(sessionId)) {
+            socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+            socket.destroy();
+            return;
+        }
+
+        // Per-session token check — prevents any other browser tab or
+        // service on the same origin from attaching to this PTY.
+        if (terminalRequireToken) {
+            const token = parsedUrl.searchParams.get('token') || '';
+            if (!terminalSessionManager.verifySessionToken(sessionId, token)) {
+                socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+                socket.destroy();
+                return;
+            }
+        }
+
+        terminalWss.handleUpgrade(req, socket, head, (ws) => {
+            terminalWss.emit('connection', ws, req, { sessionId });
+        });
+    });
 
     server.listen(port, () => {
         log('═══════════════════════════════════════════════════');
@@ -2275,10 +4078,29 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         log(`    GET  /api/pipeline/results/:runId— Full results`);
         log(`    GET  /api/pipeline/stream/:runId — SSE stream`);
         log(`    GET  /api/pipeline/stream        — Global SSE stream`);
+        log(`    POST /api/terminal/sessions      — Create interactive terminal session`);
+        log(`    GET  /api/terminal/sessions      — List terminal sessions`);
+        log(`    GET  /api/terminal/sessions/:id  — Terminal session status`);
+        log(`    GET  /api/terminal/sessions/:id/output — Terminal output buffer`);
+        log(`    POST /api/terminal/sessions/:id/input — Send raw terminal input`);
+        log(`    POST /api/terminal/sessions/:id/command — Send terminal command`);
+        log(`    POST /api/terminal/sessions/:id/resize — Resize terminal viewport`);
+        log(`    POST /api/terminal/sessions/:id/terminate — Terminate session`);
+        log(`    WS   /api/terminal/ws?sessionId= — Live terminal stream`);
         log(`    GET  /api/analytics/overview     — Pipeline analytics`);
         log(`    GET  /api/analytics/failures     — Failure trends`);
         log(`    GET  /api/analytics/selectors    — Selector stability`);
         log(`    GET  /api/analytics/runs         — Run trends`);
+        log(`    GET  /api/webhooks/jira/lifecycle/config — Jira webhook lifecycle config`);
+        log(`    GET  /api/webhooks/jira/lifecycle — List Jira dynamic webhooks`);
+        log(`    POST /api/webhooks/jira/lifecycle/sync — Run lifecycle startup sync`);
+        log(`    POST /api/webhooks/jira/lifecycle/register — Register Jira dynamic webhook`);
+        log(`    POST /api/webhooks/jira/lifecycle/refresh — Refresh Jira dynamic webhooks`);
+        log(`    GET  /api/webhooks/jira/lifecycle/failed — List failed Jira webhook deliveries`);
+        log(`    POST /api/webhooks/jira/lifecycle/delete — Delete Jira dynamic webhooks`);
+        log(`    GET  /api/webhooks/jira/queue    — Jira webhook queue snapshot`);
+        log(`    GET  /api/webhooks/jira/dlq      — Jira webhook dead-letter queue`);
+        log(`    POST /api/webhooks/jira/dlq/replay — Replay dead-lettered webhook deliveries`);
         log(`    POST /api/webhooks/jira          — Jira webhook`);
         log(`    GET  /api/models                  — Runtime model catalog`);
         log(`    POST /api/chat/sessions           — Create chat session`);
@@ -2298,6 +4120,22 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
     const shutdown = async (signal) => {
         log(`\n${signal} received. Shutting down...`);
         clearInterval(staleRunWatchdog);
+        if (videoUploadCleanupInterval) {
+            clearInterval(videoUploadCleanupInterval);
+        }
+        if (jiraWebhookQueueTimer) {
+            clearTimeout(jiraWebhookQueueTimer);
+            jiraWebhookQueueTimer = null;
+        }
+        terminalWss.clients.forEach((client) => {
+            try {
+                client.close(1001, 'Server shutting down');
+            } catch {
+                // ignore
+            }
+        });
+        terminalWss.close();
+        await terminalSessionManager.dispose().catch(() => { });
         server.close();
         if (chatManager) await chatManager.prepareForShutdown().catch(() => { });
         await orchestrator.stop().catch(() => { });
@@ -2314,15 +4152,61 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
 
 // ─── Pipeline Execution (Background) ───────────────────────────────────────
 
+function aggregateExecutionMetrics(metricArtifacts = []) {
+    const commands = [];
+    for (const artifact of metricArtifacts) {
+        if (!artifact || !Array.isArray(artifact.commands)) continue;
+        commands.push(...artifact.commands);
+    }
+
+    const durations = commands
+        .map(item => item?.durationMs)
+        .filter(value => Number.isFinite(value) && value >= 0);
+    const cancelLatencies = commands
+        .map(item => item?.cancelToKillLatencyMs)
+        .filter(value => Number.isFinite(value) && value >= 0);
+
+    const sum = (arr) => arr.reduce((total, value) => total + value, 0);
+
+    return {
+        generatedAt: new Date().toISOString(),
+        summary: {
+            totalCommands: commands.length,
+            cancelledCommands: commands.filter(item => item?.cancelled === true).length,
+            timedOutCommands: commands.filter(item => item?.timedOut === true).length,
+            failedCommands: commands.filter(item => item?.error && item?.cancelled !== true).length,
+            averageDurationMs: durations.length > 0 ? Math.round(sum(durations) / durations.length) : null,
+            maxDurationMs: durations.length > 0 ? Math.max(...durations) : null,
+            averageCancelToKillLatencyMs: cancelLatencies.length > 0 ? Math.round(sum(cancelLatencies) / cancelLatencies.length) : null,
+            maxCancelToKillLatencyMs: cancelLatencies.length > 0 ? Math.max(...cancelLatencies) : null,
+        },
+        commands,
+    };
+}
+
 /**
  * Execute a pipeline run in the background.
  * Updates RunStore and EventBridge as stages progress.
  */
 function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBridge, activePipelines, model, extraOptions = {}) {
     let cancelled = false;
+    const abortController = new AbortController();
+
+    const requestCancellation = (reason = 'Cancelled by user') => {
+        if (cancelled) return;
+        cancelled = true;
+        if (!abortController.signal.aborted) {
+            try {
+                abortController.abort(new Error(reason));
+            } catch {
+                // Abort is best-effort.
+            }
+        }
+    };
 
     activePipelines.set(runId, {
-        cancel: () => { cancelled = true; },
+        cancel: requestCancellation,
+        isCancelled: () => cancelled,
     });
 
     // Fire and forget — async execution
@@ -2413,6 +4297,10 @@ function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBr
 
             const scenarioResults = [];
             const scenarioEvidence = {};
+            const {
+                onCommandEvent: externalCommandEventSink,
+                ...pipelineExtraOptions
+            } = extraOptions || {};
 
             for (const scenario of scenarios) {
                 if (cancelled) break;
@@ -2442,6 +4330,7 @@ function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBr
                 });
 
                 const result = await orchestrator.runPipeline(ticketId, {
+                    ...pipelineExtraOptions,
                     mode,
                     model,
                     runId,
@@ -2449,15 +4338,40 @@ function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBr
                     scenario,
                     scenarioId: scenario.id,
                     authState: scenario.authState || 'unspecified',
+                    abortSignal: abortController.signal,
+                    shouldCancel: () => cancelled,
                     onProgress: (stage, message) => emitProgress(stage, message, scenario),
-                    ...extraOptions,
+                    onCommandEvent: (commandEvent = {}) => {
+                        const enrichedEvent = {
+                            timestamp: new Date().toISOString(),
+                            scenarioId: commandEvent.scenarioId || scenario.id,
+                            scenarioName: commandEvent.scenarioName || scenario.name || scenario.id,
+                            authState: commandEvent.authState || scenario.authState || 'unspecified',
+                            ...commandEvent,
+                        };
+
+                        runStore.appendCommandOutput(runId, enrichedEvent);
+
+                        if (typeof externalCommandEventSink === 'function') {
+                            try {
+                                externalCommandEventSink(enrichedEvent);
+                            } catch {
+                                // External command sink is best-effort.
+                            }
+                        }
+                    },
                 });
+
+                if (result?.cancelled) {
+                    requestCancellation('Cancelled by user');
+                }
 
                 scenarioResults.push({
                     scenarioId: scenario.id,
                     name: scenario.name || scenario.id,
                     authState: scenario.authState || 'unspecified',
                     success: !!result.success,
+                    cancelled: !!result.cancelled,
                     duration: result.duration || null,
                     lastCompletedStage: result.lastCompletedStage || null,
                     error: result.error || null,
@@ -2474,10 +4388,13 @@ function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBr
                 };
 
                 runStore.updateScenario(runId, scenario.id, {
-                    status: result.success ? RUN_STATUS.COMPLETED : RUN_STATUS.FAILED,
+                    status: result.cancelled
+                        ? RUN_STATUS.CANCELLED
+                        : (result.success ? RUN_STATUS.COMPLETED : RUN_STATUS.FAILED),
                     completedAt: new Date().toISOString(),
                     result: {
                         success: !!result.success,
+                        cancelled: !!result.cancelled,
                         duration: result.duration || null,
                         error: result.error || null,
                     },
@@ -2486,17 +4403,24 @@ function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBr
                 });
                 runStore.appendMissionCheckpoint(runId, {
                     stage: 'scenario',
-                    status: result.success ? 'passed' : 'failed',
+                    status: result.cancelled ? 'cancelled' : (result.success ? 'passed' : 'failed'),
                     scenarioId: scenario.id,
-                    message: result.success
-                        ? `Scenario ${scenario.name || scenario.id} completed`
-                        : `Scenario ${scenario.name || scenario.id} failed`,
+                    message: result.cancelled
+                        ? `Scenario ${scenario.name || scenario.id} cancelled`
+                        : result.success
+                            ? `Scenario ${scenario.name || scenario.id} completed`
+                            : `Scenario ${scenario.name || scenario.id} failed`,
                     details: {
                         authState: scenario.authState || 'unspecified',
                         success: !!result.success,
+                        cancelled: !!result.cancelled,
                         error: result.error || null,
                     },
                 });
+
+                if (result.cancelled) {
+                    break;
+                }
 
                 if (!result.success) {
                     runStore.recordMissionObservation(runId, {
@@ -2511,11 +4435,19 @@ function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBr
             }
 
             const failures = scenarioResults.filter(item => !item.success);
+            const executionMetricsByScenario = Object.fromEntries(
+                scenarioResults.map(item => [item.scenarioId, item.artifacts?.executionMetrics || null])
+            );
+            const executionMetrics = aggregateExecutionMetrics(
+                Object.values(executionMetricsByScenario).filter(Boolean)
+            );
+
             const result = {
                 ticketId,
                 mode,
                 runId,
                 success: !cancelled && failures.length === 0,
+                cancelled,
                 duration: runStore.getRun(runId)?.duration || null,
                 lastCompletedStage: scenarioResults[scenarioResults.length - 1]?.lastCompletedStage || null,
                 stageResults: {},
@@ -2523,6 +4455,8 @@ function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBr
                 artifacts: {
                     scenarioResults: Object.fromEntries(scenarioResults.map(item => [item.scenarioId, item.artifacts || {}])),
                     evidenceScenarios: scenarioEvidence,
+                    executionMetricsByScenario,
+                    executionMetrics,
                 },
                 error: cancelled
                     ? 'Cancelled by user'
@@ -2530,10 +4464,14 @@ function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBr
             };
 
             // Mark completed
+            if (cancelled) {
+                runStore.cancelRun(runId);
+            }
             runStore.completeRun(runId, result);
             runStore.updateMission(runId, {
                 result: {
                     success: !!result.success,
+                    cancelled: !!result.cancelled,
                     scenarioResults,
                     error: result.error || null,
                 },
@@ -2547,22 +4485,44 @@ function _executePipeline(runId, ticketId, mode, orchestrator, runStore, eventBr
             });
             runStore.appendMissionCheckpoint(runId, {
                 stage: 'run',
-                status: result.success ? 'passed' : 'failed',
-                message: result.success ? 'Pipeline completed successfully' : (result.error || 'Pipeline completed with failures'),
+                status: result.cancelled ? 'cancelled' : (result.success ? 'passed' : 'failed'),
+                message: result.cancelled
+                    ? 'Pipeline cancelled by user'
+                    : (result.success ? 'Pipeline completed successfully' : (result.error || 'Pipeline completed with failures')),
                 details: {
                     success: !!result.success,
+                    cancelled: !!result.cancelled,
                     duration: result.duration || null,
                 },
             });
             eventBridge.push(EVENT_TYPES.RUN_COMPLETE, runId, {
                 ticketId,
                 success: result.success,
+                cancelled: !!result.cancelled,
                 duration: result.duration,
                 error: result.error,
                 scenarioResults,
             });
 
         } catch (error) {
+            if (cancelled || error?.code === 'ABORT_ERR' || abortController.signal.aborted) {
+                runStore.cancelRun(runId);
+                runStore.completeRun(runId, {
+                    success: false,
+                    cancelled: true,
+                    error: 'Cancelled by user',
+                    ticketId,
+                    mode,
+                });
+                eventBridge.push(EVENT_TYPES.RUN_COMPLETE, runId, {
+                    ticketId,
+                    success: false,
+                    cancelled: true,
+                    error: 'Cancelled by user',
+                });
+                return;
+            }
+
             log(`Pipeline ${runId} failed: ${error.message}`, 'error');
             runStore.completeRun(runId, {
                 success: false,
@@ -2606,4 +4566,13 @@ function log(msg, level = 'info') {
 
 // ─── Exports ────────────────────────────────────────────────────────────────
 
-module.exports = { startServer };
+module.exports = {
+    startServer,
+    __internal: {
+        resolveJiraWebhookRuntimeConfig,
+        parseJiraWebhookSignature,
+        verifyJiraWebhookSignature,
+        buildJiraWebhookReplayKey,
+        pruneJiraWebhookReplayCache,
+    },
+};

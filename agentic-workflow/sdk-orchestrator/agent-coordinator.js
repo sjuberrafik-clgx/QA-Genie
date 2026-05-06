@@ -127,6 +127,17 @@ class AgentCoordinator extends EventEmitter {
                 return { action: ROUTE.CONTINUE, reason: 'Excel QG failed but non-blocking' };
             }
 
+            // ── After Exploration Quality Gate ───────────────────
+            case 'qg_exploration': {
+                if (result.success) {
+                    return { action: ROUTE.CONTINUE, reason: 'Exploration QG passed' };
+                }
+                return {
+                    action: ROUTE.CONTINUE,
+                    reason: 'Exploration QG failed — pipeline gate decides blocking behavior',
+                };
+            }
+
             // ── After ScriptGenerator ─────────────────────────────
             case 'scriptgenerator': {
                 if (result.success) {

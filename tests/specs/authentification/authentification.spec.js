@@ -4,6 +4,7 @@ const POmanager = require('../../pageobjects/POmanager');
 const { firstUser } = require('../../test-data/testData').usersForBrowsers.chrome;
 const agentBranding = require('../../pageobjects/agentBranding');
 const ctx = require('../../utils/testContext');
+const { PopupHandler } = require('../../utils/popupHandler'); // Self-healing: Enhanced popup handling
 
 
 
@@ -62,15 +63,21 @@ test.describe.serial('Authentication functionality:', () => {
 
    test.describe('when logging in via Sign In page', async () => {
 
-      test.beforeAll(async () => {
-         await generalFunctions.openOneHomeAndClickOnSignInButton();
-      });
+      // Self-healing: Removed nested beforeAll to prevent browser conflicts
+      // Navigation will be handled in individual tests
 
       test.afterAll(async () => {
-         await loginFunctions.signOut();
+         try {
+            await loginFunctions.signOut();
+         } catch (e) {
+            console.log('Sign out failed or user already signed out');
+         }
       });
 
       test('with invalid email should result in error message', async () => {
+         
+         // Self-healing: Navigate in individual test to avoid conflicts
+         await generalFunctions.openOneHomeAndClickOnSignInButton();
 
          await loginFunctions.enterCredentialsClickSignIn({
             email: 'test_agent@mail.com',

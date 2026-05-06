@@ -30,6 +30,11 @@ import path from 'path';
  */
 export function applyAdvancedMethods(bridge) {
 
+    // Stateful baseline used by unified_snapshot_diff.
+    if (!bridge._snapshotDiffBaseline) {
+        bridge._snapshotDiffBaseline = null;
+    }
+
     // ═══════════════════════════════════════════════════
     // IFRAME SUPPORT
     // ═══════════════════════════════════════════════════
@@ -688,6 +693,435 @@ export function applyAdvancedMethods(bridge) {
             baselineHash,
             note: 'Pixel-level diff requires external image comparison library. Hash and size comparison provided.',
         };
+    };
+
+    // ═══════════════════════════════════════════════════
+    // EXPLORATION HELPERS
+    // ═══════════════════════════════════════════════════
+
+    /**
+     * Collect unique list items from virtualized/infinite-scroll UIs.
+     */
+    bridge.collectVirtualizedList = async function (args = {}) {
+        const {
+            containerSelector = 'body',
+            itemSelector,
+            maxScrolls = 20,
+            scrollStepPx,
+            waitBetweenMs = 200,
+            stopWhenNoNewItems = 2,
+            maxItems = 500,
+            maxReturnedItems = 100,
+            includeText = true,
+            textLimit = 160,
+            captureAttributes = ['data-id', 'data-testid', 'data-qa', 'href', 'aria-label'],
+        } = args;
+
+        if (!itemSelector) {
+            throw new Error('collectVirtualizedList requires itemSelector');
+        }
+
+        const blocked = await this._guardInteraction(
+            'collect_virtualized_list',
+            `${containerSelector} :: ${itemSelector}`,
+            { includeDom: true }
+        );
+        if (blocked) {
+            return blocked;
+        }
+
+        /** @type {Map<string, any>} */
+        const uniqueItems = new Map();
+        const iterationStats = [];
+        let noNewItemStreak = 0;
+        let reachedEnd = false;
+
+        const safeMaxScrolls = Math.max(1, Number(maxScrolls) || 1);
+        const safeWaitBetweenMs = Math.max(0, Number(waitBetweenMs) || 0);
+        const safeMaxItems = Math.max(1, Number(maxItems) || 1);
+        const safeMaxReturnedItems = Math.max(1, Number(maxReturnedItems) || 1);
+        const safeStopWhenNoNewItems = Math.max(1, Number(stopWhenNoNewItems) || 1);
+
+        for (let iteration = 1; iteration <= safeMaxScrolls; iteration += 1) {
+            const probe = await this.page.evaluate(
+                ({
+                    containerSel,
+                    itemSel,
+                    includeItemText,
+                    maxTextLen,
+                    attrs,
+                    requestedScrollStep,
+                }) => {
+                    const isBody = !containerSel || containerSel === 'body';
+                    const container = isBody
+                        ? (document.scrollingElement || document.documentElement || document.body)
+                        : document.querySelector(containerSel);
+
+                    if (!container) {
+                        return { error: `Container not found: ${containerSel}` };
+                    }
+
+                    const nodes = Array.from(container.querySelectorAll(itemSel));
+                    const items = nodes.map((node, index) => {
+                        const attributes = {};
+                        for (const attrName of attrs || []) {
+                            const attrValue = node.getAttribute?.(attrName);
+                            if (attrValue !== null && attrValue !== undefined && attrValue !== '') {
+                                attributes[attrName] = String(attrValue);
+                            }
+                        }
+
+                        const text = includeItemText
+                            ? (node.innerText || node.textContent || '').trim().replace(/\s+/g, ' ').slice(0, maxTextLen)
+                            : '';
+
+                        const role = node.getAttribute?.('role') || '';
+                        const tag = node.tagName || '';
+                        const id = node.id || '';
+                        const className = typeof node.className === 'string' ? node.className : '';
+
+                        const keySeed = [
+                            attributes['data-id'] || '',
+                            attributes['data-testid'] || '',
+                            attributes['data-qa'] || '',
+                            attributes.href || '',
+                            id,
+                            role,
+                            text,
+                            String(index),
+                        ]
+                            .join('|')
+                            .toLowerCase();
+
+                        return {
+                            key: keySeed,
+                            tag,
+                            role,
+                            id,
+                            className,
+                            text,
+                            attributes,
+                        };
+                    });
+
+                    const isWindowScroll = isBody;
+                    const scrollTop = isWindowScroll
+                        ? (window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0)
+                        : container.scrollTop;
+                    const clientHeight = isWindowScroll
+                        ? (window.innerHeight || document.documentElement.clientHeight || 0)
+                        : container.clientHeight;
+                    const scrollHeight = isWindowScroll
+                        ? (Math.max(document.body.scrollHeight, document.documentElement.scrollHeight) || 0)
+                        : container.scrollHeight;
+
+                    const atEnd = scrollTop + clientHeight >= scrollHeight - 2;
+                    const autoStep = Math.max(80, Math.floor(clientHeight * 0.9));
+                    const step = Number.isFinite(requestedScrollStep) && requestedScrollStep > 0
+                        ? requestedScrollStep
+                        : autoStep;
+
+                    if (!atEnd) {
+                        const targetTop = Math.min(scrollTop + step, Math.max(0, scrollHeight - clientHeight));
+                        if (isWindowScroll) {
+                            window.scrollTo(0, targetTop);
+                        } else {
+                            container.scrollTop = targetTop;
+                        }
+                    }
+
+                    const afterScrollTop = isWindowScroll
+                        ? (window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0)
+                        : container.scrollTop;
+
+                    return {
+                        items,
+                        totalItemsInDom: nodes.length,
+                        scrollTop,
+                        afterScrollTop,
+                        scrollHeight,
+                        clientHeight,
+                        atEnd,
+                    };
+                },
+                {
+                    containerSel: containerSelector,
+                    itemSel: itemSelector,
+                    includeItemText: includeText,
+                    maxTextLen: Math.max(20, Number(textLimit) || 160),
+                    attrs: Array.isArray(captureAttributes) ? captureAttributes : [],
+                    requestedScrollStep: Number.isFinite(scrollStepPx) ? Number(scrollStepPx) : null,
+                }
+            );
+
+            if (probe?.error) {
+                throw new Error(probe.error);
+            }
+
+            let newItems = 0;
+            for (const item of probe.items || []) {
+                if (!uniqueItems.has(item.key)) {
+                    uniqueItems.set(item.key, {
+                        index: uniqueItems.size + 1,
+                        key: item.key,
+                        tag: item.tag,
+                        role: item.role,
+                        id: item.id,
+                        className: item.className,
+                        text: item.text,
+                        attributes: item.attributes,
+                        firstSeenIteration: iteration,
+                    });
+                    newItems += 1;
+
+                    if (uniqueItems.size >= safeMaxItems) {
+                        break;
+                    }
+                }
+            }
+
+            iterationStats.push({
+                iteration,
+                newItems,
+                totalUniqueItems: uniqueItems.size,
+                totalItemsInDom: probe.totalItemsInDom,
+                scrollTop: probe.scrollTop,
+                afterScrollTop: probe.afterScrollTop,
+                scrollHeight: probe.scrollHeight,
+                clientHeight: probe.clientHeight,
+                atEnd: probe.atEnd,
+            });
+
+            if (newItems === 0) {
+                noNewItemStreak += 1;
+            } else {
+                noNewItemStreak = 0;
+            }
+
+            if (probe.atEnd) {
+                reachedEnd = true;
+                break;
+            }
+
+            if (uniqueItems.size >= safeMaxItems || noNewItemStreak >= safeStopWhenNoNewItems) {
+                break;
+            }
+
+            if (safeWaitBetweenMs > 0) {
+                await this.page.waitForTimeout(safeWaitBetweenMs);
+            }
+        }
+
+        const allItems = Array.from(uniqueItems.values());
+        const returnedItems = allItems.slice(0, safeMaxReturnedItems);
+
+        return {
+            success: true,
+            containerSelector,
+            itemSelector,
+            iterations: iterationStats.length,
+            reachedEnd,
+            totalUniqueItems: allItems.length,
+            returnedItems: returnedItems.length,
+            truncated: allItems.length > returnedItems.length,
+            items: returnedItems,
+            iterationStats,
+        };
+    };
+
+    /**
+     * Diff snapshots to detect added/removed/changed elements.
+     */
+    bridge.snapshotDiff = async function (args = {}) {
+        const {
+            mode = 'diff',
+            filter = {},
+            maxChanges = 50,
+            includeUnchanged = false,
+        } = args;
+
+        const supportedModes = new Set(['set-baseline', 'diff', 'capture-and-diff']);
+        if (!supportedModes.has(mode)) {
+            throw new Error(`Unsupported snapshotDiff mode: ${mode}. Use one of set-baseline, diff, capture-and-diff.`);
+        }
+
+        const safeMaxChanges = Math.max(1, Number(maxChanges) || 50);
+
+        const capture = async () => {
+            const snap = await this.snapshot({ filter });
+            const elements = Array.isArray(snap?.elements) ? snap.elements : [];
+
+            const normalized = elements.map((el) => {
+                const role = (el.role || '').toString().trim().toLowerCase();
+                const name = (el.name || '').toString().trim().replace(/\s+/g, ' ').toLowerCase();
+                const ariaLabel = (el.ariaLabel || '').toString().trim().replace(/\s+/g, ' ').toLowerCase();
+                const dataQa = (el.dataQa || '').toString().trim().toLowerCase();
+                const dataTestId = (el.dataTestId || '').toString().trim().toLowerCase();
+                const id = (el.id || '').toString().trim().toLowerCase();
+                const tag = (el.tag || '').toString().trim().toLowerCase();
+
+                const identity = [
+                    role,
+                    name,
+                    ariaLabel,
+                    dataQa,
+                    dataTestId,
+                    id,
+                    tag,
+                ].join('|');
+
+                const state = {
+                    hidden: Boolean(el.hidden),
+                    disabled: Boolean(el.disabled),
+                    checked: Boolean(el.checked),
+                    selected: Boolean(el.selected),
+                    expanded: Boolean(el.expanded),
+                    pressed: Boolean(el.pressed),
+                    value: (el.value || '').toString().trim().slice(0, 120),
+                };
+
+                return {
+                    identity,
+                    role,
+                    name,
+                    ariaLabel,
+                    dataQa,
+                    dataTestId,
+                    id,
+                    tag,
+                    state,
+                    raw: {
+                        ref: el.ref,
+                        text: (el.text || '').toString().trim().slice(0, 200),
+                        selector: el.selector || null,
+                    },
+                };
+            });
+
+            return {
+                capturedAt: new Date().toISOString(),
+                totalElements: normalized.length,
+                entries: normalized,
+            };
+        };
+
+        if (mode === 'set-baseline') {
+            const baseline = await capture();
+            this._snapshotDiffBaseline = baseline;
+
+            return {
+                success: true,
+                mode,
+                message: 'Snapshot diff baseline captured',
+                baseline: {
+                    capturedAt: baseline.capturedAt,
+                    totalElements: baseline.totalElements,
+                },
+            };
+        }
+
+        if (mode === 'capture-and-diff' && !this._snapshotDiffBaseline) {
+            const baseline = await capture();
+            this._snapshotDiffBaseline = baseline;
+
+            return {
+                success: true,
+                mode,
+                message: 'No previous baseline found; captured baseline. Call again to diff.',
+                baseline: {
+                    capturedAt: baseline.capturedAt,
+                    totalElements: baseline.totalElements,
+                },
+                readyForDiff: true,
+            };
+        }
+
+        if (!this._snapshotDiffBaseline) {
+            throw new Error('No snapshot diff baseline set. Call unified_snapshot_diff with mode "set-baseline" first.');
+        }
+
+        const before = this._snapshotDiffBaseline;
+        const after = await capture();
+
+        const beforeMap = new Map(before.entries.map((entry) => [entry.identity, entry]));
+        const afterMap = new Map(after.entries.map((entry) => [entry.identity, entry]));
+
+        const added = [];
+        const removed = [];
+        const changed = [];
+        let unchangedCount = 0;
+        let addedTotal = 0;
+        let removedTotal = 0;
+        let changedTotal = 0;
+
+        for (const [identity, afterEntry] of afterMap) {
+            if (!beforeMap.has(identity)) {
+                addedTotal += 1;
+                if (added.length < safeMaxChanges) {
+                    added.push(afterEntry);
+                }
+                continue;
+            }
+
+            const beforeEntry = beforeMap.get(identity);
+            const beforeState = JSON.stringify(beforeEntry.state);
+            const afterState = JSON.stringify(afterEntry.state);
+
+            if (beforeState !== afterState) {
+                changedTotal += 1;
+                if (changed.length < safeMaxChanges) {
+                    changed.push({
+                        identity,
+                        role: afterEntry.role,
+                        name: afterEntry.name,
+                        before: beforeEntry.state,
+                        after: afterEntry.state,
+                    });
+                }
+            } else {
+                unchangedCount += 1;
+            }
+        }
+
+        for (const [identity, beforeEntry] of beforeMap) {
+            if (!afterMap.has(identity)) {
+                removedTotal += 1;
+                if (removed.length < safeMaxChanges) {
+                    removed.push(beforeEntry);
+                }
+            }
+        }
+
+        const result = {
+            success: true,
+            mode,
+            baselineCapturedAt: before.capturedAt,
+            currentCapturedAt: after.capturedAt,
+            baselineElements: before.totalElements,
+            currentElements: after.totalElements,
+            addedCount: addedTotal,
+            removedCount: removedTotal,
+            changedCount: changedTotal,
+            added,
+            removed,
+            changed,
+            truncated: {
+                added: addedTotal > added.length,
+                removed: removedTotal > removed.length,
+                changed: changedTotal > changed.length,
+            },
+        };
+
+        if (includeUnchanged) {
+            result.unchangedCount = unchangedCount;
+        }
+
+        if (mode === 'capture-and-diff') {
+            this._snapshotDiffBaseline = after;
+            result.baselineUpdated = true;
+        }
+
+        return result;
     };
 
     // ═══════════════════════════════════════════════════

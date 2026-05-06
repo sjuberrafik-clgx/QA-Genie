@@ -16,9 +16,17 @@ export function usePipeline() {
     const [error, setError] = useState(null);
     const [networkWarning, setNetworkWarning] = useState(null);
     const [cognitiveInsights, setCognitiveInsights] = useState(null);
+    const [liveOutput, setLiveOutput] = useState({
+        runId: null,
+        chunks: [],
+        lastSeq: null,
+        droppedChars: 0,
+        updatedAt: null,
+    });
 
     const stagesRef = useRef({});
     const pollIntervalRef = useRef(null);
+    const liveOutputRef = useRef(liveOutput);
 
     // Clear stale errors automatically after 12s for network-type warnings
     useEffect(() => {
@@ -63,14 +71,66 @@ export function usePipeline() {
                 break;
 
             case 'run_complete':
-                setRuns(prev =>
-                    prev.map(r => r.runId === runId
-                        ? { ...r, status: data.success ? 'completed' : 'failed', duration: data.duration }
-                        : r
-                    )
-                );
-                setActiveRunId(null);
-                stopPoll();
+                {
+                    const finalStatus = data.cancelled
+                        ? 'cancelled'
+                        : (data.success ? 'completed' : 'failed');
+                    setRuns(prev =>
+                        prev.map(r => r.runId === runId
+                            ? { ...r, status: finalStatus, duration: data.duration }
+                            : r
+                        )
+                    );
+                    setActiveRunId(null);
+                    stopPoll();
+                }
+                break;
+
+            case 'command_progress':
+                if (data.stage) {
+                    const stageStatus = data.eventType === 'cancelled' ? 'failed' : 'running';
+                    const stageMessage = data.text
+                        || data.error
+                        || data.command
+                        || (data.eventType === 'exit' ? 'Command completed' : 'Running command...');
+
+                    stagesRef.current = {
+                        ...stagesRef.current,
+                        [data.stage]: {
+                            status: stageStatus,
+                            message: stageMessage,
+                        },
+                    };
+                    setStages({ ...stagesRef.current });
+                }
+                break;
+
+            case 'command_output_chunk':
+                {
+                    const text = typeof data?.text === 'string' ? data.text : '';
+                    if (!text) break;
+                    const droppedChars = Number.isFinite(data?.droppedChars)
+                        ? Math.max(0, data.droppedChars)
+                        : 0;
+                    const current = liveOutputRef.current;
+                    const chunks = current.runId === runId
+                        ? [...current.chunks, { text, stream: data.stream || 'stdout', stage: data.stage || null, timestamp: event.timestamp || new Date().toISOString() }]
+                        : [{ text, stream: data.stream || 'stdout', stage: data.stage || null, timestamp: event.timestamp || new Date().toISOString() }];
+                    // Cap in-memory ring so long runs don't balloon memory.
+                    const MAX_CHUNKS = 800;
+                    const trimmed = chunks.length > MAX_CHUNKS
+                        ? chunks.slice(chunks.length - MAX_CHUNKS)
+                        : chunks;
+                    const next = {
+                        runId,
+                        chunks: trimmed,
+                        lastSeq: current.runId === runId ? current.lastSeq : null,
+                        droppedChars: (current.runId === runId ? current.droppedChars : 0) + droppedChars,
+                        updatedAt: event.timestamp || new Date().toISOString(),
+                    };
+                    liveOutputRef.current = next;
+                    setLiveOutput(next);
+                }
                 break;
 
             case 'error':
@@ -155,18 +215,22 @@ export function usePipeline() {
     }, [activeRunId, sseStatus, stopPoll]);
 
     // Actions
-    const startPipeline = useCallback(async (ticketId, mode = 'full', environment = 'UAT', model = 'gpt-4o') => {
+    const startPipeline = useCallback(async (identifier, mode = 'full', environment = 'UAT', model = 'gpt-4o', options = {}) => {
         setLoading(true);
         setError(null);
         setNetworkWarning(null);
         stagesRef.current = {};
         setStages({});
+        const clearedLiveOutput = { runId: null, chunks: [], lastSeq: null, droppedChars: 0, updatedAt: null };
+        liveOutputRef.current = clearedLiveOutput;
+        setLiveOutput(clearedLiveOutput);
 
         try {
-            const result = await apiClient.startPipeline(ticketId, mode, environment, model);
+            const result = await apiClient.startPipeline(identifier, mode, environment, model, options);
+            const runIdentifier = result.ticketId || options.ticketId || options.runId || identifier;
             setActiveRunId(result.runId);
             setRuns(prev => [
-                { runId: result.runId, ticketId, mode, status: 'running', startedAt: new Date().toISOString() },
+                { runId: result.runId, ticketId: runIdentifier, mode, status: 'running', startedAt: new Date().toISOString() },
                 ...prev,
             ]);
             return result;
@@ -211,6 +275,7 @@ export function usePipeline() {
         error,
         networkWarning,
         cognitiveInsights,
+        liveOutput,
         sseStatus,
         retryCount,
         startPipeline,

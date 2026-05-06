@@ -223,14 +223,119 @@ async function runTests() {
     console.log('\nTest 12: Required Parameters');
     try {
         const clickTool = UNIFIED_TOOLS.find(t => t.name === 'unified_click');
+        const typeTool = UNIFIED_TOOLS.find(t => t.name === 'unified_type');
         const navigateTool = UNIFIED_TOOLS.find(t => t.name === 'unified_navigate');
 
-        if (clickTool.inputSchema.required?.includes('ref') &&
+        const clickProps = clickTool?.inputSchema?.properties || {};
+        const clickSupportsRefOrElement = Boolean(clickProps.ref && clickProps.element);
+
+        if (clickSupportsRefOrElement &&
+            typeTool.inputSchema.required?.includes('text') &&
             navigateTool.inputSchema.required?.includes('url')) {
             console.log('  ✓ Required parameters correctly defined');
             passed++;
         } else {
             throw new Error('Required parameters not correctly defined');
+        }
+    } catch (e) {
+        console.log(`  ✗ Failed: ${e.message}`);
+        failed++;
+    }
+
+    // Test 13: Backward-compatible alias routing
+    console.log('\nTest 13: Backward-Compatible Alias Routing');
+    try {
+        const runCodeSource = getToolSource('unified_run_code');
+        const evalScriptSource = getToolSource('unified_evaluate_script');
+        const runCodeName = getSourceToolName('unified_run_code');
+        const uploadName = getSourceToolName('unified_upload_file');
+
+        if (runCodeSource === 'playwright' &&
+            evalScriptSource === 'chromedevtools' &&
+            runCodeName === 'browser_run_code' &&
+            uploadName === 'browser_file_upload') {
+            console.log('  ✓ Legacy aliases resolve to canonical source + tool mappings');
+            passed++;
+        } else {
+            throw new Error('Alias source/tool mapping mismatch detected');
+        }
+    } catch (e) {
+        console.log(`  ✗ Failed: ${e.message}`);
+        failed++;
+    }
+
+    // Test 14: Contract schema compatibility
+    console.log('\nTest 14: Contract Schema Compatibility');
+    try {
+        const dragTool = UNIFIED_TOOLS.find(t => t.name === 'unified_drag');
+        const selectTool = UNIFIED_TOOLS.find(t => t.name === 'unified_select_option');
+        const waitTool = UNIFIED_TOOLS.find(t => t.name === 'unified_wait_for');
+
+        const dragProps = dragTool?.inputSchema?.properties || {};
+        const selectProps = selectTool?.inputSchema?.properties || {};
+        const waitProps = waitTool?.inputSchema?.properties || {};
+
+        const dragCompatible = dragProps.sourceRef && dragProps.targetRef && dragProps.startRef && dragProps.endRef;
+        const selectCompatible = selectProps.value && selectProps.label && selectProps.values;
+        const waitCompatible = waitProps.text && waitProps.textGone && waitProps.selector && waitProps.state;
+
+        if (dragCompatible && selectCompatible && waitCompatible) {
+            console.log('  ✓ Drag/select/wait schemas support current and legacy contracts');
+            passed++;
+        } else {
+            throw new Error('Contract schema compatibility incomplete');
+        }
+    } catch (e) {
+        console.log(`  ✗ Failed: ${e.message}`);
+        failed++;
+    }
+
+    // Test 15: Wait tool mapping and category
+    console.log('\nTest 15: Wait Tool Mapping & Category');
+    try {
+        const waitLoadSource = getToolSource('unified_wait_for_load_state');
+        const waitNavSource = getToolSource('unified_wait_for_navigation');
+        const waitLoadSourceName = getSourceToolName('unified_wait_for_load_state');
+        const waitNavSourceName = getSourceToolName('unified_wait_for_navigation');
+        const waitLoadCategory = getToolCategory('unified_wait_for_load_state');
+        const waitNavCategory = getToolCategory('unified_wait_for_navigation');
+
+        if (waitLoadSource === 'playwright' &&
+            waitNavSource === 'playwright' &&
+            waitLoadSourceName === 'browser_wait_for_load_state' &&
+            waitNavSourceName === 'browser_wait_for_navigation' &&
+            waitLoadCategory === 'wait' &&
+            waitNavCategory === 'wait') {
+            console.log('  ✓ wait_for_load_state and wait_for_navigation map to Playwright wait tools');
+            passed++;
+        } else {
+            throw new Error('New wait tool mapping/category mismatch detected');
+        }
+    } catch (e) {
+        console.log(`  ✗ Failed: ${e.message}`);
+        failed++;
+    }
+
+    // Test 16: Exploration helper mapping and category
+    console.log('\nTest 16: Exploration Helper Mapping & Category');
+    try {
+        const listSource = getToolSource('unified_collect_virtualized_list');
+        const diffSource = getToolSource('unified_snapshot_diff');
+        const listSourceName = getSourceToolName('unified_collect_virtualized_list');
+        const diffSourceName = getSourceToolName('unified_snapshot_diff');
+        const listCategory = getToolCategory('unified_collect_virtualized_list');
+        const diffCategory = getToolCategory('unified_snapshot_diff');
+
+        if (listSource === 'playwright' &&
+            diffSource === 'playwright' &&
+            listSourceName === 'browser_collect_virtualized_list' &&
+            diffSourceName === 'browser_snapshot_diff' &&
+            listCategory === 'scroll' &&
+            diffCategory === 'snapshot') {
+            console.log('  ✓ Exploration helper tools map to Playwright with expected categories');
+            passed++;
+        } else {
+            throw new Error('Exploration helper mapping/category mismatch detected');
         }
     } catch (e) {
         console.log(`  ✗ Failed: ${e.message}`);

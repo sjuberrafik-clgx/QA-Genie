@@ -5,8 +5,8 @@ export default function manifest() {
         description: 'AI-powered QA automation workspace with a consistent professional interface.',
         start_url: '/',
         display: 'standalone',
-        background_color: '#0f172a',
-        theme_color: '#7c3aed',
+        background_color: '#f4f8fc',
+        theme_color: '#1c8090',
         icons: [
             {
                 src: '/icon.svg',

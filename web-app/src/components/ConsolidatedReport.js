@@ -83,7 +83,7 @@ function SuiteRow({ suite, depth = 0, sortMode, maxCount = 0 }) {
                 onClick={() => setOpen(!open)}
                 className="allure-suite-btn"
             >
-                <ChevronRightIcon className={`w-3 h-3 allure-text-muted transition-transform flex-shrink-0 ${open ? 'rotate-90' : ''}`} />
+                <ChevronRightIcon className={`w-3 h-3 motion-rotate allure-text-muted flex-shrink-0 ${open ? 'rotate-90' : ''}`} />
                 <span className="allure-suite-title flex-1 truncate">
                     {suite.title || 'Root Suite'}
                 </span>
@@ -148,7 +148,7 @@ function SpecItem({ spec, index }) {
                         onClick={() => setShowError(!showError)}
                         className={`text-[10px] font-semibold ${isBroken ? 'allure-status-broken' : 'allure-status-failed'} flex items-center gap-1`}
                     >
-                        <ChevronRightIcon className={`w-3 h-3 transition-transform ${showError ? 'rotate-90' : ''}`} />
+                        <ChevronRightIcon className={`w-3 h-3 motion-rotate ${showError ? 'rotate-90' : ''}`} />
                         Error Details
                     </button>
                     {showError && (
@@ -249,6 +249,7 @@ export default function ConsolidatedReport({ since = null }) {
     }, [sortedSuites]);
 
     const globalErrors = data?.errors || [];
+    const hasGlobalErrors = globalErrors.length > 0;
 
     if (loading) {
         return (
@@ -259,7 +260,7 @@ export default function ConsolidatedReport({ since = null }) {
         );
     }
 
-    if (!data || data.total === 0) {
+    if (!data || (data.total === 0 && !hasGlobalErrors)) {
         return (
             <div className="text-center py-16">
                 <AllureLogo size={48} className="mx-auto mb-4 opacity-40" />
@@ -302,7 +303,7 @@ export default function ConsolidatedReport({ since = null }) {
                     <div className="flex items-center gap-4">
                         <AllureLogo size={48} />
                         <div>
-                            <h2 className="text-[1.4rem] font-bold tracking-[-0.03em] allure-text-primary">
+                            <h2 className="font-display text-[1.4rem] font-bold tracking-[-0.03em] allure-text-primary">
                                 Allure Report
                             </h2>
                             <p className="mt-0.5 text-[12.5px] font-medium allure-text-secondary">
@@ -329,7 +330,7 @@ export default function ConsolidatedReport({ since = null }) {
                     <button
                         key={tab.key}
                         onClick={() => setActiveTab(tab.key)}
-                        className={`px-4 py-3 text-[13px] font-semibold transition-all border-b-[3px] -mb-px ${activeTab === tab.key
+                        className={`motion-fast-colors px-4 py-3 text-[13px] font-semibold border-b-[3px] -mb-px ${activeTab === tab.key
                             ? 'allure-tab-active'
                             : 'border-transparent allure-text-muted hover:allure-text-secondary'
                             }`}
@@ -348,7 +349,7 @@ export default function ConsolidatedReport({ since = null }) {
                     <div className="allure-stats-strip flex items-center gap-6 text-xs px-1 py-2">
                         <div className="flex flex-col">
                             <span className="text-[10px] font-semibold uppercase tracking-wider allure-text-muted">Total</span>
-                            <span className="text-[1.2rem] font-bold tracking-[-0.03em] allure-text-primary">{data.total}</span>
+                            <span className="font-display text-[1.2rem] font-bold tracking-[-0.03em] allure-text-primary">{data.total}</span>
                         </div>
                         <div className="flex-1" />
                         <div className="flex items-center gap-5">
@@ -384,7 +385,7 @@ export default function ConsolidatedReport({ since = null }) {
                     <div className="flex items-center gap-3">
                         <button
                             onClick={() => setRetryActive(!retryActive)}
-                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all
+                            className={`motion-fast-colors inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border
                                 ${retryActive ? 'bg-blue-500 text-white border-blue-500' : 'allure-toggle-btn'}`}
                         >
                             <RetryIcon className="w-3 h-3" />
@@ -392,8 +393,8 @@ export default function ConsolidatedReport({ since = null }) {
                         </button>
                         <button
                             onClick={() => setFlakyActive(!flakyActive)}
-                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all
-                                ${flakyActive ? 'bg-purple-500 text-white border-purple-500' : 'allure-toggle-btn'}`}
+                            className={`motion-fast-colors inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border
+                                ${flakyActive ? 'bg-emerald-500 text-white border-emerald-500' : 'allure-toggle-btn'}`}
                         >
                             <LightningIcon className="w-3 h-3" />
                             Flaky
@@ -414,7 +415,7 @@ export default function ConsolidatedReport({ since = null }) {
                                 <button
                                     key={key}
                                     onClick={() => setActiveFilter(key)}
-                                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold transition-all
+                                    className={`motion-fast-colors inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold
                                         ${isActive
                                             ? `${activeBg} ${activeText} shadow-sm`
                                             : 'allure-pill-inactive'
@@ -442,9 +443,15 @@ export default function ConsolidatedReport({ since = null }) {
 
                     {/* ═══ 7. Suite List — Allure tree with proportional bars ═══ */}
                     {sortedSuites.length === 0 ? (
-                        <div className="text-center py-12 text-sm allure-text-muted">
-                            No tests match the current filters.
-                        </div>
+                        hasGlobalErrors ? (
+                            <div className="text-center py-12 text-sm allure-text-muted">
+                                Test run produced runner errors and no executable specs. Open the Global Errors tab for details.
+                            </div>
+                        ) : (
+                            <div className="text-center py-12 text-sm allure-text-muted">
+                                No tests match the current filters.
+                            </div>
+                        )
                     ) : (
                         <div className="allure-suite-list rounded-xl overflow-hidden">
                             {sortedSuites.map((suite, i) => (

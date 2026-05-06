@@ -163,6 +163,7 @@ function createProgressHandler() {
         testgenie: '📝',
         qg_excel: '🔒',
         scriptgenerator: '⚙️',
+        qg_exploration: '🧭',
         qg_script: '🔒',
         execute: '🧪',
         healing: '🔧',

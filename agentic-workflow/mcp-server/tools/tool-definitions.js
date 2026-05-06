@@ -198,6 +198,7 @@ export const UNIFIED_TOOLS = [
         description: 'Click on an element. Uses ref from snapshot for accurate targeting.',
         inputSchema: {
             type: 'object',
+            description: 'Provide ref when available for exact targeting, or provide element as a fallback description.',
             properties: {
                 element: {
                     type: 'string',
@@ -221,8 +222,7 @@ export const UNIFIED_TOOLS = [
                     items: { type: 'string' },
                     description: 'Modifier keys to press (Ctrl, Shift, Alt, Meta)'
                 }
-            },
-            required: ['ref']
+            }
         },
         _meta: {
             source: 'playwright',
@@ -235,6 +235,7 @@ export const UNIFIED_TOOLS = [
         description: 'Type text into an editable element.',
         inputSchema: {
             type: 'object',
+            description: 'Provide text and target the element using ref (preferred) or element.',
             properties: {
                 element: {
                     type: 'string',
@@ -248,6 +249,10 @@ export const UNIFIED_TOOLS = [
                     type: 'string',
                     description: 'Text to type'
                 },
+                clear: {
+                    type: 'boolean',
+                    description: 'Whether to clear existing content before typing'
+                },
                 submit: {
                     type: 'boolean',
                     description: 'Whether to press Enter after typing'
@@ -257,7 +262,7 @@ export const UNIFIED_TOOLS = [
                     description: 'Type one character at a time for key handlers'
                 }
             },
-            required: ['ref', 'text']
+            required: ['text']
         },
         _meta: {
             source: 'playwright',
@@ -294,24 +299,39 @@ export const UNIFIED_TOOLS = [
         inputSchema: {
             type: 'object',
             properties: {
-                startElement: {
+                source: {
                     type: 'string',
-                    description: 'Human-readable source element description'
+                    description: 'CSS selector for the source element'
                 },
-                startRef: {
+                sourceRef: {
                     type: 'string',
                     description: 'Source element reference from snapshot'
                 },
+                target: {
+                    type: 'string',
+                    description: 'CSS selector for the target element'
+                },
+                targetRef: {
+                    type: 'string',
+                    description: 'Target element reference from snapshot'
+                },
+                startElement: {
+                    type: 'string',
+                    description: 'Legacy alias for source (human-readable source element description)'
+                },
+                startRef: {
+                    type: 'string',
+                    description: 'Legacy alias for sourceRef'
+                },
                 endElement: {
                     type: 'string',
-                    description: 'Human-readable target element description'
+                    description: 'Legacy alias for target (human-readable target element description)'
                 },
                 endRef: {
                     type: 'string',
-                    description: 'Target element reference from snapshot'
+                    description: 'Legacy alias for targetRef'
                 }
-            },
-            required: ['startRef', 'endRef']
+            }
         },
         _meta: {
             source: 'playwright',
@@ -333,13 +353,20 @@ export const UNIFIED_TOOLS = [
                     type: 'string',
                     description: 'Exact target element reference from page snapshot'
                 },
+                value: {
+                    type: 'string',
+                    description: 'Single option value to select'
+                },
+                label: {
+                    type: 'string',
+                    description: 'Single option label to select'
+                },
                 values: {
                     type: 'array',
                     items: { type: 'string' },
-                    description: 'Values to select'
+                    description: 'Multiple option values to select'
                 }
-            },
-            required: ['ref', 'values']
+            }
         },
         _meta: {
             source: 'playwright',
@@ -460,9 +487,14 @@ export const UNIFIED_TOOLS = [
                         type: 'object',
                         properties: {
                             ref: { type: 'string', description: 'Element ref from snapshot' },
+                            element: { type: 'string', description: 'CSS selector for the field' },
                             value: { type: 'string', description: 'Value to fill' }
                         },
-                        required: ['ref', 'value']
+                        required: ['value'],
+                        anyOf: [
+                            { required: ['ref'] },
+                            { required: ['element'] }
+                        ]
                     },
                     description: 'Array of fields to fill'
                 }
@@ -501,7 +533,7 @@ export const UNIFIED_TOOLS = [
     // ═══════════════════════════════════════════════════════════════════════════════
     {
         name: 'unified_wait_for',
-        description: 'Wait for text to appear, disappear, or for a specific time.',
+        description: 'Wait for text or selector state, text disappearance, or for a specific time.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -516,6 +548,69 @@ export const UNIFIED_TOOLS = [
                 textGone: {
                     type: 'string',
                     description: 'Text to wait for to disappear'
+                },
+                selector: {
+                    type: 'string',
+                    description: 'CSS selector to wait for'
+                },
+                state: {
+                    type: 'string',
+                    enum: ['attached', 'detached', 'visible', 'hidden'],
+                    description: 'Target state for text/selector wait. Defaults to visible for text/selector and hidden for textGone.'
+                }
+            }
+        },
+        _meta: {
+            source: 'playwright',
+            category: 'wait',
+            readOnly: false
+        }
+    },
+    {
+        name: 'unified_wait_for_load_state',
+        description: 'Wait for the current page to reach a specific load state (load, domcontentloaded, networkidle).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                state: {
+                    type: 'string',
+                    enum: ['load', 'domcontentloaded', 'networkidle'],
+                    description: 'Target page load state to wait for. Defaults to load.'
+                },
+                timeout: {
+                    type: 'number',
+                    description: 'Timeout in milliseconds for the wait operation.'
+                }
+            }
+        },
+        _meta: {
+            source: 'playwright',
+            category: 'wait',
+            readOnly: false
+        }
+    },
+    {
+        name: 'unified_wait_for_navigation',
+        description: 'Wait for page URL/navigation to settle, optionally matching a URL pattern.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                urlPattern: {
+                    type: 'string',
+                    description: 'URL pattern to match (glob/regex supported by Playwright waitForURL). Defaults to **.'
+                },
+                url: {
+                    type: 'string',
+                    description: 'Alias for urlPattern.'
+                },
+                waitUntil: {
+                    type: 'string',
+                    enum: ['load', 'domcontentloaded', 'networkidle', 'commit'],
+                    description: 'When to consider the navigation complete. Defaults to load.'
+                },
+                timeout: {
+                    type: 'number',
+                    description: 'Timeout in milliseconds for the navigation wait.'
                 }
             }
         },
@@ -1102,6 +1197,8 @@ export const TOOL_MAPPING = {
     unified_fill_form: 'browser_fill_form',
     unified_file_upload: 'browser_file_upload',
     unified_wait_for: 'browser_wait_for',
+    unified_wait_for_load_state: 'browser_wait_for_load_state',
+    unified_wait_for_navigation: 'browser_wait_for_navigation',
     unified_create_tab: 'browser_create_tab',
     unified_tabs: 'browser_tabs',
     unified_handle_dialog: 'browser_handle_dialog',
@@ -1139,6 +1236,25 @@ export const TOOL_MAPPING = {
     // Merge advanced tool mappings (iframe, shadow DOM, network interception, storage, etc.)
     ...ADVANCED_TOOL_MAPPING,
 };
+
+/**
+ * Backward-compatible aliases for legacy or doc-drift tool names.
+ * These aliases are callable even if not listed as standalone tools.
+ */
+const TOOL_ALIASES = {
+    unified_run_code: 'unified_run_playwright_code',
+    unified_install: 'unified_browser_install',
+    unified_upload_file: 'unified_file_upload',
+    unified_resize_page: 'unified_resize',
+    unified_performance_analyze_insight: 'unified_performance_analyze',
+    unified_list_network_requests: 'unified_network_requests_cdp',
+    unified_evaluate_script: 'unified_evaluate_cdp',
+    unified_fill: 'unified_type',
+};
+
+function resolveCanonicalToolName(toolName) {
+    return TOOL_ALIASES[toolName] || toolName;
+}
 
 /**
  * Combined tools: Core UNIFIED_TOOLS + ENHANCED_TOOLS + ADVANCED_TOOLS
@@ -1187,6 +1303,8 @@ export const ALWAYS_LOADED_TOOLS = new Set([
     'unified_get_page_title',
     // Wait (must-have for page readiness)
     'unified_wait_for',
+    'unified_wait_for_load_state',
+    'unified_wait_for_navigation',
     'unified_wait_for_element',
     // Browser lifecycle
     'unified_browser_close',
@@ -1215,7 +1333,8 @@ export function getAlwaysLoadedTools() {
  * Get tool source from tool name (searches both core and enhanced)
  */
 export function getToolSource(toolName) {
-    const tool = ALL_TOOLS.find(t => t.name === toolName);
+    const canonical = resolveCanonicalToolName(toolName);
+    const tool = ALL_TOOLS.find(t => t.name === canonical);
     return tool?._meta?.source || 'playwright';
 }
 
@@ -1223,7 +1342,8 @@ export function getToolSource(toolName) {
  * Get tool category from tool name (searches both core and enhanced)
  */
 export function getToolCategory(toolName) {
-    const tool = ALL_TOOLS.find(t => t.name === toolName);
+    const canonical = resolveCanonicalToolName(toolName);
+    const tool = ALL_TOOLS.find(t => t.name === canonical);
     return tool?._meta?.category || 'unknown';
 }
 
@@ -1231,14 +1351,16 @@ export function getToolCategory(toolName) {
  * Get the source tool name for routing
  */
 export function getSourceToolName(unifiedToolName) {
-    return TOOL_MAPPING[unifiedToolName] || unifiedToolName;
+    const canonical = resolveCanonicalToolName(unifiedToolName);
+    return TOOL_MAPPING[canonical] || TOOL_MAPPING[unifiedToolName] || unifiedToolName;
 }
 
 /**
  * Get tool by name
  */
 export function getToolByName(toolName) {
-    return ALL_TOOLS.find(t => t.name === toolName);
+    const canonical = resolveCanonicalToolName(toolName);
+    return ALL_TOOLS.find(t => t.name === canonical);
 }
 
 /**

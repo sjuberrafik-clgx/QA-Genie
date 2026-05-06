@@ -138,6 +138,56 @@ class PopupHandler {
         await this.dismissAll();
     }
 
+    // ─── Self-Healing Enhanced Methods ─────────────────────────────────
+
+    /**
+     * Dismiss map loader overlay that can block interactions.
+     * Waits for the loader to disappear naturally.
+     */
+    async dismissMapLoader() {
+        try {
+            // Wait for map loader to disappear
+            await this.page.waitForSelector('div.loader.large', { state: 'hidden', timeout: 15000 });
+        } catch (error) {
+            console.log('Map loader not found or already hidden');
+        }
+    }
+
+    /**
+     * Enhanced welcome modal dismissal with escape key fallback.
+     * More reliable than just clicking Continue button.
+     */
+    async dismissWelcomeEnhanced() {
+        try {
+            // First try escape key
+            await this.page.keyboard.press('Escape');
+            await this.page.waitForTimeout(500);
+            
+            // Then try the regular welcome dismiss
+            await this.dismissWelcome();
+        } catch (error) {
+            console.log('Enhanced welcome modal dismissal failed');
+        }
+    }
+
+    /**
+     * Comprehensive page ready method with self-healing.
+     * Waits for network idle, dismisses loader, and handles modals.
+     */
+    async waitForPageReadyEnhanced() {
+        // Wait for network idle
+        await this.page.waitForLoadState('networkidle');
+        
+        // Dismiss map loader first
+        await this.dismissMapLoader();
+        
+        // Enhanced modal dismissal
+        await this.dismissWelcomeEnhanced();
+        
+        // Regular popup dismissal
+        await this.dismissAll();
+    }
+
     // ─── Static Analysis Helper ──────────────────────────────────
 
     /**

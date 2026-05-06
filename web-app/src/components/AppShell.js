@@ -8,6 +8,7 @@
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 import AppFooter from '@/components/AppFooter';
+import AuroraBackground from '@/components/AuroraBackground';
 import Container from '@/components/Container';
 import { FOOTER_NAV } from '@/lib/navigation';
 
@@ -37,11 +38,15 @@ export default function AppShell({ children }) {
         return <>{children}</>;
     }
 
+    // Aurora intensity: richer on the landing/home surface, quieter on data-dense routes.
+    const auroraIntensity = pathname === '/' ? 'high' : 'medium';
+
     return (
-        <div className="flex flex-col min-h-screen">
+        <div className="relative flex flex-col min-h-screen">
+            <AuroraBackground intensity={auroraIntensity} />
             {/* ── Main Content ── */}
             <main className="flex-1">
-                <Container className="py-6">
+                <Container className="py-5 sm:py-6 lg:py-7">
                     {children}
                 </Container>
             </main>

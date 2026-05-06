@@ -44,6 +44,8 @@ user-invokable: true
 - **UPDATE** existing Jira tickets using `update_jira_ticket` — can update summary, description, labels, priority, and add comments
 - **INSPECT** editable fields and workflow options using `get_jira_ticket_capabilities`
 - **TRANSITION** Jira ticket status using `transition_jira_ticket`
+- **DELETE A COMMENT** using `delete_jira_comment` — the shared Jira approval component prompts the user before the delete is sent. Use `get_jira_ticket_comments` first if the commentId is unknown.
+- **EDIT A COMMENT** using `edit_jira_comment` — the approval component previews old and new text before writing. Use `get_jira_ticket_comments` first if the commentId is unknown.
 - **LOG WORK** using `log_jira_work` — generic "Time Tracking" or "add hours" requests map here
 - **UPDATE ESTIMATES** using `update_jira_estimates` only when the user explicitly asks to change originalEstimate or remainingEstimate
 - If a request mixes worklog wording and estimate wording, ask for clarification before mutating Jira
@@ -122,9 +124,12 @@ REASONING (Enhanced with video evidence):
 ### Video + Jira Integration
 
 After creating the bug ticket:
-1. **`create_jira_ticket` automatically attaches the active chat evidence** for Bug tickets, including screenshots and the original recording when it fits Jira limits
-2. **Call `attach_session_evidence_to_jira`** only when you need to retry or add the active chat evidence to an already-created Jira ticket
-3. **Call `attach_video_frames_to_jira` only when frame images are explicitly needed** for the Jira ticket; frame JPGs are not attached by default
+1. **Prefer `create_jira_ticket` with `evidenceCommentMode: "comment"`** for Bug tickets when active chat screenshots or recordings should be added in one flow. This posts a Jira comment with inline screenshots and preview frames, while recordings remain issue attachments and appear in the comment by file name because Jira Cloud does not support inline playable video for this workflow.
+2. **Use `create_jira_ticket` without `evidenceCommentMode`** when attachments-only behavior is sufficient. That keeps the prior default of attaching the active chat evidence without creating an evidence comment.
+3. **Call `add_comment_with_media`** when the Jira ticket already exists and you need to add screenshots or recordings in one comment. Use this instead of separate attachment and comment calls when you want inline screenshots or preview frames plus recording file names together while keeping the recordings attached to the issue.
+4. **Call `attach_session_evidence_to_jira`** only when you need to retry or add the active chat evidence to an already-created Jira ticket without creating a media comment.
+5. **Call `attach_video_frames_to_jira` only when frame images are explicitly needed** for the Jira ticket outside the mixed-media comment path.
+6. **Call `attach_file_to_jira`** to upload any local file (logs, reports, .xlsx, .pdf) to a Jira ticket. Accepts `ticketKey` and `filePath`.
 
 ## 🧠 COGNITIVE REASONING — Root Cause Diagnosis
 
@@ -270,6 +275,14 @@ For Jira compatibility, keep labels bold-only and keep identifiers code-only. Do
 
 All markdown will be automatically converted to rich Jira formatting (bold, tables, headings, code) — no manual ADF conversion needed.
 
+When you need to call out a notable finding, start a new line or heading with an explicit semantic label:
+- `Observation:` for important observations noticed during validation
+- `Issue:` for clear defects or unexpected behavior
+- `Blocker:` for flow-stopping failures
+- `Risk:` for cautionary findings that may not be a confirmed bug yet
+
+Keep these labels at the start of the line or heading so Jira and the dashboard can auto-emphasize them visually.
+
 ### 6. Jira URL Handling (CRITICAL)
 
 When the user provides a Jira ticket URL (e.g., `https://corelogic.atlassian.net/browse/AOTF-16514`):
@@ -362,6 +375,29 @@ When automated tests fail, ScriptGenerator can invoke BugGenie with:
 
 **To TaskGenie:**
 When a bug ticket is created, suggest using @taskgenie to create a linked Testing task.
+
+---
+
+## Tool Delegation (Cross-Agent)
+
+You have access to two meta-tools that let you invoke tools from other agents without switching agents:
+
+| Meta-Tool | Purpose |
+|---|---|
+| `list_delegatable_tools` | Discover tools available via delegation that you don't natively have |
+| `cross_agent_delegate` | Invoke a specific tool from another agent's tool set |
+
+**When to use delegation:**
+- When you need to link two existing Jira issues → `link_jira_issues` (you now have this natively too)
+- When you need to search/assign users → `search_jira_users`, `assign_jira_ticket` (from TaskGenie)
+- When you need framework-specific tools → e.g., `get_framework_inventory` (from ScriptGenerator)
+- When any operation fails because a tool is missing from your set
+
+**Workflow:**
+1. Realize you need a capability you don't have
+2. Call `list_delegatable_tools` to see what's available
+3. Call `cross_agent_delegate({ toolName: 'tool_name', parameters: { ... } })` to execute it
+4. The delegated tool runs with full approval flow — destructive operations still require user confirmation
 
 ---
 

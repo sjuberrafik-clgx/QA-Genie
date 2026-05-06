@@ -32,7 +32,8 @@
  * 
  * Advanced (advanced-tool-definitions.js):
  *   iframe, shadow-dom, network-interception, storage, accessibility,
- *   video, auth, mutation, geolocation, locale, timezone, permissions
+ *   video-recording, auth-persistence, dom-mutations, geolocation-permissions,
+ *   multi-context, visual-testing, download-management, page-errors
  */
 
 export const TOOL_PROFILES = {
@@ -76,20 +77,30 @@ export const TOOL_PROFILES = {
         'scroll',             // scroll_into_view
         'multi-page',         // wait_for_new_page, list_all_pages, tabs
         'download',           // list_downloads, save_download, trigger_download, wait_for_download
+        'download-management', // advanced download/session artifacts
         'performance',        // performance_analyze, performance_start_trace, performance_stop_trace
         'debugging',          // console_messages, console_messages_cdp, evaluate, evaluate_cdp, page_errors
         'emulation',          // emulate, resize
         'network',            // network_requests, network_requests_cdp, get_network_request, wait_for_request, wait_for_response
         'pdf',                // pdf_save
-        'video',              // start_video, stop_video
-        'auth',               // save_auth_state, load_auth_state
-        'mutation',           // observe_mutations, get_mutations, stop_mutation_observer
-        'geolocation',        // set_geolocation
-        'locale',             // set_locale
-        'timezone',           // set_timezone
-        'permissions',        // grant_permissions, clear_permissions
+        'video-recording',    // start_video, stop_video
+        'auth-persistence',   // save_auth_state, load_auth_state
+        'dom-mutations',      // observe_mutations, get_mutations, stop_mutation_observer
+        'geolocation-permissions', // geolocation, locale, timezone, permissions
         'accessibility',      // accessibility_audit, take_snapshot_cdp
-        'context',            // create_context, close_context, switch_context, list_contexts
+        'multi-context',      // create_context, close_context, switch_context, list_contexts
+        'visual-testing',     // screenshot_baseline, screenshot_compare
+        'page-errors',        // uncaught page exceptions
+
+        // Legacy aliases retained for backward compatibility.
+        'video',
+        'auth',
+        'mutation',
+        'geolocation',
+        'locale',
+        'timezone',
+        'permissions',
+        'context',
     ],
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -103,17 +114,30 @@ export const TOOL_PROFILES = {
      * EXPLORER-NAV — Navigation + discovery tools for the Explorer phase (~35 tools)
      * Covers: navigate, snapshot, find elements by semantic selectors, check states,
      * extract content for assertions, verify page URLs/titles.
-     * Excludes: interaction tools (click/type/fill) — those use explorer-interact.
+     * Includes essential interactions and complex-surface categories so exploration
+     * can progress through real application flows without profile-blocked tool gaps.
      */
     'explorer-nav': [
         'navigation',        // navigate, navigate_back, navigate_forward, reload
         'snapshot',          // snapshot, screenshot
+        'interaction',       // click, type, hover, drag, select_option, check
+        'form',              // fill_form, file_upload
+        'form-control',      // clear_input, focus, blur, press_key
         'selectors',         // get_by_role, get_by_text, get_by_label, get_by_test_id, etc.
         'element-state',     // is_visible, is_enabled, is_checked, is_hidden, is_disabled
         'element-content',   // get_text_content, get_inner_text, get_attribute, get_input_value
         'page-info',         // get_page_url, get_page_title, get_viewport_size
         'assertions',        // expect_url, expect_title, expect_element_text, etc.
         'wait',              // wait_for, wait_for_element
+        'dialog',            // handle_dialog
+        'tab',               // tabs/create_tab
+        'multi-page',        // wait_for_new_page, list_all_pages
+        'scroll',            // scroll_into_view
+        'network-interception', // wait_for_request/response, route intercepts
+        'iframe',            // list/switch/frame_action
+        'shadow-dom',        // shadow queries
+        'cookies',           // session/cookie visibility
+        'storage',           // local/session/indexeddb checks
         'testing',           // verify_element_visible, verify_text_visible
     ],
 
@@ -133,6 +157,13 @@ export const TOOL_PROFILES = {
         'wait',              // wait_for, wait_for_element (wait after interaction)
         'dialog',            // handle_dialog (popups after interaction)
         'tab',               // tabs, list_all_pages (new tabs opened by clicks)
+        'multi-page',        // wait_for_new_page
+        'scroll',            // scroll_into_view
+        'network-interception', // wait_for_response/request for async validation
+        'iframe',            // frame switching/interactions
+        'shadow-dom',        // shadow interactions
+        'cookies',           // auth/session checks
+        'storage',           // local/session/indexeddb checks
     ],
 
     /**

@@ -162,7 +162,7 @@ function ToolCallItem({ tool }) {
 
     // Card border/bg styling
     const cardStyle = isApprovalPending
-        ? 'border-amber-300/80 bg-amber-50/60 py-3 shadow-sm shadow-amber-100/60'
+        ? 'border-amber-300/75 bg-[linear-gradient(145deg,rgba(255,251,235,0.96),rgba(255,255,255,0.9)_52%,rgba(255,247,237,0.9))] py-3 shadow-[0_14px_30px_rgba(251,191,36,0.16)]'
         : isRunning
             ? tool.progressPhase
                 ? 'border-brand-200/80 bg-brand-50/40 py-2'
@@ -172,9 +172,16 @@ function ToolCallItem({ tool }) {
                 : 'border-accent-200/80 bg-accent-50/30 py-2.5';
 
     return (
-        <div className={`rounded-xl px-4 text-xs border transition-all ${cardStyle}`}>
+        <div className={`relative overflow-hidden rounded-xl px-4 text-xs border transition-all ${cardStyle}`}>
+            {isApprovalPending && (
+                <>
+                    <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_7%_5%,rgba(255,255,255,0.55),transparent_35%),radial-gradient(circle_at_92%_6%,rgba(255,255,255,0.4),transparent_30%)]" />
+                    <div className="absolute inset-x-3 top-0 h-px bg-white/90" />
+                </>
+            )}
+
             {/* Main row: icon + name + category + status */}
-            <div className="flex items-center gap-2">
+            <div className="relative flex items-center gap-2">
                 {/* Status icon */}
                 {isApprovalPending ? (
                     <ExclamationIcon className="w-4 h-4 flex-shrink-0 text-amber-500" />
@@ -238,13 +245,18 @@ function ToolCallItem({ tool }) {
 
             {/* Live progress detail for running tools */}
             {isApprovalPending && (
-                <div className="mt-2 ml-[26px] rounded-lg border border-amber-200/80 bg-white/80 px-3 py-2.5 text-[11px] leading-relaxed text-amber-800 shadow-[0_1px_2px_rgba(120,53,15,0.06)]">
-                    <div className="font-semibold text-amber-700">Approval gate is holding this action.</div>
-                    <div className="mt-1 text-surface-600">
+                <div className="mt-2 ml-[26px] rounded-xl border border-amber-200/80 bg-white/88 px-3.5 py-3 text-[11px] leading-relaxed text-amber-800 shadow-[0_10px_20px_rgba(120,53,15,0.08)]">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="font-semibold text-amber-700">Approval gate active</div>
+                        <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-700 ring-1 ring-amber-200/90">
+                            blocked
+                        </span>
+                    </div>
+                    <div className="mt-1.5 text-surface-600">
                         {tool.progressMessage || 'The tool is waiting for an explicit user decision.'}
                     </div>
-                    <div className="mt-1 text-surface-500">
-                        Review the approval card in the timeline to approve or cancel the mutation.
+                    <div className="mt-1.5 text-surface-500">
+                        Review the approval panel in this timeline and choose Approve or Cancel to continue.
                     </div>
                 </div>
             )}

@@ -26,6 +26,7 @@ const ProfilePage = require('../pageobjects/profilePage');
 const UserProfilePopUp = require('../pageobjects/userProfilePopUp');
 const WelcomePopUp = require('../pageobjects/welcomePopUp');
 const AgentBranding = require('../pageobjects/agentBranding');
+const AppDownloadFooter = require('../pageobjects/appDownloadFooter');
 
 
 
@@ -64,6 +65,7 @@ class POmanager {
         this.userProfilePopUpInstance = new UserProfilePopUp(page);
         this.welcomePopUpInstance = new WelcomePopUp(page);
         this.agentBrandingInstance = new AgentBranding(page);
+        this.appDownloadFooterInstance = new AppDownloadFooter(page);
 
 
 
@@ -125,6 +127,8 @@ class POmanager {
     welcomePopUp() { return this.welcomePopUpInstance; }
 
     agentBranding() { return this.agentBrandingInstance; }
+
+    appDownloadFooter() { return this.appDownloadFooterInstance; }
 
     // ─── PopupHandler facade methods ─────────────────────────────
     // These delegate to PopupHandler so generated scripts can call

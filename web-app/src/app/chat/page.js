@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useSSE } from '@/hooks/useSSE';
 import useModelCatalog from '@/hooks/useModelCatalog';
+import useAgentCatalog from '@/hooks/useAgentCatalog';
 import apiClient from '@/lib/api-client';
 import { getDefaultModel, hasModelValue, isVisionModel } from '@/lib/model-options';
 import { truncateTitle } from '@/lib/constants';
@@ -11,12 +12,14 @@ import ChatInput from '@/components/ChatInput';
 import SessionList from '@/components/SessionList';
 import ModelSelect from '@/components/ModelSelect';
 import AgentSelect from '@/components/AgentSelect';
-import { AGENT_MODES, getAgentConfig } from '@/lib/agent-options';
+import MyAgentsLauncher from '@/components/MyAgentsLauncher';
+import { buildCoreAgentId, getAgentConfig } from '@/lib/agent-options';
 import { DocumentIcon, CodeIcon, GlobeIcon, PlayIcon, SparkleIcon, MenuIcon, ChatBubbleIcon, WrenchIcon, CheckIcon, XIcon, FileIcon } from '@/components/Icons';
 import DirectoryPicker from '@/components/DirectoryPicker';
 import ErrorBanner from '@/components/ErrorBanner';
 import FollowupChips from '@/components/FollowupChips';
 import UserInputPrompt from '@/components/UserInputPrompt';
+import ApprovalBatch, { isApprovalBatchCandidate } from '@/components/ApprovalBatch';
 import ReasoningPanel from '@/components/ReasoningPanel';
 import ToolCallCard from '@/components/ToolCallCard';
 import RobotMascotLogo from '@/components/RobotMascotLogo';
@@ -25,6 +28,7 @@ import useResetScrollOnRouteChange from '@/hooks/useResetScrollOnRouteChange';
 const AGENT_ICON_MAP = {
     tpm: SparkleIcon,
     document: DocumentIcon,
+    docgenie: DocumentIcon,
     code: CodeIcon,
     bug: WrenchIcon,
     task: CheckIcon,
@@ -32,7 +36,7 @@ const AGENT_ICON_MAP = {
 };
 
 const AGENT_WELCOME_COPY = {
-    null: 'Run planning, test generation, automation, bugs, tasks, and file work from one mode.',
+    'core:tpm': 'Run planning, test generation, automation, bugs, tasks, and file work from one mode.',
     testgenie: 'Build manual coverage and Excel-ready test steps from Jira context.',
     scriptgenerator: 'Create grounded Playwright automation from live MCP exploration.',
     buggenie: 'Convert failures and evidence into structured Jira defect tickets.',
@@ -41,11 +45,11 @@ const AGENT_WELCOME_COPY = {
     docgenie: 'Turn workbooks, notes, and reports into polished decks, docs, and visuals.',
 };
 
-const WELCOME_AGENT_CARDS = AGENT_MODES.map((agent) => ({
-    ...agent,
-    desc: AGENT_WELCOME_COPY[String(agent.value)] || agent.description,
-    Icon: AGENT_ICON_MAP[agent.icon] || SparkleIcon,
-}));
+function getWelcomeCopy(agent) {
+    return AGENT_WELCOME_COPY[agent.id]
+        || AGENT_WELCOME_COPY[String(agent.agentMode)]
+        || agent.description;
+}
 
 const USER_INPUT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const USER_INPUT_REQUEST_ID_RE = /^uir_[a-z0-9_\-]+$/i;
@@ -176,6 +180,11 @@ export default function ChatPage() {
         loading: modelCatalogLoading,
     } = useModelCatalog();
 
+    const {
+        agents,
+        defaultAgent,
+    } = useAgentCatalog();
+
     const [sessions, setSessions] = useState([]);
     const [activeSessionId, setActiveSessionId] = useState(null);
     const [messages, setMessages] = useState([]);           // { role, content, timestamp }
@@ -187,7 +196,8 @@ export default function ChatPage() {
     const [error, setError] = useState(null);
     const [model, setModelState] = useState('');
     const [modelTouched, setModelTouched] = useState(false);
-    const [agentMode, setAgentMode] = useState(null);       // null = TPM (all agent capabilities), 'testgenie', 'scriptgenerator', 'buggenie', 'taskgenie'
+    const [agentModelMap, setAgentModelMap] = useState({});
+    const [agentId, setAgentId] = useState(buildCoreAgentId(null));
     const [sidebarOpen, setSidebarOpen] = useState(true);
     const [followups, setFollowups] = useState([]);         // [{ label, prompt, category, icon, prefill? }]
     const [prefillText, setPrefillText] = useState('');      // text to pre-fill into the chat input
@@ -200,6 +210,7 @@ export default function ChatPage() {
     const streamingReasoningRef = useRef('');
     const currentToolGroupRef = useRef(null);               // tracks the active tool group ID
     const createSessionInFlightRef = useRef(false);
+    const autoLaunchedRef = useRef(false);
 
     useResetScrollOnRouteChange([messageScrollRef]);
 
@@ -207,6 +218,103 @@ export default function ChatPage() {
         setModelTouched(true);
         setModelState(nextModel);
     }, []);
+
+    // Per-agent model memory: remembers which model the user last paired with each agent
+    // so switching agents (via the pill row, launcher, or deep-link) restores the associated
+    // model in the header dropdown — no more mismatch between the selected agent and the
+    // model pill.
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        try {
+            const saved = JSON.parse(window.localStorage.getItem('chat.agentModelMap') || '{}');
+            if (saved && typeof saved === 'object') setAgentModelMap(saved);
+        } catch { /* ignore corrupt storage */ }
+    }, []);
+
+    const rememberAgentModel = useCallback((targetAgentId, modelValue) => {
+        if (!targetAgentId || !modelValue) return;
+        setAgentModelMap((prev) => {
+            if (prev[targetAgentId] === modelValue) return prev;
+            const next = { ...prev, [targetAgentId]: modelValue };
+            try {
+                if (typeof window !== 'undefined') {
+                    window.localStorage.setItem('chat.agentModelMap', JSON.stringify(next));
+                }
+            } catch { /* storage quota / private mode — ignore */ }
+            return next;
+        });
+    }, []);
+
+    useEffect(() => {
+        if (defaultAgent?.id && !agentId) {
+            setAgentId(defaultAgent.id);
+        }
+    }, [agentId, defaultAgent]);
+
+    // Support deep-linking an agent via ?agentId= query param (e.g. from /my-agents "Use in Chat").
+    // Also honors an optional ?model= so users can pick the model at launch time, and ?newSession=1
+    // to immediately create a fresh chat session bound to that agent + model (so the user lands in
+    // a live conversation, not the welcome/preview screen).
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        if (autoLaunchedRef.current) return;
+        if (!Array.isArray(agents) || agents.length === 0) return;
+        const params = new URLSearchParams(window.location.search);
+        const requested = params.get('agentId');
+        const requestedModel = params.get('model');
+        const newSession = params.get('newSession');
+        if (!requested && !requestedModel && !newSession) return;
+
+        let matchedAgent = null;
+        if (requested) {
+            matchedAgent = agents.find((agent) => agent.id === requested) || null;
+            // If the catalog hasn't loaded the requested agent yet (e.g. still showing fallback
+            // core-only list while the real catalog is in flight), wait — do NOT clear the URL
+            // or we'll lose the deep-link on the next render.
+            if (!matchedAgent) return;
+            setAgentId(matchedAgent.id);
+        }
+        if (requestedModel) setModel(requestedModel);
+        if (matchedAgent && requestedModel) rememberAgentModel(matchedAgent.id, requestedModel);
+
+        // Clear the launch params so refreshes don't re-create a session.
+        params.delete('agentId');
+        params.delete('model');
+        params.delete('newSession');
+        const nextSearch = params.toString();
+        const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}`;
+        window.history.replaceState({}, '', nextUrl);
+
+        // Auto-create a fresh chat session so the user lands directly in a conversation with the
+        // selected custom agent + model instead of the welcome preview page.
+        if (matchedAgent && (newSession || requestedModel)) {
+            autoLaunchedRef.current = true;
+            createSession(matchedAgent.id, requestedModel || undefined);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [agents, setModel]);
+
+    const activeAgentConfig = useMemo(
+        () => getAgentConfig(agentId || defaultAgent?.id || buildCoreAgentId(null), agents),
+        [agentId, agents, defaultAgent]
+    );
+
+    const welcomeAgentCards = useMemo(() => agents.map((agent) => ({
+        ...agent,
+        desc: getWelcomeCopy(agent),
+        Icon: AGENT_ICON_MAP[agent.icon] || SparkleIcon,
+    })), [agents]);
+
+    const coreWelcomeCards = useMemo(
+        () => welcomeAgentCards.filter((card) => !card.isCustom),
+        [welcomeAgentCards]
+    );
+    const customWelcomeCards = useMemo(
+        () => welcomeAgentCards.filter((card) => card.isCustom),
+        [welcomeAgentCards]
+    );
+
+    const isFilegenieAgent = activeAgentConfig.toolProfile === 'filegenie' || activeAgentConfig.agentMode === 'filegenie';
 
     // SSE connection for active chat session
     const streamUrl = activeSessionId ? apiClient.getChatStreamUrl(activeSessionId) : null;
@@ -528,13 +636,12 @@ export default function ChatPage() {
         }
     };
 
-    const createSession = async (overrideAgent) => {
+    const createSession = async (overrideAgent, overrideModel) => {
         if (createSessionInFlightRef.current) return;
 
-        // Guard: only accept string or null — prevents React SyntheticEvent from onClick
-        const agentForSession = (typeof overrideAgent === 'string' || overrideAgent === null)
+        const agentForSession = (typeof overrideAgent === 'string')
             ? overrideAgent
-            : agentMode;
+            : (agentId || defaultAgent?.id || buildCoreAgentId(null));
 
         const applyNewSession = (session) => {
             setSessions(prev => [session, ...prev]);
@@ -548,7 +655,7 @@ export default function ChatPage() {
             streamingReasoningRef.current = '';
             setStreamingContent('');
             setStreamingReasoning('');
-            if (agentForSession !== agentMode) setAgentMode(agentForSession);
+            if (agentForSession !== agentId) setAgentId(agentForSession);
         };
 
         try {
@@ -556,7 +663,9 @@ export default function ChatPage() {
             setIsCreatingSession(true);
             setError(null);
             setIsProcessing(false);
-            const selectedModel = model || defaultModel || getDefaultModel(modelGroups);
+            const selectedModel = (typeof overrideModel === 'string' && overrideModel)
+                ? overrideModel
+                : (model || defaultModel || getDefaultModel(modelGroups));
             const session = await apiClient.createChatSession(selectedModel, agentForSession);
             applyNewSession(session);
             // Show welcome followup suggestions from the server
@@ -591,12 +700,11 @@ export default function ChatPage() {
         currentToolGroupRef.current = null;
         setIsProcessing(false);
 
-        // Restore agentMode from session metadata
         const sessionMeta = sessions.find(s => s.sessionId === sessionId);
         if (sessionMeta) {
-            setAgentMode(sessionMeta.agentMode || null);
-            // Restore FileGenie root if switching to a filegenie session
-            if (sessionMeta.agentMode === 'filegenie') {
+            setAgentId(sessionMeta.agent?.id || sessionMeta.agentId || buildCoreAgentId(sessionMeta.agentMode || null));
+            const sessionIsFilegenie = sessionMeta.agent?.toolProfile === 'filegenie' || sessionMeta.agentMode === 'filegenie';
+            if (sessionIsFilegenie) {
                 apiClient.getWorkspaceRoot(sessionId).then(data => {
                     setFilegenieRoot(data?.root || null);
                 }).catch(() => setFilegenieRoot(null));
@@ -730,10 +838,11 @@ export default function ChatPage() {
      * SDK sessions are immutable — switching agents creates a new session.
      * If current session has no messages, destroy it first (clean swap).
      */
-    const handleAgentChange = async (newAgent) => {
+    const handleAgentChange = async (newAgent, preferredModel, options = {}) => {
+        const { forceNewSession = false } = options;
         if (isProcessing || isCreatingSession) return;
-        if (newAgent === agentMode) return;
-        setAgentMode(newAgent);
+        if (!forceNewSession && newAgent === agentId) return;
+        setAgentId(newAgent);
         setFilegenieRoot(null);
 
         // Clear stale UI state from previous session
@@ -747,8 +856,28 @@ export default function ChatPage() {
         setStreamingReasoning('');
         setError(null);
 
-        // If no active session, just update state — next createSession will use it
-        if (!activeSessionId) return;
+        // Resolve the model this agent should run with. Priority:
+        //   1. Explicit model passed in (from the My Agents launcher)
+        //   2. Remembered model from a previous pairing with this agent
+        //   3. Current header dropdown value (unchanged)
+        // This keeps the header ModelSelect and the active agent pill visually in sync
+        // and prevents a stale-closure race where createSession would otherwise read
+        // the old `model` state before setModel flushed.
+        const resolvedModel = preferredModel || agentModelMap[newAgent] || null;
+        if (resolvedModel && resolvedModel !== model) {
+            setModel(resolvedModel);
+        }
+        if (resolvedModel) rememberAgentModel(newAgent, resolvedModel);
+
+        // If no active session, create one directly when the caller explicitly requested a
+        // fresh session (e.g., the My Agents launcher). Otherwise leave it to the next
+        // natural createSession call so the user can still land on the welcome screen.
+        if (!activeSessionId) {
+            if (forceNewSession) {
+                await createSession(newAgent, resolvedModel || undefined);
+            }
+            return;
+        }
 
         // If current session has messages, keep it and create a new one
         // If empty, destroy the empty session first
@@ -759,8 +888,9 @@ export default function ChatPage() {
             setSessions(prev => prev.filter(s => s.sessionId !== activeSessionId));
         }
 
-        // Create new session with the new agent
-        await createSession(newAgent);
+        // Create new session with the new agent (and its paired model, if any) — pass the
+        // resolved model explicitly so we don't depend on the pending setModel flush.
+        await createSession(newAgent, resolvedModel || undefined);
     };
 
     const handleFollowupSelect = (followup) => {
@@ -777,8 +907,6 @@ export default function ChatPage() {
             sendMessage(followup.prompt);
         }
     };
-
-    const activeAgentConfig = getAgentConfig(agentMode);
 
     /**
      * Submit the user's answer to a pending agent ask_user request.
@@ -809,7 +937,40 @@ export default function ChatPage() {
         ];
         // Sort chronologically
         items.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
-        return items;
+
+        // Coalesce consecutive approval-type user_input items into a single `approval_batch`
+        // so bulk requests render as a tray rather than N stacked cards. Only collapse runs
+        // of ≥2 approvals; a single approval still renders as a standalone card.
+        const coalesced = [];
+        let i = 0;
+        while (i < items.length) {
+            const item = items[i];
+            if (item.type === 'user_input' && isApprovalBatchCandidate(item.data)) {
+                let j = i + 1;
+                while (j < items.length
+                    && items[j].type === 'user_input'
+                    && isApprovalBatchCandidate(items[j].data)) {
+                    j += 1;
+                }
+                const runLength = j - i;
+                if (runLength >= 2) {
+                    const runItems = items.slice(i, j);
+                    const firstId = runItems[0].data.requestId;
+                    const lastId = runItems[runItems.length - 1].data.requestId;
+                    coalesced.push({
+                        type: 'approval_batch',
+                        data: runItems.map(x => x.data),
+                        key: `approval_batch_${firstId}_${lastId}`,
+                        ts: item.ts,
+                    });
+                    i = j;
+                    continue;
+                }
+            }
+            coalesced.push(item);
+            i += 1;
+        }
+        return coalesced;
     }, [messages, toolGroups, userInputRequests]);
 
     // Count active (running) tools across all groups
@@ -855,7 +1016,36 @@ export default function ChatPage() {
                             </div>
                         </div>
                         <div className="flex w-full min-w-0 flex-1 flex-col gap-2.5 overflow-visible xl:items-end">
-                            <AgentSelect value={agentMode} onChange={handleAgentChange} disabled={isProcessing || isCreatingSession} className="min-w-0 w-full xl:max-w-[min(100%,54rem)] 2xl:max-w-[min(100%,62rem)]" />
+                            <div className="flex w-full min-w-0 items-center gap-2">
+                                <AgentSelect agents={agents} value={agentId} onChange={handleAgentChange} disabled={isProcessing || isCreatingSession} className="min-w-0 flex-1 xl:max-w-[min(100%,54rem)] 2xl:max-w-[min(100%,62rem)]" />
+                                <MyAgentsLauncher
+                                    agents={agents}
+                                    initialAgentId={activeAgentConfig?.isCustom ? activeAgentConfig.id : null}
+                                    initialModel={activeAgentConfig?.isCustom ? (agentModelMap[activeAgentConfig.id] || model) : model}
+                                    onLaunch={(agent, chosenModel) => {
+                                        if (chosenModel) {
+                                            rememberAgentModel(agent.id, chosenModel);
+                                            setModel(chosenModel);
+                                        }
+                                        handleAgentChange(agent.id, chosenModel, { forceNewSession: true });
+                                    }}
+                                    className="shrink-0"
+                                />
+                            </div>
+                            {activeAgentConfig?.isCustom && (
+                                <div className="flex w-full items-center gap-2 rounded-xl border border-violet-200/70 bg-gradient-to-r from-violet-50/70 via-white to-white px-2.5 py-1.5 text-[11px]">
+                                    <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-violet-100 text-violet-600">
+                                        <SparkleIcon className="h-3 w-3" />
+                                    </span>
+                                    <span className="font-semibold text-surface-800 truncate max-w-[10rem]">{activeAgentConfig.label}</span>
+                                    {activeAgentConfig.workspaceName && (
+                                        <span className="truncate text-surface-500">· {activeAgentConfig.workspaceName}</span>
+                                    )}
+                                    <span className="ml-auto inline-flex items-center gap-1 rounded-full border border-violet-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-violet-700">
+                                        Custom agent
+                                    </span>
+                                </div>
+                            )}
                             <div className="flex w-full flex-wrap items-center gap-2 sm:gap-2.5 xl:justify-end">
                                 <ModelSelect value={model} onChange={setModel} groups={modelGroups} loading={modelCatalogLoading} className="w-full sm:w-[190px] lg:w-[220px] xl:w-[240px]" />
                                 <span
@@ -914,7 +1104,7 @@ export default function ChatPage() {
 
                                             <div className="mt-3.5 flex flex-wrap items-center justify-center gap-2 xl:justify-start">
                                                 <span className="inline-flex items-center rounded-full border border-surface-200 bg-white/80 px-3 py-1 text-[11px] font-medium text-surface-600">
-                                                    7 agent modes ready
+                                                    {agents.length} agent modes ready
                                                 </span>
                                                 <span className="inline-flex items-center rounded-full border border-surface-200 bg-white/80 px-3 py-1 text-[11px] font-medium text-surface-600">
                                                     TPM selected by default
@@ -944,8 +1134,8 @@ export default function ChatPage() {
                                             </div>
 
                                             <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
-                                                {WELCOME_AGENT_CARDS.map((card) => (
-                                                    <div key={card.value ?? 'default'} className="group flex h-full min-h-[7.25rem] cursor-default flex-col rounded-2xl border border-surface-200/80 bg-surface-50/60 p-2.5 transition-all hover:border-brand-200 hover:bg-white hover:shadow-sm">
+                                                {coreWelcomeCards.map((card) => (
+                                                    <div key={card.id} className="group flex h-full min-h-[7.25rem] cursor-default flex-col rounded-2xl border border-surface-200/80 bg-surface-50/60 p-2.5 transition-all hover:border-brand-200 hover:bg-white hover:shadow-sm">
                                                         <div className={`mb-2 flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${card.bgClass} ${card.textClass}`}>
                                                             <card.Icon className="w-3.5 h-3.5" />
                                                         </div>
@@ -959,6 +1149,29 @@ export default function ChatPage() {
                                                     </div>
                                                 ))}
                                             </div>
+
+                                            {customWelcomeCards.length > 0 && (
+                                                <a
+                                                    href="/my-agents"
+                                                    className="group mt-4 flex items-center justify-between gap-3 rounded-2xl border border-violet-200/70 bg-gradient-to-r from-violet-50/70 via-white to-white p-3 transition-all hover:border-violet-300 hover:shadow-sm"
+                                                >
+                                                    <div className="flex items-center gap-3 min-w-0">
+                                                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-violet-100 text-violet-600">
+                                                            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2.09 4.26L18.5 7l-3.25 3.17L16 14.5 12 12.27 8 14.5l.75-4.33L5.5 7l4.41-.74L12 2z" /></svg>
+                                                        </div>
+                                                        <div className="min-w-0">
+                                                            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-500">My Agents</p>
+                                                            <p className="truncate text-[13px] font-semibold text-surface-900">
+                                                                {customWelcomeCards.length} custom {customWelcomeCards.length === 1 ? 'agent' : 'agents'} published from Studio
+                                                            </p>
+                                                            <p className="truncate text-[11px] text-surface-500">Browse, activate, and use your own agents in chat.</p>
+                                                        </div>
+                                                    </div>
+                                                    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-violet-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-violet-700 group-hover:bg-violet-50">
+                                                        Open My Agents →
+                                                    </span>
+                                                </a>
+                                            )}
                                         </div>
                                     </div>
                                 </div>
@@ -969,7 +1182,7 @@ export default function ChatPage() {
                         {activeSessionId && messages.length === 0 && !streamingContent && !isProcessing && (
                             <div className="flex items-center justify-center min-h-[40vh]">
                                 <div className="text-center">
-                                    {agentMode === 'filegenie' ? (
+                                    {isFilegenieAgent ? (
                                         <>
                                             <div className="w-10 h-10 mx-auto mb-3 rounded-xl bg-cyan-50 flex items-center justify-center">
                                                 <FileIcon className="w-5 h-5 text-cyan-600" />
@@ -1042,6 +1255,16 @@ export default function ChatPage() {
                                     />
                                 );
                             }
+                            if (item.type === 'approval_batch') {
+                                return (
+                                    <ApprovalBatch
+                                        key={item.key}
+                                        requests={item.data}
+                                        onSubmit={handleUserInputSubmit}
+                                        disabled={!isProcessing}
+                                    />
+                                );
+                            }
                             // Tool group — delegated to ToolCallCard component
                             const group = item.data;
                             return (
@@ -1081,7 +1304,7 @@ export default function ChatPage() {
                 )}
 
                 {/* FileGenie directory picker */}
-                {agentMode === 'filegenie' && activeSessionId && (
+                {isFilegenieAgent && activeSessionId && (
                     <DirectoryPicker
                         sessionId={activeSessionId}
                         currentRoot={filegenieRoot}

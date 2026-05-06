@@ -38,6 +38,25 @@ function toBase64DataUri(content, mimeType) {
     return `data:${mimeType};base64,${Buffer.from(String(content || ''), 'utf8').toString('base64')}`;
 }
 
+function getImageMimeType(filePath) {
+    const ext = path.extname(String(filePath || '')).toLowerCase();
+    switch (ext) {
+    case '.png':
+        return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+        return 'image/jpeg';
+    case '.gif':
+        return 'image/gif';
+    case '.webp':
+        return 'image/webp';
+    case '.svg':
+        return 'image/svg+xml';
+    default:
+        return 'application/octet-stream';
+    }
+}
+
 function renderCover(section) {
     const title = esc(section.title || section.text || 'Document');
     const subtitle = section.subtitle ? `<p class="text-xl text-secondary mt-4">${esc(section.subtitle)}</p>` : '';
@@ -83,14 +102,14 @@ function renderNumberedList(section) {
 function renderTable(section) {
     const headers = section.headers || [];
     const rows = section.rows || [];
-    const title = section.title ? `<h4 class="text-lg font-semibold mb-2">${esc(section.title)}</h4>` : '';
-    const ths = headers.map(h => `<th class="px-4 py-2 text-left text-sm font-semibold text-on-primary bg-primary">${esc(h)}</th>`).join('');
+    const title = section.title ? `<h4 class="report-table-title">${esc(section.title)}</h4>` : '';
+    const ths = headers.map(h => `<th class="report-table__head">${esc(h)}</th>`).join('');
     const trs = rows.map((row, ri) => {
-        const cells = (Array.isArray(row) ? row : Object.values(row)).map(c => `<td class="px-4 py-2 text-sm">${esc(c)}</td>`).join('');
-        return `<tr class="${ri % 2 === 0 ? 'bg-surface' : ''}">${cells}</tr>`;
+        const cells = (Array.isArray(row) ? row : Object.values(row)).map(c => `<td class="report-table__cell">${esc(c)}</td>`).join('');
+        return `<tr class="report-table__row ${ri % 2 === 0 ? 'report-table__row--alt' : ''}">${cells}</tr>`;
     }).join('\n');
 
-    return `${title}<div class="overflow-x-auto mb-4"><table class="w-full border-collapse border border-border rounded">
+    return `${title}<div class="report-table-wrap"><table class="report-table">
     <thead><tr>${ths}</tr></thead>
     <tbody>${trs}</tbody>
 </table></div>`;
@@ -104,11 +123,17 @@ function renderCodeBlock(section) {
 
 function renderCallout(section) {
     const text = esc(section.text || section.content || '');
+    const title = section.title ? `<div class="callout-title">${esc(section.title)}</div>` : '';
     const type = section.calloutType || 'info';
     const icons = { info: 'ℹ️', success: '✅', warning: '⚠️', danger: '❌' };
-    const colors = { info: 'border-primary bg-primary/5', success: 'border-green-500 bg-green-500/5', warning: 'border-yellow-500 bg-yellow-500/5', danger: 'border-red-500 bg-red-500/5' };
-    return `<div class="mb-4 p-4 rounded-lg border-l-4 ${colors[type] || colors.info}">
-    <span class="mr-2">${icons[type] || icons.info}</span>${text}
+    const colors = {
+        info: 'callout-info',
+        success: 'callout-success',
+        warning: 'callout-warning',
+        danger: 'callout-danger',
+    };
+    return `<div class="callout-box ${colors[type] || colors.info}">
+    <div class="callout-body"><span class="mr-2">${icons[type] || icons.info}</span><div>${title}<div>${text}</div></div></div>
 </div>`;
 }
 
@@ -171,6 +196,32 @@ function renderInfoCardGrid(section) {
         </div>`;
     }).join('\n');
     return `<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">${html}</div>`;
+}
+
+function renderImage(section) {
+    const title = section.title ? `<h4 class="visual-block-title">${esc(section.title)}</h4>` : '';
+    const caption = section.caption ? `<p class="visual-block-caption">${esc(section.caption)}</p>` : '';
+    const imagePath = section.imagePath || section.src || '';
+    const altText = esc(section.altText || section.title || 'Image');
+
+    if (!imagePath) {
+        return `<div class="visual-block visual-block--empty">[Image: no path provided]</div>`;
+    }
+
+    let src = esc(imagePath);
+    try {
+        if (fs.existsSync(imagePath)) {
+            const fileBuffer = fs.readFileSync(imagePath);
+            src = `data:${getImageMimeType(imagePath)};base64,${fileBuffer.toString('base64')}`;
+        }
+    } catch {
+        src = esc(imagePath);
+    }
+
+    return `${title}<figure class="visual-block">
+    <img class="visual-block-image" src="${src}" alt="${altText}" loading="lazy" />
+    ${caption}
+</figure>`;
 }
 
 function renderChart(section, chartIndex) {
@@ -258,6 +309,7 @@ const SECTION_RENDERERS = {
     sidebar: renderSidebarSection,
     'metric-strip': renderMetricStrip,
     'info-card-grid': renderInfoCardGrid,
+    image: renderImage,
     chart: renderChart,
     diagram: renderDiagram,
     infographic: renderInfographicPlaceholder,
@@ -300,6 +352,10 @@ body {
     color: var(--text);
     line-height: 1.6;
     transition: background 0.3s, color 0.3s;
+}
+
+img {
+    max-width: 100%;
 }
 
 /* Layout */
@@ -428,8 +484,435 @@ body {
     text-align: center;
 }
 
+.nav-heading {
+    scroll-margin-top: 78px;
+    letter-spacing: -0.025em;
+    line-height: 1.15;
+}
+
+.cover-page {
+    background:
+        radial-gradient(circle at top left, color-mix(in srgb, var(--primary) 12%, transparent), transparent 38%),
+        linear-gradient(180deg, color-mix(in srgb, var(--surface) 80%, white) 0%, var(--bg) 100%);
+    border-radius: 28px;
+    padding: 4rem 2.5rem;
+    box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+}
+
+.cover-page h1 {
+    max-width: 14ch;
+    margin: 0 auto;
+}
+
+.text-body {
+    color: var(--text);
+    font-size: 1.08rem;
+}
+
+.visual-block {
+    margin: 0 0 2rem;
+    background: linear-gradient(180deg, rgba(255,255,255,0.95) 0%, var(--surface) 100%);
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    padding: 1.25rem;
+    box-shadow: 0 14px 28px rgba(15, 23, 42, 0.06);
+}
+
+.visual-block-image {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 16px;
+}
+
+.visual-block-title,
+.report-table-title {
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: var(--text);
+    margin: 0 0 0.75rem;
+    letter-spacing: -0.01em;
+}
+
+.visual-block-caption {
+    margin-top: 0.85rem;
+    color: var(--text-secondary);
+    font-size: 0.95rem;
+}
+
+.report-table-wrap {
+    margin: 0 0 2rem;
+    overflow-x: auto;
+    border: 1px solid color-mix(in srgb, var(--primary) 12%, var(--border));
+    border-radius: 22px;
+    background: linear-gradient(180deg, #ffffff 0%, var(--surface) 100%);
+    box-shadow: 0 14px 28px rgba(15, 23, 42, 0.05);
+}
+
+.report-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    min-width: 760px;
+}
+
+.report-table thead tr {
+    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+}
+
+.report-table__head {
+    color: var(--text-on-primary);
+    text-align: left;
+    font-size: 0.95rem;
+    font-weight: 700;
+    padding: 1rem 1rem;
+    border-right: 1px solid rgba(255,255,255,0.22);
+    vertical-align: middle;
+}
+
+.report-table__head:last-child {
+    border-right: none;
+}
+
+.report-table__head:first-child {
+    border-top-left-radius: 20px;
+}
+
+.report-table__head:last-child {
+    border-top-right-radius: 20px;
+}
+
+.report-table__row--alt {
+    background: color-mix(in srgb, var(--primary) 5%, #ffffff);
+}
+
+.report-table__cell {
+    padding: 0.95rem 1rem;
+    font-size: 1rem;
+    line-height: 1.55;
+    color: var(--text);
+    border-right: 1px solid color-mix(in srgb, var(--primary) 8%, var(--border));
+    border-bottom: 1px solid color-mix(in srgb, var(--primary) 8%, var(--border));
+    vertical-align: top;
+}
+
+.report-table__cell:last-child {
+    border-right: none;
+}
+
+.report-table tbody tr:last-child .report-table__cell {
+    border-bottom: none;
+}
+
+.callout-box {
+    margin: 0 0 1.5rem;
+    padding: 1.1rem 1.2rem;
+    border-radius: 18px;
+    border: 1px solid var(--border);
+    box-shadow: 0 10px 20px rgba(15, 23, 42, 0.04);
+}
+
+.callout-body {
+    display: flex;
+    gap: 0.8rem;
+    align-items: flex-start;
+    color: var(--text);
+}
+
+.callout-title {
+    font-weight: 700;
+    margin-bottom: 0.2rem;
+}
+
+.callout-info {
+    background: color-mix(in srgb, var(--primary) 7%, #ffffff);
+    border-color: color-mix(in srgb, var(--primary) 20%, var(--border));
+}
+
+.callout-success {
+    background: color-mix(in srgb, var(--success) 8%, #ffffff);
+    border-color: color-mix(in srgb, var(--success) 22%, var(--border));
+}
+
+.callout-warning {
+    background: color-mix(in srgb, var(--warning) 10%, #ffffff);
+    border-color: color-mix(in srgb, var(--warning) 20%, var(--border));
+}
+
+.callout-danger {
+    background: color-mix(in srgb, var(--danger) 8%, #ffffff);
+    border-color: color-mix(in srgb, var(--danger) 20%, var(--border));
+}
+
+.info-card-grid-title {
+    margin-bottom: 1rem;
+}
+
+.grid {
+    display: grid;
+}
+
+.grid-cols-1 {
+    grid-template-columns: repeat(1, minmax(0, 1fr));
+}
+
+.grid-cols-2,
+.md\\:grid-cols-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.md\\:grid-cols-4 {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.gap-4 {
+    gap: 1rem;
+}
+
+.gap-6 {
+    gap: 1.5rem;
+}
+
+.flex {
+    display: flex;
+}
+
+.flex-col {
+    flex-direction: column;
+}
+
+.items-center {
+    align-items: center;
+}
+
+.justify-center {
+    justify-content: center;
+}
+
+.text-center {
+    text-align: center;
+}
+
+.font-bold {
+    font-weight: 700;
+}
+
+.font-semibold {
+    font-weight: 600;
+}
+
+.italic {
+    font-style: italic;
+}
+
+.rounded-lg {
+    border-radius: 16px;
+}
+
+.rounded-r-lg {
+    border-radius: 0 16px 16px 0;
+}
+
+.border {
+    border: 1px solid var(--border);
+}
+
+.border-b {
+    border-bottom: 1px solid var(--border);
+}
+
+.border-b-4 {
+    border-bottom: 4px solid var(--border);
+}
+
+.border-l-4 {
+    border-left: 4px solid var(--border);
+}
+
+.border-t {
+    border-top: 1px solid var(--border);
+}
+
+.border-t-4 {
+    border-top: 4px solid var(--border);
+}
+
+.p-4 {
+    padding: 1rem;
+}
+
+.p-6 {
+    padding: 1.5rem;
+}
+
+.pl-6 {
+    padding-left: 1.5rem;
+}
+
+.pr-4 {
+    padding-right: 1rem;
+}
+
+.px-4 {
+    padding-left: 1rem;
+    padding-right: 1rem;
+}
+
+.py-2 {
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
+}
+
+.py-3 {
+    padding-top: 0.75rem;
+    padding-bottom: 0.75rem;
+}
+
+.pb-2 {
+    padding-bottom: 0.5rem;
+}
+
+.pb-8 {
+    padding-bottom: 2rem;
+}
+
+.pt-4 {
+    padding-top: 1rem;
+}
+
+.mt-1 {
+    margin-top: 0.25rem;
+}
+
+.mt-4 {
+    margin-top: 1rem;
+}
+
+.mt-6 {
+    margin-top: 1.5rem;
+}
+
+.mt-8 {
+    margin-top: 2rem;
+}
+
+.mt-10 {
+    margin-top: 2.5rem;
+}
+
+.mb-1 {
+    margin-bottom: 0.25rem;
+}
+
+.mb-2 {
+    margin-bottom: 0.5rem;
+}
+
+.mb-3 {
+    margin-bottom: 0.75rem;
+}
+
+.mb-4 {
+    margin-bottom: 1rem;
+}
+
+.mb-6 {
+    margin-bottom: 1.5rem;
+}
+
+.mb-8 {
+    margin-bottom: 2rem;
+}
+
+.mr-2 {
+    margin-right: 0.5rem;
+}
+
+.my-6 {
+    margin-top: 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.mt-12 {
+    margin-top: 3rem;
+}
+
+.w-16 {
+    width: 4rem;
+}
+
+.h-1 {
+    height: 0.25rem;
+}
+
+.min-h-\\[60vh\\] {
+    min-height: 60vh;
+}
+
+.overflow-x-auto {
+    overflow-x: auto;
+}
+
+.leading-relaxed {
+    line-height: 1.8;
+}
+
+.text-sm {
+    font-size: 0.9rem;
+}
+
+.text-base {
+    font-size: 1rem;
+}
+
+.text-lg {
+    font-size: 1.15rem;
+}
+
+.text-xl {
+    font-size: 1.4rem;
+}
+
+.text-2xl {
+    font-size: 1.85rem;
+}
+
+.text-3xl {
+    font-size: 2.6rem;
+}
+
+.text-5xl {
+    font-size: clamp(3rem, 5vw, 4.6rem);
+}
+
+.text-left {
+    text-align: left;
+}
+
+.uppercase {
+    text-transform: uppercase;
+}
+
+.tracking-wide {
+    letter-spacing: 0.08em;
+}
+
+.space-y-1 > * + * {
+    margin-top: 0.45rem;
+}
+
+.list-disc,
+.list-decimal {
+    padding-left: 1.4rem;
+    margin-bottom: 1.25rem;
+}
+
+.list-disc li,
+.list-decimal li {
+    margin-bottom: 0.35rem;
+}
+
 /* Utilities for content rendering */
-.text-body { color: var(--text); }
 .text-primary { color: var(--primary); }
 .text-secondary { color: var(--text-secondary); }
 .text-on-primary { color: var(--text-on-primary); }
@@ -464,6 +947,17 @@ body {
     .sidebar-nav.visible { transform: translateX(0); }
     .main-content { margin-left: 0; padding: 1rem; }
     .top-bar { left: 0; }
+    .grid-cols-2,
+    .md\\:grid-cols-2,
+    .md\\:grid-cols-4 {
+        grid-template-columns: repeat(1, minmax(0, 1fr));
+    }
+    .cover-page {
+        padding: 2.5rem 1.5rem;
+    }
+    .report-table {
+        min-width: 620px;
+    }
 }
 `;
 }

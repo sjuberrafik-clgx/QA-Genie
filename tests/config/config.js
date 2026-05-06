@@ -67,7 +67,14 @@ async function launchBrowser() {
   });
 
   if (evidenceEnabled) {
-    await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+    try {
+      await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+    } catch (error) {
+      if (!error.message.includes('already started')) {
+        throw error;
+      }
+      console.log('Tracing already started, skipping...');
+    }
   }
 
   const page = await context.newPage();

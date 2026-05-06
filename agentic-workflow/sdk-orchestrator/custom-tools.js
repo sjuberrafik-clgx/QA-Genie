@@ -18,7 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
-const { markdownToAdf } = require('./adf-converter');
+const { markdownToAdf, markdownToWikiMarkup, injectMentionSyntax } = require('./adf-converter');
 const {
     normalizeJiraTicketInput,
     normalizeConfluencePageInput,
@@ -33,6 +33,24 @@ function loadEnvVars() {
 
 const VALID_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const VALID_VIDEO_MIME_TYPES = new Set(['video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska']);
+const COMMENT_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']);
+const COMMENT_IMAGE_MIME_MAP = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.svg': 'image/svg+xml',
+};
+const COMMENT_VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mov', '.avi', '.mkv']);
+const COMMENT_VIDEO_MIME_MAP = {
+    '.mp4': 'video/mp4',
+    '.webm': 'video/webm',
+    '.mov': 'video/quicktime',
+    '.avi': 'video/x-msvideo',
+    '.mkv': 'video/x-matroska',
+};
+const JIRA_MAX_ATTACHMENT_SIZE = 50 * 1024 * 1024;
 const JIRA_TICKET_KEY_PATTERN = /^[A-Z][A-Z0-9]*-\d+$/;
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const SAFE_COMMIT_ROOT_PREFIXES = [
@@ -72,6 +90,27 @@ const SAFE_COMMIT_EXCLUDED_EXTENSIONS = new Set(['.log', '.pptx', '.docx', '.pdf
 
 function isNonEmptyString(value) {
     return typeof value === 'string' && value.trim().length > 0;
+}
+
+/**
+ * Parse a mentions parameter (JSON string or array) and apply mention injection
+ * to markdown text before ADF conversion. Returns the text with @[Name](accountId:xxx) syntax.
+ * @param {string} text - Markdown text
+ * @param {string|Array} mentionsParam - JSON string or array of {accountId, displayName}
+ * @returns {string} Text with injected mention syntax
+ */
+function applyMentions(text, mentionsParam) {
+    if (!text || !mentionsParam) return text || '';
+    let mentions;
+    if (typeof mentionsParam === 'string') {
+        try { mentions = JSON.parse(mentionsParam); } catch { return text; }
+    } else if (Array.isArray(mentionsParam)) {
+        mentions = mentionsParam;
+    } else {
+        return text;
+    }
+    if (!Array.isArray(mentions) || mentions.length === 0) return text;
+    return injectMentionSyntax(text, mentions);
 }
 
 function resolveActiveSessionId(explicitSessionId, deps) {
@@ -128,364 +167,75 @@ function getLatestUserMessageText(deps) {
 function getConfluenceProvider(groundingStore) {
     const connector = groundingStore?._kbConnector;
     if (!connector) return null;
-
     if (typeof connector.getProviderByType === 'function') {
-        const provider = connector.getProviderByType('confluence');
-        if (provider) return provider;
+        return connector.getProviderByType('confluence') || null;
     }
-
-    if (Array.isArray(connector._providers)) {
-        return connector._providers.find(provider => {
-            try {
-                return provider?.getProviderType?.() === 'confluence';
-            } catch {
-                return false;
-            }
-        }) || null;
-    }
-
     return null;
 }
 
-function normalizeMaxResults(value, fallback = 10, max = 50) {
-    return Math.max(1, Math.min(Number(value) || fallback, max));
-}
-
-function execFileAsync(command, args, options = {}) {
-    return new Promise((resolve, reject) => {
-        execFile(command, args, options, (error, stdout, stderr) => {
-            if (error) {
-                error.stdout = stdout;
-                error.stderr = stderr;
-                reject(error);
-                return;
-            }
-            resolve({ stdout, stderr });
-        });
-    });
-}
-
-function normalizeRepoPath(value) {
-    return String(value || '').replace(/\\/g, '/').replace(/^\.\//, '').trim();
-}
-
-function normalizePathList(values) {
-    if (!Array.isArray(values)) return [];
-    return values
-        .map(normalizeRepoPath)
-        .filter(Boolean);
-}
-
-function hasSafeCommitRoot(relPath, extraIncludePaths = []) {
-    const normalizedExtraPaths = normalizePathList(extraIncludePaths);
-    return SAFE_COMMIT_ROOT_PREFIXES.some(prefix => relPath.startsWith(prefix))
-        || normalizedExtraPaths.some(prefix => relPath === prefix || relPath.startsWith(`${prefix.replace(/\/$/, '')}/`))
-        || SAFE_COMMIT_ROOT_FILES.has(relPath);
-}
-
-function looksLikeTestOrTempFile(relPath) {
-    const baseName = path.posix.basename(relPath).toLowerCase();
-    const stem = baseName.replace(/\.[^.]+$/, '');
-    if (stem === '_sheet_extract') return true;
-    if (stem.includes('.tmp')) return true;
-
-    const markers = ['test', 'tests', 'spec', 'smoke', 'integration', 'unit', 'tmp'];
-    return markers.some(marker => (
-        stem === marker
-        || stem.startsWith(`${marker}-`)
-        || stem.startsWith(`${marker}_`)
-        || stem.startsWith(`${marker}.`)
-        || stem.endsWith(`-${marker}`)
-        || stem.endsWith(`_${marker}`)
-        || stem.endsWith(`.${marker}`)
-        || stem.includes(`-${marker}-`)
-        || stem.includes(`_${marker}_`)
-        || stem.includes(`.${marker}.`)
-    ));
-}
-
-function classifySafeCommitPath(relPath, options = {}) {
-    const { extraIncludePaths = [] } = options;
-    const normalized = normalizeRepoPath(relPath);
-    if (!normalized) {
-        return { include: false, reason: 'empty path' };
-    }
-
-    if (!hasSafeCommitRoot(normalized, extraIncludePaths)) {
-        return { include: false, reason: 'outside allowed project/web-app roots' };
-    }
-
-    if (SAFE_COMMIT_EXCLUDED_PREFIXES.some(prefix => normalized.startsWith(prefix))) {
-        return { include: false, reason: 'artifact/test/result directory excluded' };
-    }
-
-    if (normalized.split('/').some(segment => segment === '__tests__' || segment === 'logs')) {
-        return { include: false, reason: 'test/log directory excluded' };
-    }
-
-    if (looksLikeTestOrTempFile(normalized)) {
-        return { include: false, reason: 'test/smoke/tmp helper file excluded' };
-    }
-
-    if (SAFE_COMMIT_EXCLUDED_EXTENSIONS.has(path.posix.extname(normalized).toLowerCase())) {
-        return { include: false, reason: 'generated artifact extension excluded' };
-    }
-
-    return { include: true, reason: 'safe project source file' };
-}
-
-function parseGitStatusOutput(stdout) {
-    return String(stdout || '')
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .map(line => {
-            const status = line.slice(0, 2);
-            const rawPath = line.slice(3).trim();
-            const renameParts = rawPath.includes(' -> ') ? rawPath.split(' -> ') : null;
-            const currentPath = normalizeRepoPath(renameParts ? renameParts[renameParts.length - 1] : rawPath);
-            const originalPath = renameParts ? normalizeRepoPath(renameParts[0]) : null;
-            const pathspecs = [currentPath, originalPath].filter(Boolean);
-
-            return {
-                status,
-                rawPath,
-                currentPath,
-                originalPath,
-                pathspecs,
-            };
-        });
-}
-
-function selectSafeCommitEntries(entries, options = {}) {
-    const includedEntries = [];
-    const excludedEntries = [];
-
-    for (const entry of entries) {
-        const pathAssessments = entry.pathspecs.map(pathspec => ({
-            path: pathspec,
-            ...classifySafeCommitPath(pathspec, options),
-        }));
-        const includeAssessment = pathAssessments.find(assessment => assessment.include);
-
-        if (includeAssessment) {
-            includedEntries.push({
-                ...entry,
-                selectedPath: includeAssessment.path,
-                pathAssessments,
-            });
-        } else {
-            excludedEntries.push({
-                ...entry,
-                reason: pathAssessments[0]?.reason || 'excluded',
-            });
-        }
-    }
-
-    return { includedEntries, excludedEntries };
-}
-
-function chunkArray(values, size = 80) {
-    const chunks = [];
-    for (let i = 0; i < values.length; i += size) {
-        chunks.push(values.slice(i, i + size));
-    }
-    return chunks;
-}
-
-function buildDefaultCommitMessage(stagedPaths) {
-    const hasWebApp = stagedPaths.some(filePath => filePath.startsWith('web-app/'));
-    const hasSdk = stagedPaths.some(filePath => filePath.startsWith('agentic-workflow/'));
-    const hasSkills = stagedPaths.some(filePath => filePath.startsWith('.github/skills/'));
-
-    if (hasWebApp && hasSdk && hasSkills) return 'chore: update web app skills and project automation';
-    if (hasWebApp && hasSdk) return 'chore: update web app and project automation';
-    if (hasWebApp) return 'chore: update web app files';
-    if (hasSdk) return 'chore: update project automation files';
-    if (hasSkills) return 'chore: update project skills';
-    return 'chore: update project files';
-}
-
-async function runSafeCommitAndPush({ commitMessage, dryRun = false, includePaths = [] }, deps = {}) {
-    const repoRoot = PROJECT_ROOT;
-    const gitRun = async (args, options = {}) => execFileAsync('git', args, {
-        cwd: repoRoot,
-        windowsHide: true,
-        maxBuffer: 1024 * 1024 * 8,
-        ...options,
-    });
-
-    const { stdout: statusStdout } = await gitRun(['status', '--porcelain=v1', '-uall', '--']);
-    const parsedEntries = parseGitStatusOutput(statusStdout);
-    const normalizedIncludePaths = normalizePathList(includePaths);
-    const { includedEntries, excludedEntries } = selectSafeCommitEntries(parsedEntries, { extraIncludePaths: normalizedIncludePaths });
-    const pathspecs = [...new Set(includedEntries.flatMap(entry => entry.pathspecs))];
-
-    const { stdout: branchStdout } = await gitRun(['rev-parse', '--abbrev-ref', 'HEAD']);
-    const branch = String(branchStdout || '').trim();
-    const finalCommitMessage = isNonEmptyString(commitMessage)
-        ? commitMessage.trim()
-        : buildDefaultCommitMessage(pathspecs);
-
-    if (pathspecs.length === 0) {
-        return {
-            success: false,
-            dryRun,
-            branch,
-            commitMessage: finalCommitMessage,
-            includePaths: normalizedIncludePaths,
-            stagedFiles: [],
-            excludedFiles: excludedEntries.map(entry => ({ path: entry.currentPath || entry.rawPath, reason: entry.reason })),
-            error: 'No eligible source/config files matched the safe commit filter.',
-        };
-    }
-
-    if (dryRun) {
-        return {
-            success: true,
-            dryRun: true,
-            branch,
-            commitMessage: finalCommitMessage,
-            includePaths: normalizedIncludePaths,
-            stagedFiles: pathspecs,
-            excludedFiles: excludedEntries.map(entry => ({ path: entry.currentPath || entry.rawPath, reason: entry.reason })),
-        };
-    }
-
-    for (const group of chunkArray(pathspecs)) {
-        await gitRun(['add', '-A', '--', ...group]);
-    }
-
-    const { stdout: stagedStdout } = await gitRun(['diff', '--cached', '--name-only', '--']);
-    const stagedFiles = String(stagedStdout || '').split(/\r?\n/).filter(Boolean).map(normalizeRepoPath);
-    if (stagedFiles.length === 0) {
-        return {
-            success: false,
-            dryRun: false,
-            branch,
-            commitMessage: finalCommitMessage,
-            includePaths: normalizedIncludePaths,
-            stagedFiles: [],
-            excludedFiles: excludedEntries.map(entry => ({ path: entry.currentPath || entry.rawPath, reason: entry.reason })),
-            error: 'No staged changes remained after applying the safe commit filter.',
-        };
-    }
-
-    let commitStdout = '';
-    try {
-        const result = await gitRun(['commit', '-m', finalCommitMessage]);
-        commitStdout = `${result.stdout || ''}${result.stderr || ''}`.trim();
-    } catch (error) {
-        const combined = `${error.stdout || ''}${error.stderr || ''}`.trim();
-        return {
-            success: false,
-            dryRun: false,
-            branch,
-            commitMessage: finalCommitMessage,
-            includePaths: normalizedIncludePaths,
-            stagedFiles,
-            excludedFiles: excludedEntries.map(entry => ({ path: entry.currentPath || entry.rawPath, reason: entry.reason })),
-            error: combined || error.message,
-        };
-    }
-
-    const { stdout: shaStdout } = await gitRun(['rev-parse', 'HEAD']);
-    const commitSha = String(shaStdout || '').trim();
-
-    let pushStdout = '';
-    try {
-        const result = await gitRun(['push']);
-        pushStdout = `${result.stdout || ''}${result.stderr || ''}`.trim();
-    } catch (error) {
-        const noUpstream = /no upstream branch/i.test(`${error.stderr || ''} ${error.stdout || ''}`);
-        if (noUpstream && branch) {
-            const result = await gitRun(['push', '-u', 'origin', branch]);
-            pushStdout = `${result.stdout || ''}${result.stderr || ''}`.trim();
-        } else {
-            const combined = `${error.stdout || ''}${error.stderr || ''}`.trim();
-            return {
-                success: false,
-                dryRun: false,
-                branch,
-                commitMessage: finalCommitMessage,
-                includePaths: normalizedIncludePaths,
-                stagedFiles,
-                excludedFiles: excludedEntries.map(entry => ({ path: entry.currentPath || entry.rawPath, reason: entry.reason })),
-                committed: true,
-                commitSha,
-                pushError: combined || error.message,
-                commitOutput: commitStdout,
-            };
-        }
-    }
-
-    return {
-        success: true,
-        dryRun: false,
-        branch,
-        commitMessage: finalCommitMessage,
-        includePaths: normalizedIncludePaths,
-        stagedFiles,
-        excludedFiles: excludedEntries.map(entry => ({ path: entry.currentPath || entry.rawPath, reason: entry.reason })),
-        committed: true,
-        pushed: true,
-        commitSha,
-        commitOutput: commitStdout,
-        pushOutput: pushStdout,
+function formatConfluencePage(page, options = {}) {
+    if (!page || typeof page !== 'object') return page;
+    const result = {
+        id: page.id || undefined,
+        title: page.title || undefined,
+        url: page.url || undefined,
+        space: page.space || undefined,
+        excerpt: page.excerpt || undefined,
+        lastModified: page.lastModified || undefined,
     };
+    if (options.depth !== undefined) result.depth = options.depth;
+    if (page.metadata) {
+        result.metadata = {
+            labels: page.metadata.labels || [],
+            author: page.metadata.author || undefined,
+            status: page.metadata.status || undefined,
+            version: page.metadata.version || undefined,
+            parentId: page.metadata.parentId || null,
+        };
+    }
+    if (options.includeContent !== false && page.content) {
+        const maxChars = options.contentMaxChars || 8000;
+        result.content = typeof page.content === 'string' && page.content.length > maxChars
+            ? page.content.slice(0, maxChars) + '...'
+            : page.content;
+    }
+    return result;
 }
 
 function formatConfluenceSpace(space) {
+    if (!space || typeof space !== 'object') return space;
     return {
-        key: space?.key || '',
-        name: space?.name || '',
-        url: space?.url || '',
-        description: space?.description || '',
+        key: space.key || undefined,
+        name: space.name || undefined,
+        url: space.url || undefined,
+        description: space.description || undefined,
     };
 }
 
-function formatConfluencePage(page, options = {}) {
-    const includeContent = options.includeContent === true;
-    const contentMaxChars = Math.max(0, Number(options.contentMaxChars) || 8000);
-
-    return {
-        id: String(page?.id || ''),
-        title: page?.title || '',
-        url: page?.url || '',
-        space: page?.space || '',
-        excerpt: page?.excerpt || (typeof page?.content === 'string' ? page.content.substring(0, 300) : ''),
-        lastModified: page?.lastModified || '',
-        labels: Array.isArray(page?.metadata?.labels) ? page.metadata.labels : [],
-        author: page?.metadata?.author || '',
-        status: page?.metadata?.status || '',
-        version: page?.metadata?.version || null,
-        parentId: page?.metadata?.parentId || null,
-        depth: Number.isFinite(options.depth) ? options.depth : undefined,
-        content: includeContent && typeof page?.content === 'string'
-            ? page.content.substring(0, contentMaxChars)
-            : undefined,
-    };
-}
-
-function annotateConfluenceTreeDepth(pages, rootPageId) {
-    const rootId = String(rootPageId || '');
-    const depthMap = new Map([[rootId, 0]]);
-
-    return pages.map(page => {
-        const pageId = String(page?.id || '');
-        const parentId = page?.metadata?.parentId ? String(page.metadata.parentId) : null;
-        const depth = pageId === rootId
-            ? 0
-            : (parentId && depthMap.has(parentId) ? depthMap.get(parentId) + 1 : null);
-
-        if (depth !== null && !depthMap.has(pageId)) {
-            depthMap.set(pageId, depth);
+function annotateConfluenceTreeDepth(pages, rootId) {
+    if (!Array.isArray(pages)) return [];
+    const idToParent = new Map();
+    for (const page of pages) {
+        const pid = page?.metadata?.parentId || null;
+        idToParent.set(String(page?.id || ''), pid ? String(pid) : null);
+    }
+    function getDepth(id) {
+        let depth = 0;
+        let current = String(id || '');
+        const visited = new Set();
+        while (current && current !== String(rootId) && !visited.has(current)) {
+            visited.add(current);
+            const parent = idToParent.get(current);
+            if (!parent) break;
+            depth++;
+            current = parent;
         }
-
-        return {
-            page,
-            depth,
-        };
-    });
+        return depth;
+    }
+    return pages.map(page => ({
+        page,
+        depth: getDepth(page?.id),
+    }));
 }
 
 function classifyJiraTimeTrackingIntent(messageText) {
@@ -962,6 +712,14 @@ const JIRA_MUTATION_GUARDRAILS = {
         requiresApproval: true,
         actionLabel: 'reassign a Jira ticket',
     },
+    link_jira_issues: {
+        provider: 'jira',
+        resourceType: 'ticket-link',
+        effect: 'write',
+        impactLevel: 'medium',
+        requiresApproval: true,
+        actionLabel: 'create a link between two Jira issues',
+    },
     remove_jira_issue_link: {
         provider: 'jira',
         resourceType: 'ticket-link',
@@ -984,14 +742,14 @@ const JIRA_MUTATION_GUARDRAILS = {
         effect: 'write',
         impactLevel: 'high',
         requiresApproval: true,
-        actionLabel: 'update Jira ticket fields',
+        actionLabel: 'update Jira ticket fields (including fix versions)',
     },
     log_jira_work: {
         provider: 'jira',
         resourceType: 'ticket',
         effect: 'write',
         impactLevel: 'medium',
-        requiresApproval: false,
+        requiresApproval: true,
         actionLabel: 'log Jira work',
     },
     update_jira_estimates: {
@@ -999,7 +757,7 @@ const JIRA_MUTATION_GUARDRAILS = {
         resourceType: 'ticket',
         effect: 'write',
         impactLevel: 'medium',
-        requiresApproval: false,
+        requiresApproval: true,
         actionLabel: 'update Jira estimates',
     },
     delete_jira_ticket: {
@@ -1009,6 +767,22 @@ const JIRA_MUTATION_GUARDRAILS = {
         impactLevel: 'destructive',
         requiresApproval: true,
         actionLabel: 'delete a Jira ticket',
+    },
+    delete_jira_comment: {
+        provider: 'jira',
+        resourceType: 'ticket-comment',
+        effect: 'delete',
+        impactLevel: 'destructive',
+        requiresApproval: true,
+        actionLabel: 'delete a Jira comment',
+    },
+    edit_jira_comment: {
+        provider: 'jira',
+        resourceType: 'ticket-comment',
+        effect: 'write',
+        impactLevel: 'medium',
+        requiresApproval: true,
+        actionLabel: 'edit a Jira comment',
     },
     create_confluence_page: {
         provider: 'confluence',
@@ -1345,6 +1119,7 @@ function buildExpectedJiraMutationApproval(toolName, context = {}) {
     const guardrail = buildJiraMutationGuardrailMetadata(toolName) || {};
     const ticketId = isNonEmptyString(context.ticketId) ? context.ticketId.trim().toUpperCase() : '';
     const relatedIssueKey = isNonEmptyString(context.relatedIssueKey) ? context.relatedIssueKey.trim().toUpperCase() : '';
+    const commentId = isNonEmptyString(context.commentId) ? String(context.commentId).trim().toUpperCase() : '';
 
     if (guardrail.provider === 'confluence') {
         switch (toolName) {
@@ -1372,6 +1147,18 @@ function buildExpectedJiraMutationApproval(toolName, context = {}) {
             return ticketId ? `APPROVE TRANSITION ${ticketId}` : 'APPROVE TRANSITION JIRA TICKET';
         case 'update_jira_ticket':
             return ticketId ? `APPROVE UPDATE ${ticketId}` : 'APPROVE UPDATE JIRA TICKET';
+        case 'delete_jira_comment':
+            if (ticketId && commentId) return `APPROVE DELETE COMMENT ${commentId} ON ${ticketId}`;
+            if (commentId) return `APPROVE DELETE COMMENT ${commentId}`;
+            return 'APPROVE DELETE JIRA COMMENT';
+        case 'edit_jira_comment':
+            if (ticketId && commentId) return `APPROVE EDIT COMMENT ${commentId} ON ${ticketId}`;
+            if (commentId) return `APPROVE EDIT COMMENT ${commentId}`;
+            return 'APPROVE EDIT JIRA COMMENT';
+        case 'log_jira_work':
+            return ticketId ? `APPROVE LOG WORK ${ticketId}` : 'APPROVE LOG JIRA WORK';
+        case 'update_jira_estimates':
+            return ticketId ? `APPROVE UPDATE ESTIMATES ${ticketId}` : 'APPROVE UPDATE JIRA ESTIMATES';
         default:
             return 'APPROVE JIRA MUTATION';
     }
@@ -1472,7 +1259,7 @@ function buildJiraMutationApprovalFailure({ approval, ticketId, ticketUrl, previ
     };
 }
 
-async function requireJiraMutationApproval({ deps, toolName, previewLines, preview, consequence, ticketId, relatedIssueKey }) {
+async function requireJiraMutationApproval({ deps, toolName, previewLines, preview, consequence, ticketId, relatedIssueKey, commentId }) {
     const guardrail = buildJiraMutationGuardrailMetadata(toolName);
     if (!guardrail?.requiresApproval) {
         return {
@@ -1485,7 +1272,7 @@ async function requireJiraMutationApproval({ deps, toolName, previewLines, previ
     }
 
     const latestUserMessage = getLatestUserMessageText(deps);
-    const expectedApproval = buildExpectedJiraMutationApproval(toolName, { ticketId, relatedIssueKey });
+    const expectedApproval = buildExpectedJiraMutationApproval(toolName, { ticketId, relatedIssueKey, commentId });
     const resolvedPreview = preview && typeof preview === 'object'
         ? preview
         : buildMutationPreview({
@@ -1640,6 +1427,12 @@ function buildJiraBrowseUrl(jiraConfig, ticketId) {
 function splitCommaSeparated(value) {
     if (!isNonEmptyString(value)) return [];
     return value.split(',').map(item => item.trim()).filter(Boolean);
+}
+
+function normalizeMaxResults(value, defaultValue = 10) {
+    const num = Number(value);
+    if (!Number.isFinite(num) || num < 1) return defaultValue;
+    return Math.min(Math.max(Math.round(num), 1), 50);
 }
 
 function parseJsonObjectInput(rawValue, fieldName) {
@@ -2240,7 +2033,15 @@ async function uploadJiraAttachment(attachUrl, jiraConfig, fileName, mimeType, b
         });
 
         if (response.ok) {
-            return { fileName, success: true, ...extra };
+            // Parse response to get attachment metadata (id, content URL, etc.)
+            let attachmentMeta = null;
+            try {
+                const jsonResp = await response.json();
+                // Jira returns an array of attachment objects
+                attachmentMeta = Array.isArray(jsonResp) ? jsonResp[0] : jsonResp;
+            } catch (_parseErr) { /* best-effort metadata extraction */ }
+
+            return { fileName, success: true, attachmentMeta, ...extra };
         }
 
         const errText = await response.text();
@@ -2252,6 +2053,642 @@ async function uploadJiraAttachment(attachUrl, jiraConfig, fileName, mimeType, b
         };
     } catch (error) {
         return { fileName, success: false, error: error.message, ...extra };
+    }
+}
+
+function resolveWorkspaceFilePath(rawPath, workspaceRoot = PROJECT_ROOT) {
+    let resolvedPath = String(rawPath || '');
+    if (!path.isAbsolute(resolvedPath)) {
+        resolvedPath = path.resolve(workspaceRoot, resolvedPath);
+    }
+    return resolvedPath;
+}
+
+function createUniqueAttachmentFileName(fileName, seenNames) {
+    const normalizedName = sanitizeFileName(fileName || 'attachment');
+    const ext = path.extname(normalizedName);
+    const stem = ext ? normalizedName.slice(0, -ext.length) : normalizedName;
+
+    let candidate = normalizedName || `attachment${ext}`;
+    let suffix = 2;
+    while (seenNames.has(candidate.toLowerCase())) {
+        candidate = `${stem || 'attachment'}-${suffix}${ext}`;
+        suffix += 1;
+    }
+
+    seenNames.add(candidate.toLowerCase());
+    return candidate;
+}
+
+function formatAttachmentSize(sizeBytes) {
+    const value = Number(sizeBytes);
+    if (!Number.isFinite(value) || value <= 0) return '';
+    if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+    if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${value} B`;
+}
+
+function createCommentScreenshotFileName(index, mimeType) {
+    const ext = mimeType === 'image/jpeg' ? '.jpg'
+        : mimeType === 'image/gif' ? '.gif'
+            : mimeType === 'image/webp' ? '.webp'
+                : mimeType === 'image/svg+xml' ? '.svg'
+                    : '.png';
+    return `comment-screenshot-${index}${ext}`;
+}
+
+function createCommentFrameFileName(videoFileName, timestamp) {
+    const videoBase = path.basename(String(videoFileName || 'recording'), path.extname(String(videoFileName || 'recording')));
+    const timeLabel = String(timestamp).replace(/[^0-9.]/g, '_');
+    return `${sanitizeFileName(videoBase || 'recording')}-frame-${timeLabel || '0'}s.jpg`;
+}
+
+function createAdfTextNode(text, marks) {
+    const node = {
+        type: 'text',
+        text,
+    };
+    if (Array.isArray(marks) && marks.length > 0) {
+        node.marks = marks;
+    }
+    return node;
+}
+
+function appendAdfBulletSection(adf, title, items) {
+    if (!adf || !Array.isArray(adf.content) || !Array.isArray(items) || items.length === 0) return;
+
+    adf.content.push({
+        type: 'paragraph',
+        content: [createAdfTextNode(title, [{ type: 'strong' }])],
+    });
+
+    adf.content.push({
+        type: 'bulletList',
+        content: items.map(item => ({
+            type: 'listItem',
+            content: [{
+                type: 'paragraph',
+                content: item,
+            }],
+        })),
+    });
+}
+
+async function resolveCommentMediaFileIds(apiConfig, ticketKey, uploadedAttachments) {
+    const attachmentsNeedingIds = uploadedAttachments.filter(att => isNonEmptyString(att?.id));
+    if (attachmentsNeedingIds.length === 0) return;
+
+    try {
+        const issueAttUrl = `${buildJiraIssueApiUrl(apiConfig, ticketKey)}?fields=attachment`;
+        const issueAttResp = await fetch(issueAttUrl, {
+            method: 'GET',
+            headers: apiConfig.headers,
+        });
+
+        if (!issueAttResp.ok) return;
+
+        const issueData = await issueAttResp.json();
+        const jiraAttachments = issueData?.fields?.attachment || [];
+        for (const att of attachmentsNeedingIds) {
+            const match = jiraAttachments.find(item => String(item.id) === String(att.id));
+            if (match?.mediaApiFileId) {
+                att.mediaFileId = match.mediaApiFileId;
+            }
+        }
+    } catch {
+        // Best-effort only.
+    }
+}
+
+function buildJiraMediaCommentWikiBody(comment, uploadedAttachments, skippedVideos) {
+    const sections = [markdownToWikiMarkup(comment || '')];
+
+    const uploadedVideos = uploadedAttachments.filter(att => att.category === 'video');
+    const inlineAttachments = uploadedAttachments.filter(att => att.category !== 'video');
+
+    if (uploadedVideos.length > 0 || skippedVideos.length > 0) {
+        const lines = ['h3. Video evidence'];
+
+        for (const video of uploadedVideos) {
+            lines.push(`* ${video.filename}`);
+        }
+
+        for (const skipped of skippedVideos) {
+            lines.push(`* ${skipped.fileName} - skipped original upload (${skipped.error})`);
+        }
+
+        sections.push(lines.join('\n'));
+    }
+
+    if (inlineAttachments.length > 0) {
+        sections.push(inlineAttachments.map(att => `!${att.filename}|thumbnail!`).join('\n'));
+    }
+
+    return sections.filter(section => isNonEmptyString(section)).join('\n\n');
+}
+
+function buildJiraMediaCommentAdf(comment, uploadedAttachments, skippedVideos, layout, useInlineMedia) {
+    const adf = markdownToAdf(comment || '');
+    const uploadedVideos = uploadedAttachments.filter(att => att.category === 'video');
+    const inlineAttachments = uploadedAttachments.filter(att => att.category !== 'video');
+
+    const videoItems = uploadedVideos.map(video => [createAdfTextNode(video.filename)]);
+
+    const skippedVideoItems = skippedVideos.map(skipped => [
+        createAdfTextNode(`${skipped.fileName} - skipped original upload (${skipped.error})`),
+    ]);
+
+    appendAdfBulletSection(adf, 'Video evidence:', [...videoItems, ...skippedVideoItems]);
+
+    if (useInlineMedia) {
+        const unresolvedInlineAttachments = [];
+        for (const att of inlineAttachments) {
+            if (!isNonEmptyString(att.mediaFileId)) {
+                unresolvedInlineAttachments.push(att);
+                continue;
+            }
+
+            adf.content.push({
+                type: 'mediaSingle',
+                attrs: { layout },
+                content: [{
+                    type: 'media',
+                    attrs: {
+                        id: att.mediaFileId,
+                        type: 'file',
+                        collection: '',
+                    },
+                }],
+            });
+        }
+
+        if (unresolvedInlineAttachments.length > 0) {
+            const unresolvedItems = unresolvedInlineAttachments.map(att => {
+                if (isNonEmptyString(att.contentUrl)) {
+                    return [createAdfTextNode(att.filename, [{ type: 'link', attrs: { href: att.contentUrl } }])];
+                }
+                return [createAdfTextNode(att.filename)];
+            });
+            appendAdfBulletSection(adf, 'Attached previews:', unresolvedItems);
+        }
+
+        return adf;
+    }
+
+    const mediaItems = inlineAttachments.map(att => {
+        if (isNonEmptyString(att.contentUrl)) {
+            return [createAdfTextNode(att.filename, [{ type: 'link', attrs: { href: att.contentUrl } }])];
+        }
+        return [createAdfTextNode(att.filename)];
+    });
+    appendAdfBulletSection(adf, 'Attached previews:', mediaItems);
+    return adf;
+}
+
+async function postJiraCommentWithMedia({ ticketKey, comment, uploadedAttachments, skippedVideos, apiConfig, imageLayout }) {
+    let commentResult = { success: false };
+    const layout = imageLayout || 'center';
+
+    try {
+        const v2Base = apiConfig.cloudId
+            ? `https://api.atlassian.com/ex/jira/${apiConfig.cloudId}/rest/api/2`
+            : `${(apiConfig.baseUrl || '').replace(/\/+$/, '')}/rest/api/2`;
+        const v2CommentUrl = `${v2Base}/issue/${ticketKey}/comment`;
+        const wikiBody = buildJiraMediaCommentWikiBody(comment, uploadedAttachments, skippedVideos);
+
+        const v2Resp = await fetch(v2CommentUrl, {
+            method: 'POST',
+            headers: apiConfig.headers,
+            body: JSON.stringify({ body: wikiBody }),
+        });
+
+        if (v2Resp.ok) {
+            let data = null;
+            try { data = await v2Resp.json(); } catch { /* best-effort */ }
+            commentResult = {
+                success: true,
+                commentId: data?.id || null,
+                strategy: 'v2-wiki-markup',
+            };
+        }
+    } catch {
+        // Non-fatal: fall through to ADF strategies.
+    }
+
+    if (!commentResult.success) {
+        await resolveCommentMediaFileIds(apiConfig, ticketKey, uploadedAttachments);
+
+        const hasInlineMediaFileIds = uploadedAttachments.some(att => att.category !== 'video' && isNonEmptyString(att.mediaFileId));
+        if (hasInlineMediaFileIds) {
+            const commentUrl = buildJiraIssueApiUrl(apiConfig, ticketKey, '/comment');
+            const adf = buildJiraMediaCommentAdf(comment, uploadedAttachments, skippedVideos, layout, true);
+
+            const resp = await fetch(commentUrl, {
+                method: 'POST',
+                headers: apiConfig.headers,
+                body: JSON.stringify({ body: adf }),
+            });
+
+            if (resp.ok) {
+                let data = null;
+                try { data = await resp.json(); } catch { /* best-effort */ }
+                commentResult = {
+                    success: true,
+                    commentId: data?.id || null,
+                    strategy: 'v3-adf-mediaFileId',
+                };
+            }
+        }
+    }
+
+    if (!commentResult.success) {
+        const commentUrl = buildJiraIssueApiUrl(apiConfig, ticketKey, '/comment');
+        const fallbackAdf = buildJiraMediaCommentAdf(comment, uploadedAttachments, skippedVideos, layout, false);
+
+        const resp = await fetch(commentUrl, {
+            method: 'POST',
+            headers: apiConfig.headers,
+            body: JSON.stringify({ body: fallbackAdf }),
+        });
+
+        if (resp.ok) {
+            let data = null;
+            try { data = await resp.json(); } catch { /* best-effort */ }
+            commentResult = {
+                success: true,
+                commentId: data?.id || null,
+                strategy: 'v3-adf-text-links',
+                note: 'Videos are attached to the Jira issue and listed by file name in the comment because Jira Cloud does not support inline video playback for this REST workflow.',
+            };
+        } else {
+            const errText = await resp.text();
+            commentResult = {
+                success: false,
+                error: `Comment creation failed (all strategies exhausted). Last error: HTTP ${resp.status}: ${errText.slice(0, 300)}`,
+            };
+        }
+    }
+
+    return commentResult;
+}
+
+async function buildJiraMediaCommentPlan({
+    imagePaths = [],
+    videoPaths = [],
+    entry,
+    messageId,
+    activeEvidenceMessageId,
+    latestOnly = false,
+    includeVideoFrames = true,
+    frameTimestamps,
+    maxVideoFrames = 4,
+}) {
+    const workspaceRoot = PROJECT_ROOT;
+    const plan = {
+        uploadTargets: [],
+        skippedVideos: [],
+        frameWarnings: [],
+        cleanupItems: [],
+        scopeMessageId: undefined,
+        hasMedia: false,
+    };
+    const seenNames = new Set();
+    let sessionImageIndex = 1;
+
+    const pushTarget = (target) => {
+        plan.uploadTargets.push({
+            ...target,
+            fileName: createUniqueAttachmentFileName(target.fileName, seenNames),
+        });
+    };
+
+    for (const rawPath of imagePaths) {
+        const resolvedPath = resolveWorkspaceFilePath(rawPath, workspaceRoot);
+        if (!fs.existsSync(resolvedPath)) {
+            return { error: `File not found: ${rawPath}` };
+        }
+
+        const stat = fs.statSync(resolvedPath);
+        if (!stat.isFile()) {
+            return { error: `Path is not a file: ${rawPath}` };
+        }
+        if (stat.size > JIRA_MAX_ATTACHMENT_SIZE) {
+            return { error: `File exceeds 50 MB limit: ${rawPath} (${(stat.size / (1024 * 1024)).toFixed(1)} MB)` };
+        }
+
+        const ext = path.extname(resolvedPath).toLowerCase();
+        if (!COMMENT_IMAGE_EXTENSIONS.has(ext)) {
+            return { error: `Unsupported image format: ${ext}. Supported: ${[...COMMENT_IMAGE_EXTENSIONS].join(', ')}` };
+        }
+
+        pushTarget({
+            category: 'image',
+            fileName: path.basename(resolvedPath),
+            mimeType: COMMENT_IMAGE_MIME_MAP[ext] || 'application/octet-stream',
+            size: stat.size,
+            buffer: fs.readFileSync(resolvedPath),
+        });
+    }
+
+    for (const rawPath of videoPaths) {
+        const resolvedPath = resolveWorkspaceFilePath(rawPath, workspaceRoot);
+        if (!fs.existsSync(resolvedPath)) {
+            return { error: `File not found: ${rawPath}` };
+        }
+
+        const stat = fs.statSync(resolvedPath);
+        if (!stat.isFile()) {
+            return { error: `Path is not a file: ${rawPath}` };
+        }
+
+        const ext = path.extname(resolvedPath).toLowerCase();
+        if (!COMMENT_VIDEO_EXTENSIONS.has(ext)) {
+            return { error: `Unsupported video format: ${ext}. Supported: ${[...COMMENT_VIDEO_EXTENSIONS].join(', ')}` };
+        }
+
+        const fileName = path.basename(resolvedPath);
+        const mimeType = COMMENT_VIDEO_MIME_MAP[ext] || 'application/octet-stream';
+
+        if (stat.size <= JIRA_MAX_ATTACHMENT_SIZE) {
+            pushTarget({
+                category: 'video',
+                fileName,
+                mimeType,
+                size: stat.size,
+                buffer: fs.readFileSync(resolvedPath),
+            });
+        } else {
+            plan.skippedVideos.push({
+                fileName,
+                error: 'Original recording exceeds Jira 50 MB attachment limit',
+            });
+        }
+
+        if (includeVideoFrames) {
+            try {
+                const { createVideoAnalyzer } = require('./video-analyzer');
+                const analyzer = createVideoAnalyzer({ maxFrames: Math.max(1, maxVideoFrames) });
+                const result = await analyzer.buildVideoContext(resolvedPath);
+                const selectedFrames = selectVideoFrames([{ frames: result.frames }], frameTimestamps, Math.max(1, maxVideoFrames));
+
+                for (const frame of selectedFrames) {
+                    pushTarget({
+                        category: 'frame',
+                        fileName: createCommentFrameFileName(fileName, frame.timestamp),
+                        mimeType: 'image/jpeg',
+                        size: fs.statSync(frame.path).size,
+                        buffer: fs.readFileSync(frame.path),
+                        timestamp: `${frame.timestamp}s`,
+                    });
+                }
+
+                plan.cleanupItems.push({
+                    analyzer,
+                    frames: result.frames || [],
+                    sdkFrames: result.sdkFrames || [],
+                });
+            } catch (error) {
+                plan.frameWarnings.push({
+                    fileName,
+                    error: `Preview frame extraction failed: ${error.message}`,
+                });
+            }
+        }
+    }
+
+    if (entry) {
+        const evidence = collectSessionEvidence(entry, { messageId, activeEvidenceMessageId, latestOnly });
+        plan.scopeMessageId = evidence.scopeMessageId;
+
+        for (const att of evidence.images) {
+            const mimeType = VALID_IMAGE_MIME_TYPES.has(att?.media_type) ? att.media_type : 'image/png';
+            if (!isNonEmptyString(att?.data)) continue;
+
+            const buffer = Buffer.from(att.data, 'base64');
+            if (!buffer.length) continue;
+
+            pushTarget({
+                category: 'image',
+                fileName: createCommentScreenshotFileName(sessionImageIndex, mimeType),
+                mimeType,
+                size: buffer.length,
+                buffer,
+            });
+            sessionImageIndex += 1;
+        }
+
+        if (includeVideoFrames) {
+            const selectedFrames = selectVideoFrames(evidence.videos, frameTimestamps, Math.max(1, maxVideoFrames));
+            for (const frame of selectedFrames) {
+                if (!isNonEmptyString(frame?.path) || !fs.existsSync(frame.path)) continue;
+                const sourceVideo = evidence.videos.find(video => Array.isArray(video?.frames) && video.frames.some(candidate => candidate.path === frame.path));
+                pushTarget({
+                    category: 'frame',
+                    fileName: createCommentFrameFileName(sourceVideo?.filename || sourceVideo?.videoPath || 'recording.mp4', frame.timestamp),
+                    mimeType: 'image/jpeg',
+                    size: fs.statSync(frame.path).size,
+                    buffer: fs.readFileSync(frame.path),
+                    timestamp: `${frame.timestamp}s`,
+                });
+            }
+        }
+
+        for (const video of evidence.videos) {
+            const fileName = video.filename || path.basename(video.videoPath || 'recording.mp4');
+            if (!isNonEmptyString(video?.videoPath) || !fs.existsSync(video.videoPath)) {
+                plan.skippedVideos.push({
+                    fileName,
+                    error: 'Original video file is missing or no longer available.',
+                });
+                continue;
+            }
+
+            const stat = fs.statSync(video.videoPath);
+            if (stat.size > JIRA_MAX_ATTACHMENT_SIZE) {
+                plan.skippedVideos.push({
+                    fileName,
+                    error: 'Original recording exceeds Jira 50 MB attachment limit',
+                });
+                continue;
+            }
+
+            const ext = path.extname(fileName).toLowerCase();
+            const mimeType = COMMENT_VIDEO_MIME_MAP[ext] || 'application/octet-stream';
+            pushTarget({
+                category: 'video',
+                fileName,
+                mimeType,
+                size: stat.size,
+                buffer: fs.readFileSync(video.videoPath),
+            });
+        }
+    }
+
+    plan.hasMedia = plan.uploadTargets.length > 0 || plan.skippedVideos.length > 0;
+    return plan;
+}
+
+function cleanupJiraMediaCommentPlan(plan) {
+    if (!plan || !Array.isArray(plan.cleanupItems)) return;
+    for (const item of plan.cleanupItems) {
+        try {
+            item.analyzer?.cleanup?.(item.frames || []);
+            item.analyzer?.cleanup?.(item.sdkFrames || []);
+        } catch {
+            // Best-effort cleanup.
+        }
+    }
+}
+
+async function addCommentWithMediaToJira({
+    ticketKey,
+    comment,
+    jiraConfig,
+    apiConfig,
+    imagePaths = [],
+    videoPaths = [],
+    entry,
+    messageId,
+    activeEvidenceMessageId,
+    latestOnly = false,
+    includeVideoFrames = true,
+    frameTimestamps,
+    maxVideoFrames = 4,
+    imageLayout,
+    toolName = 'add_comment_with_media',
+    deps,
+}) {
+    if (!isNonEmptyString(comment)) {
+        return { success: false, error: 'Comment text is required.' };
+    }
+
+    const plan = await buildJiraMediaCommentPlan({
+        imagePaths,
+        videoPaths,
+        entry,
+        messageId,
+        activeEvidenceMessageId,
+        latestOnly,
+        includeVideoFrames,
+        frameTimestamps,
+        maxVideoFrames,
+    });
+
+    if (plan.error) return { success: false, error: plan.error };
+    if (!plan.hasMedia) {
+        return {
+            success: false,
+            error: 'No images or videos were available to attach to the Jira comment.',
+            scopeMessageId: plan.scopeMessageId,
+        };
+    }
+
+    const attachUrl = buildJiraAttachmentUrl(ticketKey, jiraConfig);
+    const uploadedAttachments = [];
+    const failedUploads = [];
+
+    try {
+        if (deps?.chatManager?.broadcastToolProgress) {
+            deps.chatManager.broadcastToolProgress(toolName, {
+                phase: 'uploading',
+                detail: `Uploading ${plan.uploadTargets.length} media attachment(s) to ${ticketKey}...`,
+            });
+        }
+
+        for (const target of plan.uploadTargets) {
+            const boundaryPrefix = target.category === 'video'
+                ? 'CommentVideo'
+                : target.category === 'frame'
+                    ? 'CommentFrame'
+                    : 'CommentImage';
+            const result = await uploadJiraAttachment(
+                attachUrl,
+                jiraConfig,
+                target.fileName,
+                target.mimeType,
+                target.buffer,
+                boundaryPrefix,
+                { category: target.category }
+            );
+
+            if (result.success) {
+                uploadedAttachments.push({
+                    id: result.attachmentMeta?.id ? String(result.attachmentMeta.id) : '',
+                    filename: result.attachmentMeta?.filename || target.fileName,
+                    mimeType: result.attachmentMeta?.mimeType || target.mimeType,
+                    size: result.attachmentMeta?.size || target.size,
+                    contentUrl: result.attachmentMeta?.content || '',
+                    category: target.category,
+                    timestamp: target.timestamp || undefined,
+                });
+            } else {
+                failedUploads.push({
+                    fileName: target.fileName,
+                    category: target.category,
+                    error: result.error,
+                });
+            }
+        }
+
+        if (uploadedAttachments.length === 0) {
+            return {
+                success: false,
+                error: 'All media uploads failed. Cannot create a Jira comment with media.',
+                failedUploads,
+                skippedVideos: plan.skippedVideos.length > 0 ? plan.skippedVideos : undefined,
+                frameWarnings: plan.frameWarnings.length > 0 ? plan.frameWarnings : undefined,
+                scopeMessageId: plan.scopeMessageId,
+            };
+        }
+
+        if (deps?.chatManager?.broadcastToolProgress) {
+            deps.chatManager.broadcastToolProgress(toolName, {
+                phase: 'commenting',
+                detail: `Creating Jira comment on ${ticketKey} with uploaded media...`,
+            });
+        }
+
+        const commentResult = await postJiraCommentWithMedia({
+            ticketKey,
+            comment,
+            uploadedAttachments,
+            skippedVideos: plan.skippedVideos,
+            apiConfig,
+            imageLayout,
+        });
+
+        const uploadedCounts = {
+            images: uploadedAttachments.filter(att => att.category === 'image').length,
+            frames: uploadedAttachments.filter(att => att.category === 'frame').length,
+            videos: uploadedAttachments.filter(att => att.category === 'video').length,
+        };
+
+        if (deps?.chatManager?.broadcastToolProgress) {
+            deps.chatManager.broadcastToolProgress(toolName, {
+                phase: commentResult.success ? 'complete' : 'failed',
+                detail: commentResult.success
+                    ? `Comment with media added to ${ticketKey}`
+                    : `Comment creation failed after upload: ${commentResult.error}`,
+            });
+        }
+
+        return {
+            success: commentResult.success,
+            commentId: commentResult.commentId || undefined,
+            strategy: commentResult.strategy || undefined,
+            note: commentResult.note || (uploadedCounts.videos > 0 || plan.skippedVideos.length > 0
+                ? 'Videos are attached to the Jira issue and listed by file name in the comment because Jira Cloud does not support inline video playback for this REST workflow.'
+                : undefined),
+            error: commentResult.error || undefined,
+            scopeMessageId: plan.scopeMessageId,
+            uploaded: uploadedCounts,
+            failedUploads,
+            skippedVideos: plan.skippedVideos.length > 0 ? plan.skippedVideos : undefined,
+            frameWarnings: plan.frameWarnings.length > 0 ? plan.frameWarnings : undefined,
+            uploadedAttachments,
+        };
+    } finally {
+        cleanupJiraMediaCommentPlan(plan);
     }
 }
 
@@ -3429,6 +3866,225 @@ function createCustomTools(defineTool, agentName, deps = {}) {
     // TOOL 4: get_exploration_data
     // Available to: scriptgenerator, codereviewer
     // ───────────────────────────────────────────────────────────────────
+    const validateExplorationPayload = (data, expectedTicketId = null) => {
+        const errors = [];
+        const warnings = [];
+        const semanticMetrics = [];
+
+        const INTERACTIVE_ROLES = new Set([
+            'button', 'link', 'textbox', 'searchbox', 'combobox', 'listbox',
+            'option', 'checkbox', 'radio', 'switch', 'slider', 'spinbutton',
+            'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
+            'treeitem', 'gridcell', 'columnheader', 'rowheader',
+            'input', 'select', 'textarea',
+        ]);
+
+        const NON_SEMANTIC_ROLES = new Set(['generic', 'presentation', 'none', 'separator']);
+        const asTrimmedString = (value) => (typeof value === 'string' ? value.trim() : '');
+        const hasSignal = (...values) => values.some(value => asTrimmedString(value).length > 0);
+
+        const getSnapshotSemanticMetrics = (snapshot) => {
+            const elements = Array.isArray(snapshot?.elements) ? snapshot.elements : [];
+            const roleSet = new Set();
+            let selectorAnchoredElements = 0;
+            let contentBearingElements = 0;
+            let semanticElements = 0;
+            let interactiveElements = 0;
+
+            for (const element of elements) {
+                if (!element || typeof element !== 'object' || Array.isArray(element)) {
+                    continue;
+                }
+
+                const role = asTrimmedString(element.role || element.ariaRole).toLowerCase();
+                const strategy = asTrimmedString(element.strategy).toLowerCase();
+                const selector = asTrimmedString(element.selector || element.css || element.xpath);
+
+                const hasSelectorAnchor = hasSignal(
+                    element.ref,
+                    element.selector,
+                    element.css,
+                    element.xpath,
+                    element.testId,
+                    element.dataTestId,
+                    element.dataQa,
+                    element.bestSelector,
+                    element.locator,
+                    element.ariaLabel
+                );
+
+                const hasContentSignal = hasSignal(
+                    element.text,
+                    element.name,
+                    element.placeholder,
+                    element.value,
+                    element.label,
+                    element.title,
+                    element.ariaLabel,
+                    element.alt
+                );
+
+                const hasSemanticSignal = role.length > 0 ||
+                    strategy.startsWith('get_by_') ||
+                    hasSignal(element.ariaLabel, element.label);
+
+                const hasInteractiveSignal = INTERACTIVE_ROLES.has(role) ||
+                    ['get_by_role', 'get_by_test_id', 'get_by_label', 'get_by_text', 'get_by_placeholder'].includes(strategy) ||
+                    /(button|input|select|textarea|\[role=|\ba\[)/i.test(selector);
+
+                if (hasSelectorAnchor) {
+                    selectorAnchoredElements++;
+                }
+                if (hasContentSignal) {
+                    contentBearingElements++;
+                }
+                if (hasSemanticSignal) {
+                    semanticElements++;
+                }
+                if (hasInteractiveSignal) {
+                    interactiveElements++;
+                }
+
+                if (role && !NON_SEMANTIC_ROLES.has(role)) {
+                    roleSet.add(role);
+                }
+            }
+
+            return {
+                selectorAnchoredElements,
+                contentBearingElements,
+                semanticElements,
+                interactiveElements,
+                roleDiversity: roleSet.size,
+                totalElements: elements.length,
+            };
+        };
+
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            return {
+                valid: false,
+                errors: ['explorationData must be a JSON object'],
+                warnings,
+                normalized: null,
+            };
+        }
+
+        const allowedSources = new Set(['mcp-live-snapshot', 'mcp-snapshot']);
+        if (!allowedSources.has(data.source)) {
+            errors.push('source must be "mcp-live-snapshot" or "mcp-snapshot"');
+        }
+
+        if (!Array.isArray(data.snapshots) || data.snapshots.length === 0) {
+            errors.push('snapshots array must be non-empty');
+        } else {
+            data.snapshots.forEach((snapshot, index) => {
+                if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+                    errors.push(`snapshots[${index}] must be an object`);
+                    return;
+                }
+                if (!snapshot.url || typeof snapshot.url !== 'string') {
+                    errors.push(`snapshots[${index}].url must be a non-empty string`);
+                }
+                if (!Array.isArray(snapshot.elements) || snapshot.elements.length === 0) {
+                    errors.push(`snapshots[${index}].elements must be a non-empty array`);
+                    return;
+                }
+
+                const invalidElementCount = snapshot.elements.filter((el) => {
+                    if (!el || typeof el !== 'object' || Array.isArray(el)) return true;
+                    return !(el.ref || el.role || el.name || el.selector || el.text);
+                }).length;
+
+                if (invalidElementCount > 0) {
+                    errors.push(`snapshots[${index}].elements contains ${invalidElementCount} invalid element(s) missing ref/role/name/selector/text`);
+                }
+
+                const metrics = getSnapshotSemanticMetrics(snapshot);
+                semanticMetrics.push({ index, ...metrics, url: snapshot.url });
+
+                const minSelectors = Math.min(2, metrics.totalElements);
+                const minContentSignals = Math.min(2, metrics.totalElements);
+                const minSemanticSignals = Math.min(2, metrics.totalElements);
+                const minRoleDiversity = metrics.totalElements >= 6 ? 2 : 1;
+                const minInteractiveSignals = metrics.totalElements >= 3 ? 1 : 0;
+
+                if (metrics.selectorAnchoredElements < minSelectors) {
+                    errors.push(
+                        `snapshots[${index}] semantic depth failure: expected >=${minSelectors} selector-anchored element(s), got ${metrics.selectorAnchoredElements}`
+                    );
+                }
+
+                if (metrics.contentBearingElements < minContentSignals) {
+                    errors.push(
+                        `snapshots[${index}] semantic depth failure: expected >=${minContentSignals} content-bearing element(s), got ${metrics.contentBearingElements}`
+                    );
+                }
+
+                if (metrics.semanticElements < minSemanticSignals) {
+                    errors.push(
+                        `snapshots[${index}] semantic depth failure: expected >=${minSemanticSignals} semantic element(s) (role/aria/get_by), got ${metrics.semanticElements}`
+                    );
+                }
+
+                if (metrics.roleDiversity < minRoleDiversity) {
+                    errors.push(
+                        `snapshots[${index}] semantic depth failure: expected role diversity >=${minRoleDiversity}, got ${metrics.roleDiversity}`
+                    );
+                }
+
+                if (metrics.interactiveElements < minInteractiveSignals) {
+                    errors.push(
+                        `snapshots[${index}] semantic depth failure: expected >=${minInteractiveSignals} interactive evidence element(s), got ${metrics.interactiveElements}`
+                    );
+                }
+
+                if (metrics.totalElements < 5) {
+                    warnings.push(
+                        `snapshots[${index}] has only ${metrics.totalElements} element(s); consider deeper exploration for stronger selector coverage`
+                    );
+                }
+            });
+        }
+
+        if (data.pagesVisited !== undefined && !Array.isArray(data.pagesVisited)) {
+            errors.push('pagesVisited must be an array when provided');
+        }
+
+        if (expectedTicketId && data.ticketId && data.ticketId !== expectedTicketId) {
+            warnings.push(`ticketId mismatch: expected ${expectedTicketId}, got ${data.ticketId}`);
+        }
+
+        const selectorCount = Number.isFinite(data.selectorCount)
+            ? data.selectorCount
+            : (Array.isArray(data.snapshots)
+                ? data.snapshots.reduce((sum, snap) => sum + ((snap?.elements?.length) || 0), 0)
+                : 0);
+
+        const normalized = {
+            ...data,
+            ticketId: data.ticketId || expectedTicketId || null,
+            timestamp: data.timestamp || new Date().toISOString(),
+            pagesVisited: Array.isArray(data.pagesVisited) ? data.pagesVisited : [],
+            popupsDetected: Array.isArray(data.popupsDetected) ? data.popupsDetected : [],
+            selectorCount,
+            semanticDepth: {
+                validatedSnapshots: semanticMetrics.length,
+                metrics: semanticMetrics,
+            },
+        };
+
+        if (normalized.pagesVisited.length === 0) {
+            warnings.push('pagesVisited is empty; include visited URLs for stronger traceability');
+        }
+
+        return {
+            valid: errors.length === 0,
+            errors,
+            warnings,
+            normalized,
+        };
+    };
+
     if (['scriptgenerator', 'codereviewer'].includes(agentName)) {
         tools.push(defineTool('get_exploration_data', {
             description:
@@ -3457,15 +4113,30 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     }
 
                     const data = JSON.parse(fs.readFileSync(explorationFile, 'utf-8'));
+                    const validation = validateExplorationPayload(data, ticketId);
+
+                    if (!validation.valid) {
+                        return JSON.stringify({
+                            found: false,
+                            corrupted: true,
+                            message: `Exploration data for ${ticketId} is invalid and cannot be trusted for script generation.`,
+                            validationErrors: validation.errors,
+                            warnings: validation.warnings,
+                            fix: 'Re-run MCP exploration and save_exploration_data to regenerate a valid artifact.',
+                        }, null, 2);
+                    }
+
+                    const normalized = validation.normalized;
                     return JSON.stringify({
                         found: true,
-                        source: data.source,
-                        timestamp: data.timestamp,
-                        pagesVisited: data.pagesVisited || [],
-                        selectorCount: data.selectorCount || 0,
-                        popupsDetected: data.popupsDetected || [],
-                        snapshotCount: (data.snapshots || []).length,
-                        data,
+                        source: normalized.source,
+                        timestamp: normalized.timestamp,
+                        pagesVisited: normalized.pagesVisited,
+                        selectorCount: normalized.selectorCount,
+                        popupsDetected: normalized.popupsDetected,
+                        snapshotCount: (normalized.snapshots || []).length,
+                        warnings: validation.warnings,
+                        data: normalized,
                     }, null, 2);
                 } catch (error) {
                     return JSON.stringify({ found: false, error: error.message });
@@ -3641,21 +4312,42 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     });
                 }
                 const { QualityGates } = require('../../.github/agents/lib/quality-gates');
-                const qg = new QualityGates();
+                const workflow = {
+                    ticketId,
+                    artifacts: {
+                        excelPath: gate === 'excel' ? artifactPath : undefined,
+                        explorationPath: gate === 'exploration' ? artifactPath : undefined,
+                        specPath: gate === 'script' ? artifactPath : undefined,
+                    },
+                };
 
                 let result;
                 switch (gate) {
                     case 'excel':
-                        result = qg.validateExcelCreated(artifactPath, ticketId);
+                        result = QualityGates.validateExcelCreated(workflow);
                         break;
                     case 'exploration':
-                        result = qg.validateMCPExploration(artifactPath, ticketId);
+                        result = QualityGates.validateMCPExploration(workflow, ticketId);
                         break;
                     case 'script':
-                        result = qg.validateScriptGenerated(artifactPath, ticketId);
+                        result = QualityGates.validateScriptGenerated(workflow, ticketId);
                         break;
                     case 'execution':
-                        result = qg.validateExecution(artifactPath, ticketId);
+                        if (!fs.existsSync(artifactPath)) {
+                            result = {
+                                passed: false,
+                                error: `Execution artifact not found: ${artifactPath}`,
+                                fix: 'Run execution stage and provide a valid results artifact path',
+                            };
+                        } else {
+                            const stats = fs.statSync(artifactPath);
+                            result = {
+                                passed: stats.size > 0,
+                                size: stats.size,
+                                path: artifactPath,
+                                error: stats.size > 0 ? null : 'Execution artifact is empty',
+                            };
+                        }
                         break;
                     default:
                         result = { passed: false, error: `Unknown gate: ${gate}` };
@@ -3694,21 +4386,19 @@ function createCustomTools(defineTool, agentName, deps = {}) {
             },
             handler: async ({ ticketId, explorationData }) => {
                 try {
-                    const data = JSON.parse(explorationData);
+                    const parsed = JSON.parse(explorationData);
+                    const validation = validateExplorationPayload(parsed, ticketId);
 
-                    // Enforce required fields
-                    if (data.source !== 'mcp-live-snapshot') {
+                    if (!validation.valid) {
                         return JSON.stringify({
                             saved: false,
-                            error: 'source must be "mcp-live-snapshot"',
+                            error: 'Exploration payload validation failed',
+                            validationErrors: validation.errors,
+                            warnings: validation.warnings,
                         });
                     }
-                    if (!data.snapshots || data.snapshots.length === 0) {
-                        return JSON.stringify({
-                            saved: false,
-                            error: 'snapshots array must be non-empty',
-                        });
-                    }
+
+                    const data = validation.normalized;
 
                     const explorationDir = path.join(__dirname, '..', 'exploration-data');
                     if (!fs.existsSync(explorationDir)) {
@@ -3723,6 +4413,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         path: filePath,
                         selectorCount: data.selectorCount || 0,
                         pagesVisited: data.pagesVisited || [],
+                        warnings: validation.warnings,
                     });
                 } catch (error) {
                     return JSON.stringify({ saved: false, error: error.message });
@@ -3794,7 +4485,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
         tools.push(defineTool('fetch_jira_ticket', {
             description:
                 'Fetches Jira ticket details (summary, description, acceptance criteria, labels, ' +
-                'status, priority, issue type, components, time tracking, parent relationship, subtasks, and issue links) via the Atlassian REST API. ' +
+                'status, priority, issue type, components, fix versions, time tracking, parent relationship, subtasks, and issue links) via the Atlassian REST API. ' +
                 'For TestGenie, also computes a sparse-ticket score and forces KB enrichment when coverage context is insufficient.',
             parameters: {
                 type: 'object',
@@ -4679,14 +5370,16 @@ function createCustomTools(defineTool, agentName, deps = {}) {
 
     // ───────────────────────────────────────────────────────────────────
     // TOOL 11a4: search_jira_users
-    // Available to: taskgenie
+    // Available to: buggenie, testgenie, taskgenie
     // Returns assignable Jira users for a target issue or project.
+    // Also used to resolve display names to accountIds for @mentions.
     // ───────────────────────────────────────────────────────────────────
-    if (agentName === 'taskgenie') {
+    if (['buggenie', 'testgenie', 'taskgenie'].includes(agentName)) {
         tools.push(defineTool('search_jira_users', {
             description:
                 'Searches Jira users who are assignable to a target issue or project. ' +
                 'Use this before create_jira_ticket when the user asks to assign work to a named person such as Monica or Khushboo. ' +
+                'Also use this to resolve display names to accountIds for @mentions in comments and descriptions. ' +
                 'Prefer issueKey when available so results are filtered to users Jira can actually assign on that issue.',
             parameters: {
                 type: 'object',
@@ -5132,7 +5825,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         }, null, 2);
                     }
 
-                    const firstClassEditableFieldIds = new Set(['summary', 'description', 'priority', 'labels', 'timetracking']);
+                    const firstClassEditableFieldIds = new Set(['summary', 'description', 'priority', 'labels', 'fixVersions', 'timetracking']);
                     const editableCustomFields = editableFields.filter(field => field.fieldId.startsWith('customfield_'));
                     const editableButNotFirstClass = editableFields.filter(field => !firstClassEditableFieldIds.has(field.fieldId));
 
@@ -5145,11 +5838,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         editableButNotFirstClass,
                         availableTransitions,
                         customToolCoverage: {
-                            readFields: ['summary', 'description', 'acceptanceCriteria', 'storyPoints', 'status', 'priority', 'labels', 'components', 'assignee', 'reporter', 'created', 'updated', 'sprint', 'timetracking', 'epic', 'parent', 'subtasks', 'issueLinks'],
+                            readFields: ['summary', 'description', 'acceptanceCriteria', 'storyPoints', 'status', 'priority', 'labels', 'fixVersions', 'components', 'assignee', 'reporter', 'created', 'updated', 'sprint', 'timetracking', 'epic', 'parent', 'subtasks', 'issueLinks'],
                             createFields: ['projectKey', 'summary', 'description', 'issueType', 'priority', 'labels', 'environment', 'linkedIssueKey', 'linkType', 'parentIssueKey', 'assigneeAccountId', 'originalEstimate', 'remainingEstimate'],
-                            updateFields: ['summary', 'description', 'priority', 'labels', 'addLabels', 'comment'],
+                            updateFields: ['summary', 'description', 'priority', 'labels', 'addLabels', 'fixVersions', 'addFixVersions', 'removeFixVersions', 'comment'],
+                            versionOperations: ['get_jira_project_versions'],
                             discoveryOperations: ['search_jira_issues', 'search_jira_epics'],
-                            dedicatedOperations: ['get_jira_epic', 'get_jira_epic_issues', 'list_jira_issues_without_epic', 'transition_jira_ticket', 'delete_jira_ticket', 'log_jira_work', 'update_jira_estimates', ...(agentName === 'taskgenie' ? ['search_jira_users', 'assign_jira_ticket', 'remove_jira_issue_link'] : [])],
+                            dedicatedOperations: ['get_jira_epic', 'get_jira_epic_issues', 'list_jira_issues_without_epic', 'transition_jira_ticket', 'delete_jira_ticket', 'delete_jira_comment', 'edit_jira_comment', 'log_jira_work', 'update_jira_estimates', 'link_jira_issues', 'remove_jira_issue_link', 'search_jira_users', ...(agentName === 'taskgenie' ? ['assign_jira_ticket'] : [])],
                         },
                         knownFieldAliases: {
                             acceptanceCriteria: ['customfield_10037', 'customfield_10038'],
@@ -5239,10 +5933,18 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         type: 'string',
                         description: 'Optional remaining estimate for Jira time tracking (for example "1h" or "4d"). Use only when the user explicitly asks to set the remaining estimate field.',
                     },
+                    mentions: {
+                        type: 'string',
+                        description: 'Optional JSON array of users to @mention in the description. Each entry: {"accountId":"...","displayName":"..."}. Use search_jira_users to resolve names first. Mention nodes trigger Jira notifications.',
+                    },
+                    evidenceCommentMode: {
+                        type: 'string',
+                        description: 'Optional BugGenie evidence presentation mode. Use "attachments" (default) to attach active chat evidence only, or "comment" to add an evidence comment with inline screenshots, preview frames, and recording file names after ticket creation.',
+                    },
                 },
                 required: ['summary', 'description'],
             },
-            handler: async ({ projectKey, summary, description, issueType, priority, labels, environment, jiraBaseUrl, linkedIssueKey, parentIssueKey, linkType, assigneeAccountId, originalEstimate, remainingEstimate }) => {
+            handler: async ({ projectKey, summary, description, issueType, priority, labels, environment, jiraBaseUrl, linkedIssueKey, parentIssueKey, linkType, assigneeAccountId, originalEstimate, remainingEstimate, mentions, evidenceCommentMode }) => {
                 try {
                     if (deps?.chatManager?.broadcastToolProgress) {
                         deps.chatManager.broadcastToolProgress('create_jira_ticket', {
@@ -5258,6 +5960,16 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     const normalizedParentIssue = isNonEmptyString(parentIssueKey)
                         ? normalizeJiraTicketInput(parentIssueKey, latestUserMessage)
                         : { ticketId: null, jiraBaseUrl: null, source: 'none' };
+                    const resolvedEvidenceCommentMode = isNonEmptyString(evidenceCommentMode)
+                        ? evidenceCommentMode.trim().toLowerCase()
+                        : 'attachments';
+
+                    if (!['attachments', 'comment'].includes(resolvedEvidenceCommentMode)) {
+                        return JSON.stringify({
+                            success: false,
+                            error: 'evidenceCommentMode must be either "attachments" or "comment" when provided.',
+                        });
+                    }
 
                     if (linkedIssueKey && !normalizedLinkedIssue.ticketId) {
                         return JSON.stringify({
@@ -5299,7 +6011,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         fields: {
                             project: { key: resolvedProject },
                             summary,
-                            description: markdownToAdf(description),
+                            description: markdownToAdf(applyMentions(description, mentions)),
                             issuetype: { name: resolvedType },
                             priority: { name: resolvedPriority },
                         },
@@ -5401,6 +6113,9 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     ].filter(Boolean);
                     const createNotes = [
                         normalizedLinkedIssue.ticketId ? `Will link the new ticket to ${normalizedLinkedIssue.ticketId}${isNonEmptyString(linkType) ? ` using ${linkType.trim()}` : ''}.` : '',
+                        String(issueType || 'Bug').trim().toLowerCase() === 'bug' && resolvedEvidenceCommentMode === 'comment'
+                            ? 'After ticket creation, active chat evidence will be posted as a Jira comment with inline screenshots, preview frames, and recording file names.'
+                            : '',
                     ].filter(Boolean);
                     const createPreview = buildMutationPreview({
                         guardrail: buildJiraMutationGuardrailMetadata('create_jira_ticket'),
@@ -5501,6 +6216,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     }
 
                     let evidenceAttachments;
+                    let evidenceComment;
                     if (String(resolvedType).toLowerCase() === 'bug') {
                         const sessionResult = getActiveSessionEntry(undefined, deps);
                         if (!sessionResult.error) {
@@ -5508,18 +6224,43 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                             if (!attachmentConfig.error) {
                                 if (deps?.chatManager?.broadcastToolProgress) {
                                     deps.chatManager.broadcastToolProgress('create_jira_ticket', {
-                                        phase: 'jira', message: `Ticket ${ticketKey} created — attaching chat evidence...`, step: normalizedLinkedIssue.ticketId || normalizedParentIssue.ticketId ? 5 : 4,
+                                        phase: 'jira', message: resolvedEvidenceCommentMode === 'comment'
+                                            ? `Ticket ${ticketKey} created — adding chat evidence comment...`
+                                            : `Ticket ${ticketKey} created — attaching chat evidence...`, step: normalizedLinkedIssue.ticketId || normalizedParentIssue.ticketId ? 5 : 4,
                                     });
                                 }
 
-                                evidenceAttachments = await attachEvidenceToJira({
-                                    ticketKey,
-                                    jiraConfig: attachmentConfig,
-                                    entry: sessionResult.entry,
-                                    activeEvidenceMessageId: sessionResult.entry?.sessionContext?.activeEvidenceMessageId,
-                                });
-                                if (!evidenceAttachments.hasEvidence) {
-                                    evidenceAttachments = undefined;
+                                if (resolvedEvidenceCommentMode === 'comment') {
+                                    evidenceComment = await addCommentWithMediaToJira({
+                                        ticketKey,
+                                        comment: [
+                                            '**Active chat evidence attached for this bug ticket.**',
+                                            'Screenshots and selected preview frames are shown inline below when available.',
+                                            'Original recordings are listed by file name in the Video evidence section when available.',
+                                        ].join('\n'),
+                                        jiraConfig: attachmentConfig,
+                                        apiConfig: jiraConfig,
+                                        entry: sessionResult.entry,
+                                        activeEvidenceMessageId: sessionResult.entry?.sessionContext?.activeEvidenceMessageId,
+                                        includeVideoFrames: true,
+                                        maxVideoFrames: 4,
+                                        toolName: 'create_jira_ticket',
+                                        deps,
+                                    });
+
+                                    if (!evidenceComment.success && /^No images or videos were available/i.test(String(evidenceComment.error || ''))) {
+                                        evidenceComment = undefined;
+                                    }
+                                } else {
+                                    evidenceAttachments = await attachEvidenceToJira({
+                                        ticketKey,
+                                        jiraConfig: attachmentConfig,
+                                        entry: sessionResult.entry,
+                                        activeEvidenceMessageId: sessionResult.entry?.sessionContext?.activeEvidenceMessageId,
+                                    });
+                                    if (!evidenceAttachments.hasEvidence) {
+                                        evidenceAttachments = undefined;
+                                    }
                                 }
                             }
                         }
@@ -5534,6 +6275,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                             : '',
                         evidenceAttachments?.hasEvidence
                             ? `Attached ${evidenceAttachments.totals?.images || 0} screenshot(s), ${evidenceAttachments.totals?.videos || 0} recording(s), and ${evidenceAttachments.totals?.frames || 0} frame image(s) from the active chat evidence.`
+                            : '',
+                        evidenceComment?.success
+                            ? `Added an evidence comment with ${evidenceComment.uploaded?.images || 0} inline screenshot(s), ${evidenceComment.uploaded?.frames || 0} preview frame(s), and ${evidenceComment.uploaded?.videos || 0} listed recording name(s) from the active chat evidence.`
+                            : '',
+                        evidenceComment && evidenceComment.success === false && isNonEmptyString(evidenceComment.error)
+                            ? `Adding the evidence comment failed: ${evidenceComment.error}`
                             : '',
                     ].filter(Boolean);
                     const createReceipt = buildMutationReceipt({
@@ -5562,12 +6309,14 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         assignee: assigneeAccountId ? { accountId: assigneeAccountId } : undefined,
                         parent: normalizedParentIssue.ticketId ? { key: normalizedParentIssue.ticketId } : undefined,
                         link: linkResult || undefined,
+                        evidenceCommentMode: resolvedEvidenceCommentMode,
                         receipt: createReceipt,
                         guardrail: buildMutationResultGuardrail(createApproval.guardrail, {
                             approved: true,
                             mode: createApproval.mode,
                         }),
                         evidenceAttachments,
+                        evidenceComment,
                     }, null, 2);
                 } catch (error) {
                     return JSON.stringify({
@@ -5581,11 +6330,178 @@ function createCustomTools(defineTool, agentName, deps = {}) {
     }
 
     // ───────────────────────────────────────────────────────────────────
+    // TOOL 11b0: link_jira_issues
+    // Available to: buggenie, testgenie, taskgenie
+    // Creates a link between two existing Jira issues.
+    // ───────────────────────────────────────────────────────────────────
+    if (['buggenie', 'testgenie', 'taskgenie'].includes(agentName)) {
+        tools.push(defineTool('link_jira_issues', {
+            description:
+                'Creates a link between two existing Jira issues. ' +
+                'Use this when you need to associate two tickets (e.g., relates to, blocks, is blocked by, duplicates). ' +
+                'This does NOT create a new ticket — it only links two existing ones.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    inwardIssueKey: {
+                        type: 'string',
+                        description: 'Jira ticket key or browse URL for the inward (source) issue.',
+                    },
+                    outwardIssueKey: {
+                        type: 'string',
+                        description: 'Jira ticket key or browse URL for the outward (target) issue.',
+                    },
+                    linkType: {
+                        type: 'string',
+                        description: 'Link type name. Common values: "Relates" (default), "Blocks", "Duplicate", "Cloners". Use get_jira_ticket_capabilities to see available link types.',
+                    },
+                    jiraBaseUrl: {
+                        type: 'string',
+                        description: 'Optional Jira base URL override.',
+                    },
+                },
+                required: ['inwardIssueKey', 'outwardIssueKey'],
+            },
+            handler: async ({ inwardIssueKey, outwardIssueKey, linkType, jiraBaseUrl }) => {
+                try {
+                    const latestUserMessage = getLatestUserMessageText(deps);
+                    const normalizedInward = normalizeJiraTicketInput(inwardIssueKey, latestUserMessage);
+                    const normalizedOutward = normalizeJiraTicketInput(outwardIssueKey, latestUserMessage);
+
+                    if (!normalizedInward.ticketId) {
+                        return JSON.stringify({ success: false, error: 'Could not resolve inwardIssueKey to a valid Jira ticket key.' });
+                    }
+                    if (!normalizedOutward.ticketId) {
+                        return JSON.stringify({ success: false, error: 'Could not resolve outwardIssueKey to a valid Jira ticket key.' });
+                    }
+
+                    const jiraConfig = getJiraApiConfig({ jiraBaseUrl: jiraBaseUrl || normalizedInward.jiraBaseUrl || normalizedOutward.jiraBaseUrl });
+                    if (jiraConfig.error) {
+                        return JSON.stringify({ success: false, error: jiraConfig.error });
+                    }
+
+                    const resolvedLinkType = (linkType || 'Relates').trim();
+                    const inwardUrl = buildJiraBrowseUrl(jiraConfig, normalizedInward.ticketId);
+                    const outwardUrl = buildJiraBrowseUrl(jiraConfig, normalizedOutward.ticketId);
+
+                    // Build mutation preview for approval
+                    const linkChanges = [createMutationFieldChange({
+                        field: 'issueLink',
+                        label: 'Issue Link',
+                        before: '',
+                        after: `${resolvedLinkType}: ${normalizedInward.ticketId} ↔ ${normalizedOutward.ticketId}`,
+                    })].filter(Boolean);
+
+                    const linkPreview = buildMutationPreview({
+                        guardrail: buildJiraMutationGuardrailMetadata('link_jira_issues'),
+                        title: `Approve linking ${normalizedInward.ticketId} ↔ ${normalizedOutward.ticketId}`,
+                        subject: buildJiraMutationSubject({
+                            ticketId: normalizedInward.ticketId,
+                            ticketUrl: inwardUrl,
+                        }),
+                        changes: linkChanges,
+                        notes: [`Link type: ${resolvedLinkType}`, `Target: ${normalizedOutward.ticketId}`],
+                        consequence: `A "${resolvedLinkType}" link will be created between ${normalizedInward.ticketId} and ${normalizedOutward.ticketId}.`,
+                    });
+                    const linkPreviewLines = buildJiraMutationPreviewLines([], linkPreview);
+
+                    // Request approval
+                    const approval = await requireJiraMutationApproval({
+                        deps,
+                        toolName: 'link_jira_issues',
+                        ticketId: normalizedInward.ticketId,
+                        relatedIssueKey: normalizedOutward.ticketId,
+                        consequence: `A "${resolvedLinkType}" link will be created between ${normalizedInward.ticketId} and ${normalizedOutward.ticketId}.`,
+                        previewLines: linkPreviewLines,
+                        preview: linkPreview,
+                    });
+
+                    if (!approval.approved) {
+                        return JSON.stringify(buildJiraMutationApprovalFailure({
+                            approval,
+                            ticketId: normalizedInward.ticketId,
+                            ticketUrl: inwardUrl,
+                            previewLines: linkPreviewLines,
+                            preview: linkPreview,
+                        }), null, 2);
+                    }
+
+                    // Broadcast progress
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('link_jira_issues', {
+                            phase: 'jira',
+                            message: `Creating ${resolvedLinkType} link: ${normalizedInward.ticketId} ↔ ${normalizedOutward.ticketId}...`,
+                            step: 1,
+                        });
+                    }
+
+                    // POST to /issueLink
+                    const linkPayload = {
+                        type: { name: resolvedLinkType },
+                        inwardIssue: { key: normalizedInward.ticketId },
+                        outwardIssue: { key: normalizedOutward.ticketId },
+                    };
+
+                    const linkResp = await fetch(`${jiraConfig.apiBase}/issueLink`, {
+                        method: 'POST',
+                        headers: jiraConfig.headers,
+                        body: JSON.stringify(linkPayload),
+                    });
+
+                    if (!linkResp.ok && linkResp.status !== 201) {
+                        const errText = await linkResp.text();
+                        return JSON.stringify({
+                            success: false,
+                            error: `Issue link creation failed: HTTP ${linkResp.status}`,
+                            details: errText,
+                            inwardIssue: normalizedInward.ticketId,
+                            outwardIssue: normalizedOutward.ticketId,
+                            linkType: resolvedLinkType,
+                        }, null, 2);
+                    }
+
+                    const receipt = buildMutationReceipt({
+                        guardrail: approval.guardrail,
+                        title: `Linked ${normalizedInward.ticketId} ↔ ${normalizedOutward.ticketId}`,
+                        subject: buildJiraMutationSubject({
+                            ticketId: normalizedInward.ticketId,
+                            ticketUrl: inwardUrl,
+                        }),
+                        changes: linkChanges,
+                        notes: [`Link type: ${resolvedLinkType}`, `Target: ${normalizedOutward.ticketId}`],
+                        outcome: `Created "${resolvedLinkType}" link between ${normalizedInward.ticketId} and ${normalizedOutward.ticketId}.`,
+                        approval: { approved: true, mode: approval.mode },
+                    });
+
+                    return JSON.stringify({
+                        success: true,
+                        inwardIssue: normalizedInward.ticketId,
+                        inwardIssueUrl: inwardUrl,
+                        outwardIssue: normalizedOutward.ticketId,
+                        outwardIssueUrl: outwardUrl,
+                        linkType: resolvedLinkType,
+                        receipt,
+                        guardrail: buildMutationResultGuardrail(approval.guardrail, {
+                            approved: true,
+                            mode: approval.mode,
+                        }),
+                    }, null, 2);
+                } catch (error) {
+                    return JSON.stringify({
+                        success: false,
+                        error: `Issue link creation error: ${error.message}`,
+                    });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
     // TOOL 11b1: remove_jira_issue_link
-    // Available to: taskgenie
+    // Available to: buggenie, testgenie, taskgenie
     // Removes an existing Jira issue link by link ID or ticket pair.
     // ───────────────────────────────────────────────────────────────────
-    if (agentName === 'taskgenie') {
+    if (['buggenie', 'testgenie', 'taskgenie'].includes(agentName)) {
         tools.push(defineTool('remove_jira_issue_link', {
             description:
                 'Removes an existing Jira issue link. ' +
@@ -5988,6 +6904,457 @@ function createCustomTools(defineTool, agentName, deps = {}) {
     }
 
     // ───────────────────────────────────────────────────────────────────
+    // TOOL 11b3a: delete_jira_comment
+    // Available to: buggenie, testgenie, taskgenie
+    // Permanently deletes a comment on a Jira ticket. Gated by the
+    // shared approval component so the user must confirm in the UI.
+    // ───────────────────────────────────────────────────────────────────
+    if (['buggenie', 'testgenie', 'taskgenie'].includes(agentName)) {
+        tools.push(defineTool('delete_jira_comment', {
+            description:
+                'Permanently deletes a single comment from a Jira ticket via the Jira REST API. ' +
+                'The shared Jira approval component prompts the user before the delete is executed; ' +
+                'no inline confirmation phrase is required from the caller.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    ticketId: {
+                        type: 'string',
+                        description: 'Jira ticket key or browse URL that owns the comment (for example "AOTF-17250").',
+                    },
+                    commentId: {
+                        type: 'string',
+                        description: 'Numeric Jira comment ID to delete. Retrieve it via get_jira_ticket_comments if unknown.',
+                    },
+                    jiraBaseUrl: {
+                        type: 'string',
+                        description: 'Optional Jira base URL to override environment defaults.',
+                    },
+                    reason: {
+                        type: 'string',
+                        description: 'Optional short reason describing why the comment is being deleted.',
+                    },
+                },
+                required: ['ticketId', 'commentId'],
+            },
+            handler: async ({ ticketId, commentId, jiraBaseUrl, reason }) => {
+                try {
+                    const latestUserMessage = getLatestUserMessageText(deps);
+                    const normalizedTicket = isNonEmptyString(ticketId)
+                        ? normalizeJiraTicketInput(ticketId, latestUserMessage)
+                        : { ticketId: null, jiraBaseUrl: null, source: 'none' };
+
+                    if (!normalizedTicket.ticketId) {
+                        return JSON.stringify({
+                            success: false,
+                            error: 'Provide ticketId as a Jira key like AOTF-17250 or a full Jira browse URL.',
+                        }, null, 2);
+                    }
+
+                    const trimmedCommentId = isNonEmptyString(commentId) ? String(commentId).trim() : '';
+                    if (!trimmedCommentId) {
+                        return JSON.stringify({
+                            success: false,
+                            error: 'Provide commentId as the numeric Jira comment identifier.',
+                            hint: 'Use get_jira_ticket_comments to list comment IDs for this ticket.',
+                        }, null, 2);
+                    }
+
+                    const jiraConfig = getJiraApiConfig({ jiraBaseUrl: jiraBaseUrl || normalizedTicket.jiraBaseUrl });
+                    if (jiraConfig.error) {
+                        return JSON.stringify({ success: false, error: jiraConfig.error });
+                    }
+
+                    const ticketUrl = buildJiraBrowseUrl(jiraConfig, normalizedTicket.ticketId);
+
+                    // Prefetch comment body so the approval preview shows what is being deleted.
+                    let existingCommentBody = '';
+                    let existingCommentAuthor = '';
+                    try {
+                        const fetchUrl = buildJiraIssueApiUrl(jiraConfig, normalizedTicket.ticketId, `/comment/${encodeURIComponent(trimmedCommentId)}`);
+                        const fetchResp = await fetch(fetchUrl, { method: 'GET', headers: jiraConfig.headers });
+                        if (fetchResp.ok) {
+                            const commentPayload = await fetchResp.json();
+                            existingCommentBody = extractTextFromAdf(commentPayload?.body) || '';
+                            existingCommentAuthor = commentPayload?.author?.displayName || '';
+                        }
+                    } catch (_fetchError) { /* best-effort preview only */ }
+
+                    const commentPreviewText = existingCommentBody.length > 240
+                        ? `${existingCommentBody.slice(0, 240).trim()}…`
+                        : existingCommentBody;
+
+                    const commentSubjectLabel = `Comment ${trimmedCommentId} on ${normalizedTicket.ticketId}`;
+                    const commentChanges = [
+                        createMutationFieldChange({
+                            field: 'comment',
+                            label: 'Comment',
+                            changeType: 'remove',
+                            before: commentPreviewText || '(content unavailable)',
+                            after: null,
+                            includeUnchanged: true,
+                        }),
+                        existingCommentAuthor
+                            ? createMutationFieldChange({
+                                field: 'author',
+                                label: 'Author',
+                                changeType: 'remove',
+                                before: existingCommentAuthor,
+                                after: null,
+                                includeUnchanged: true,
+                            })
+                            : null,
+                    ].filter(Boolean);
+
+                    const commentPreview = buildMutationPreview({
+                        guardrail: buildJiraMutationGuardrailMetadata('delete_jira_comment'),
+                        title: `Approve comment deletion on ${normalizedTicket.ticketId}`,
+                        subject: buildJiraMutationSubject({
+                            ticketId: normalizedTicket.ticketId,
+                            ticketUrl,
+                            summary: commentSubjectLabel,
+                        }),
+                        changes: commentChanges,
+                        notes: [
+                            `Comment ID: ${trimmedCommentId}`,
+                            isNonEmptyString(reason) ? `Reason: ${reason.trim()}` : '',
+                        ].filter(Boolean),
+                        consequence: 'The comment content will be permanently removed from Jira and cannot be restored.',
+                    });
+                    const commentPreviewLines = buildJiraMutationPreviewLines([], commentPreview);
+
+                    const commentApproval = await requireJiraMutationApproval({
+                        deps,
+                        toolName: 'delete_jira_comment',
+                        ticketId: normalizedTicket.ticketId,
+                        commentId: trimmedCommentId,
+                        consequence: 'The comment content will be permanently removed from Jira and cannot be restored.',
+                        previewLines: commentPreviewLines,
+                        preview: commentPreview,
+                    });
+
+                    if (!commentApproval.approved) {
+                        return JSON.stringify(buildJiraMutationApprovalFailure({
+                            approval: commentApproval,
+                            ticketId: normalizedTicket.ticketId,
+                            ticketUrl,
+                            previewLines: commentPreviewLines,
+                            preview: commentPreview,
+                        }), null, 2);
+                    }
+
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('delete_jira_comment', {
+                            phase: 'jira',
+                            message: `Deleting comment ${trimmedCommentId} on ${normalizedTicket.ticketId}...`,
+                            step: 1,
+                        });
+                    }
+
+                    const deleteUrl = buildJiraIssueApiUrl(jiraConfig, normalizedTicket.ticketId, `/comment/${encodeURIComponent(trimmedCommentId)}`);
+                    const deleteResponse = await fetch(deleteUrl, {
+                        method: 'DELETE',
+                        headers: jiraConfig.headers,
+                    });
+
+                    if (!deleteResponse.ok && deleteResponse.status !== 204) {
+                        const details = await deleteResponse.text();
+                        let hint;
+                        if (deleteResponse.status === 403) {
+                            hint = 'Jira requires Delete own comments or Delete all comments permission for this project. Ask the project admin to grant it, or have the comment author delete it instead.';
+                        } else if (deleteResponse.status === 404) {
+                            hint = 'Jira could not find that comment. Verify the commentId against get_jira_ticket_comments output and confirm the ticket key is correct.';
+                        } else if (deleteResponse.status === 401) {
+                            hint = 'Jira authentication failed. Check JIRA_EMAIL and JIRA_API_TOKEN in the .env file.';
+                        }
+                        return JSON.stringify({
+                            success: false,
+                            ticketId: normalizedTicket.ticketId,
+                            commentId: trimmedCommentId,
+                            ticketUrl,
+                            error: `Jira comment delete failed: HTTP ${deleteResponse.status}`,
+                            details,
+                            hint,
+                        }, null, 2);
+                    }
+
+                    const commentReceipt = buildMutationReceipt({
+                        guardrail: commentApproval.guardrail,
+                        title: `Deleted comment on ${normalizedTicket.ticketId}`,
+                        subject: buildJiraMutationSubject({
+                            ticketId: normalizedTicket.ticketId,
+                            ticketUrl,
+                            summary: commentSubjectLabel,
+                        }),
+                        changes: commentChanges,
+                        notes: [
+                            `Comment ID: ${trimmedCommentId}`,
+                            isNonEmptyString(reason) ? `Reason: ${reason.trim()}` : '',
+                        ].filter(Boolean),
+                        outcome: `Comment ${trimmedCommentId} was permanently removed from ${normalizedTicket.ticketId}.`,
+                        approval: { approved: true, mode: commentApproval.mode },
+                    });
+
+                    return JSON.stringify({
+                        success: true,
+                        ticketId: normalizedTicket.ticketId,
+                        commentId: trimmedCommentId,
+                        ticketUrl,
+                        commentsUrl: buildJiraIssueCommentsUrl(jiraConfig, normalizedTicket.ticketId),
+                        reason: isNonEmptyString(reason) ? reason.trim() : undefined,
+                        receipt: commentReceipt,
+                        guardrail: buildMutationResultGuardrail(commentApproval.guardrail, {
+                            approved: true,
+                            mode: commentApproval.mode,
+                        }),
+                    }, null, 2);
+                } catch (error) {
+                    return JSON.stringify({
+                        success: false,
+                        error: `Jira comment delete error: ${error.message}`,
+                    }, null, 2);
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 11b3b: edit_jira_comment
+    // Available to: buggenie, testgenie, taskgenie
+    // Updates the body of an existing Jira comment. Gated by the
+    // shared approval component so the user can preview and confirm.
+    // ───────────────────────────────────────────────────────────────────
+    if (['buggenie', 'testgenie', 'taskgenie'].includes(agentName)) {
+        tools.push(defineTool('edit_jira_comment', {
+            description:
+                'Edits the body of an existing Jira comment via the Jira REST API. ' +
+                'The shared Jira approval component previews the old and new text before any write is sent.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    ticketId: {
+                        type: 'string',
+                        description: 'Jira ticket key or browse URL that owns the comment (for example "AOTF-17250").',
+                    },
+                    commentId: {
+                        type: 'string',
+                        description: 'Numeric Jira comment ID to update. Retrieve it via get_jira_ticket_comments if unknown.',
+                    },
+                    body: {
+                        type: 'string',
+                        description: 'New Markdown body for the comment. Will be converted to Atlassian Document Format automatically.',
+                    },
+                    jiraBaseUrl: {
+                        type: 'string',
+                        description: 'Optional Jira base URL to override environment defaults.',
+                    },
+                    mentions: {
+                        type: 'string',
+                        description: 'Optional JSON array of users to @mention in the comment. Each entry: {"accountId":"...","displayName":"..."}. Use search_jira_users to resolve names first. Mention nodes trigger Jira notifications.',
+                    },
+                },
+                required: ['ticketId', 'commentId', 'body'],
+            },
+            handler: async ({ ticketId, commentId, body, jiraBaseUrl, mentions }) => {
+                try {
+                    const latestUserMessage = getLatestUserMessageText(deps);
+                    const normalizedTicket = isNonEmptyString(ticketId)
+                        ? normalizeJiraTicketInput(ticketId, latestUserMessage)
+                        : { ticketId: null, jiraBaseUrl: null, source: 'none' };
+
+                    if (!normalizedTicket.ticketId) {
+                        return JSON.stringify({
+                            success: false,
+                            error: 'Provide ticketId as a Jira key like AOTF-17250 or a full Jira browse URL.',
+                        }, null, 2);
+                    }
+
+                    const trimmedCommentId = isNonEmptyString(commentId) ? String(commentId).trim() : '';
+                    if (!trimmedCommentId) {
+                        return JSON.stringify({
+                            success: false,
+                            error: 'Provide commentId as the numeric Jira comment identifier.',
+                            hint: 'Use get_jira_ticket_comments to list comment IDs for this ticket.',
+                        }, null, 2);
+                    }
+
+                    if (!isNonEmptyString(body)) {
+                        return JSON.stringify({
+                            success: false,
+                            error: 'Provide the new comment body as a non-empty Markdown string.',
+                        }, null, 2);
+                    }
+
+                    const jiraConfig = getJiraApiConfig({ jiraBaseUrl: jiraBaseUrl || normalizedTicket.jiraBaseUrl });
+                    if (jiraConfig.error) {
+                        return JSON.stringify({ success: false, error: jiraConfig.error });
+                    }
+
+                    const ticketUrl = buildJiraBrowseUrl(jiraConfig, normalizedTicket.ticketId);
+
+                    // Prefetch existing comment for before/after preview.
+                    let existingCommentBody = '';
+                    let existingCommentAuthor = '';
+                    try {
+                        const fetchUrl = buildJiraIssueApiUrl(jiraConfig, normalizedTicket.ticketId, `/comment/${encodeURIComponent(trimmedCommentId)}`);
+                        const fetchResp = await fetch(fetchUrl, { method: 'GET', headers: jiraConfig.headers });
+                        if (fetchResp.ok) {
+                            const commentPayload = await fetchResp.json();
+                            existingCommentBody = extractTextFromAdf(commentPayload?.body) || '';
+                            existingCommentAuthor = commentPayload?.author?.displayName || '';
+                        }
+                    } catch (_fetchError) { /* best-effort preview only */ }
+
+                    const truncate = (value) => {
+                        if (!isNonEmptyString(value)) return '';
+                        const trimmed = value.trim();
+                        return trimmed.length > 240 ? `${trimmed.slice(0, 240)}…` : trimmed;
+                    };
+
+                    const editChanges = [
+                        createMutationFieldChange({
+                            field: 'comment',
+                            label: 'Comment body',
+                            changeType: 'replace',
+                            before: truncate(existingCommentBody) || '(content unavailable)',
+                            after: truncate(body),
+                            includeUnchanged: true,
+                        }),
+                        existingCommentAuthor
+                            ? createMutationFieldChange({
+                                field: 'author',
+                                label: 'Author',
+                                changeType: 'unchanged',
+                                before: existingCommentAuthor,
+                                after: existingCommentAuthor,
+                                includeUnchanged: true,
+                            })
+                            : null,
+                    ].filter(Boolean);
+
+                    const commentSubjectLabel = `Comment ${trimmedCommentId} on ${normalizedTicket.ticketId}`;
+                    const editPreview = buildMutationPreview({
+                        guardrail: buildJiraMutationGuardrailMetadata('edit_jira_comment'),
+                        title: `Approve comment edit on ${normalizedTicket.ticketId}`,
+                        subject: buildJiraMutationSubject({
+                            ticketId: normalizedTicket.ticketId,
+                            ticketUrl,
+                            summary: commentSubjectLabel,
+                        }),
+                        changes: editChanges,
+                        notes: [`Comment ID: ${trimmedCommentId}`],
+                        consequence: 'Jira will replace the existing comment body and notify watchers who subscribe to comment activity.',
+                    });
+                    const editPreviewLines = buildJiraMutationPreviewLines([], editPreview);
+
+                    const editApproval = await requireJiraMutationApproval({
+                        deps,
+                        toolName: 'edit_jira_comment',
+                        ticketId: normalizedTicket.ticketId,
+                        commentId: trimmedCommentId,
+                        consequence: 'Jira will replace the existing comment body and notify watchers who subscribe to comment activity.',
+                        previewLines: editPreviewLines,
+                        preview: editPreview,
+                    });
+
+                    if (!editApproval.approved) {
+                        return JSON.stringify(buildJiraMutationApprovalFailure({
+                            approval: editApproval,
+                            ticketId: normalizedTicket.ticketId,
+                            ticketUrl,
+                            previewLines: editPreviewLines,
+                            preview: editPreview,
+                        }), null, 2);
+                    }
+
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('edit_jira_comment', {
+                            phase: 'jira',
+                            message: `Updating comment ${trimmedCommentId} on ${normalizedTicket.ticketId}...`,
+                            step: 1,
+                        });
+                    }
+
+                    const editUrl = buildJiraIssueApiUrl(jiraConfig, normalizedTicket.ticketId, `/comment/${encodeURIComponent(trimmedCommentId)}`);
+                    const editResponse = await fetch(editUrl, {
+                        method: 'PUT',
+                        headers: jiraConfig.headers,
+                        body: JSON.stringify({ body: markdownToAdf(applyMentions(body, mentions)) }),
+                    });
+
+                    if (!editResponse.ok) {
+                        const details = await editResponse.text();
+                        let hint;
+                        if (editResponse.status === 403) {
+                            hint = 'Jira requires Edit own comments or Edit all comments permission for this project. Ask the project admin to grant it, or have the comment author edit it instead.';
+                        } else if (editResponse.status === 404) {
+                            hint = 'Jira could not find that comment. Verify the commentId against get_jira_ticket_comments output and confirm the ticket key is correct.';
+                        } else if (editResponse.status === 400) {
+                            hint = 'Jira rejected the comment payload. Check that the body is valid Markdown convertible to ADF.';
+                        }
+                        const formattedError = formatJiraErrorResponse('Comment edit failed', editResponse.status, details, {
+                            includesDescription: true,
+                        });
+                        return JSON.stringify({
+                            success: false,
+                            ticketId: normalizedTicket.ticketId,
+                            commentId: trimmedCommentId,
+                            ticketUrl,
+                            error: formattedError.message || `Jira comment edit failed: HTTP ${editResponse.status}`,
+                            details,
+                            hint: hint || formattedError.hint,
+                            errorMessages: formattedError.errorMessages,
+                            fieldErrors: formattedError.fieldErrors,
+                        }, null, 2);
+                    }
+
+                    let updatedComment = null;
+                    try {
+                        updatedComment = await editResponse.json();
+                    } catch (_jsonError) {
+                        updatedComment = null;
+                    }
+
+                    const editReceipt = buildMutationReceipt({
+                        guardrail: editApproval.guardrail,
+                        title: `Updated comment on ${normalizedTicket.ticketId}`,
+                        subject: buildJiraMutationSubject({
+                            ticketId: normalizedTicket.ticketId,
+                            ticketUrl,
+                            summary: commentSubjectLabel,
+                        }),
+                        changes: editChanges,
+                        notes: [`Comment ID: ${trimmedCommentId}`],
+                        outcome: `Comment ${trimmedCommentId} on ${normalizedTicket.ticketId} was updated.`,
+                        approval: { approved: true, mode: editApproval.mode },
+                    });
+
+                    return JSON.stringify({
+                        success: true,
+                        ticketId: normalizedTicket.ticketId,
+                        commentId: trimmedCommentId,
+                        ticketUrl,
+                        commentsUrl: buildJiraIssueCommentsUrl(jiraConfig, normalizedTicket.ticketId),
+                        updatedAt: updatedComment?.updated || null,
+                        author: updatedComment?.author?.displayName || null,
+                        updateAuthor: updatedComment?.updateAuthor?.displayName || null,
+                        receipt: editReceipt,
+                        guardrail: buildMutationResultGuardrail(editApproval.guardrail, {
+                            approved: true,
+                            mode: editApproval.mode,
+                        }),
+                    }, null, 2);
+                } catch (error) {
+                    return JSON.stringify({
+                        success: false,
+                        error: `Jira comment edit error: ${error.message}`,
+                    }, null, 2);
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
     // TOOL 11b4: transition_jira_ticket
     // Available to: buggenie, testgenie, taskgenie
     // Performs workflow transitions via Jira transitions API.
@@ -6032,10 +7399,14 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         type: 'string',
                         description: 'Optional Jira base URL to use for the returned browse link.',
                     },
+                    mentions: {
+                        type: 'string',
+                        description: 'Optional JSON array of users to @mention in the transition comment. Each entry: {"accountId":"...","displayName":"..."}. Use search_jira_users to resolve names first.',
+                    },
                 },
                 required: ['ticketId'],
             },
-            handler: async ({ ticketId, targetStatus, transitionId, resolution, comment, fieldsJson, updateJson, jiraBaseUrl }) => {
+            handler: async ({ ticketId, targetStatus, transitionId, resolution, comment, fieldsJson, updateJson, jiraBaseUrl, mentions }) => {
                 try {
                     if (!isNonEmptyString(targetStatus) && !isNonEmptyString(transitionId)) {
                         return JSON.stringify({
@@ -6224,7 +7595,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     const update = parsedUpdate.value ? { ...parsedUpdate.value } : {};
                     if (comment) {
                         const existingComments = Array.isArray(update.comment) ? update.comment : [];
-                        update.comment = [...existingComments, { add: { body: markdownToAdf(comment) } }];
+                        update.comment = [...existingComments, { add: { body: markdownToAdf(applyMentions(comment, mentions)) } }];
                     }
                     if (Object.keys(update).length > 0) {
                         payload.update = update;
@@ -6588,6 +7959,638 @@ function createCustomTools(defineTool, agentName, deps = {}) {
     }
 
     // ───────────────────────────────────────────────────────────────────
+    // TOOL 11b4: attach_file_to_jira
+    // Available to: testgenie, buggenie, taskgenie, orchestrator
+    // Attaches any local file (e.g., .xlsx, .pdf, .json) to a Jira ticket
+    // ───────────────────────────────────────────────────────────────────
+    if (['testgenie', 'buggenie', 'taskgenie', 'orchestrator'].includes(agentName)) {
+        tools.push(defineTool('attach_file_to_jira', {
+            description:
+                'Attaches a local file from the workspace to an existing Jira ticket. ' +
+                'Supports any file type including .xlsx, .pdf, .json, .txt, .png, .csv, etc. ' +
+                'Use this to upload generated test case Excel files, reports, or other artifacts to Jira tickets.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    ticketKey: {
+                        type: 'string',
+                        description: 'Jira ticket key to attach the file to (e.g., "AOTF-17300")',
+                    },
+                    filePath: {
+                        type: 'string',
+                        description: 'Absolute or workspace-relative path to the file to upload (e.g., "agentic-workflow/test-cases/AOTF-12345-test-cases.xlsx")',
+                    },
+                    fileName: {
+                        type: 'string',
+                        description: 'Optional: override the file name used in Jira. Defaults to the original file name.',
+                    },
+                },
+                required: ['ticketKey', 'filePath'],
+            },
+            handler: async ({ ticketKey, filePath: rawFilePath, fileName }) => {
+                try {
+                    loadEnvVars();
+                    if (!isValidTicketKey(ticketKey)) {
+                        return JSON.stringify({ success: false, error: 'Invalid ticket key format. Expected values like AOTF-17300.' });
+                    }
+
+                    const jiraConfig = getJiraAttachmentConfig();
+                    if (jiraConfig.error) {
+                        return JSON.stringify({ success: false, error: jiraConfig.error });
+                    }
+
+                    // Resolve file path — support absolute and workspace-relative paths
+                    let resolvedPath = rawFilePath;
+                    if (!path.isAbsolute(resolvedPath)) {
+                        const workspaceRoot = path.resolve(__dirname, '..', '..');
+                        resolvedPath = path.resolve(workspaceRoot, resolvedPath);
+                    }
+
+                    if (!fs.existsSync(resolvedPath)) {
+                        return JSON.stringify({ success: false, error: `File not found: ${rawFilePath}` });
+                    }
+
+                    const stat = fs.statSync(resolvedPath);
+                    if (!stat.isFile()) {
+                        return JSON.stringify({ success: false, error: `Path is not a file: ${rawFilePath}` });
+                    }
+
+                    // Jira attachment size limit: 50 MB
+                    const MAX_ATTACHMENT_SIZE = 50 * 1024 * 1024;
+                    if (stat.size > MAX_ATTACHMENT_SIZE) {
+                        return JSON.stringify({
+                            success: false,
+                            error: `File exceeds Jira 50 MB attachment limit (${(stat.size / (1024 * 1024)).toFixed(1)} MB).`,
+                        });
+                    }
+
+                    const actualFileName = fileName || path.basename(resolvedPath);
+                    const ext = path.extname(actualFileName).toLowerCase();
+
+                    // MIME type mapping for common file types
+                    const MIME_MAP = {
+                        '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        '.xls': 'application/vnd.ms-excel',
+                        '.pdf': 'application/pdf',
+                        '.json': 'application/json',
+                        '.csv': 'text/csv',
+                        '.txt': 'text/plain',
+                        '.md': 'text/markdown',
+                        '.html': 'text/html',
+                        '.xml': 'application/xml',
+                        '.zip': 'application/zip',
+                        '.png': 'image/png',
+                        '.jpg': 'image/jpeg',
+                        '.jpeg': 'image/jpeg',
+                        '.gif': 'image/gif',
+                        '.webp': 'image/webp',
+                        '.svg': 'image/svg+xml',
+                        '.log': 'text/plain',
+                        '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                        '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                    };
+                    const mimeType = MIME_MAP[ext] || 'application/octet-stream';
+
+                    const buffer = fs.readFileSync(resolvedPath);
+
+                    if (deps.chatManager) {
+                        deps.chatManager.broadcastToolProgress('attach_file_to_jira', {
+                            phase: 'uploading',
+                            detail: `Uploading ${actualFileName} (${(stat.size / 1024).toFixed(1)} KB) to ${ticketKey}…`,
+                        });
+                    }
+
+                    const attachUrl = buildJiraAttachmentUrl(ticketKey, jiraConfig);
+                    const result = await uploadJiraAttachment(
+                        attachUrl,
+                        jiraConfig,
+                        actualFileName,
+                        mimeType,
+                        buffer,
+                        'JiraFileAttach'
+                    );
+
+                    if (deps.chatManager) {
+                        deps.chatManager.broadcastToolProgress('attach_file_to_jira', {
+                            phase: result.success ? 'complete' : 'failed',
+                            detail: result.success
+                                ? `✅ ${actualFileName} attached to ${ticketKey}`
+                                : `❌ Upload failed: ${result.error}`,
+                        });
+                    }
+
+                    return JSON.stringify({
+                        success: result.success,
+                        ticketKey,
+                        fileName: actualFileName,
+                        fileSize: stat.size,
+                        mimeType,
+                        error: result.error || undefined,
+                    });
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `File attachment error: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 11b5a: add_comment_with_media
+    // Available to: buggenie, testgenie, taskgenie
+    // Uploads images and videos as Jira attachments, renders images/preview
+    // frames inline, and lists recording names inside the same comment.
+    // ───────────────────────────────────────────────────────────────────
+    if (['buggenie', 'testgenie', 'taskgenie'].includes(agentName)) {
+        tools.push(defineTool('add_comment_with_media', {
+            description:
+                'Adds a Jira comment with mixed media in one flow. ' +
+                'Uploads screenshots, preview frames, and video recordings as issue attachments, ' +
+                'renders screenshots and preview frames inline in the comment, and lists video recording names ' +
+                'in a dedicated Video evidence section. Jira Cloud does not support inline video playback ' +
+                'for this REST workflow, so recordings are attached to the issue and named in the comment instead. ' +
+                'Supports local file paths and the current chat session evidence.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    ticketKey: {
+                        type: 'string',
+                        description: 'Jira ticket key (for example "AOTF-16369").',
+                    },
+                    comment: {
+                        type: 'string',
+                        description: 'Markdown text for the comment body. Inline images and preview frames are appended below this text.',
+                    },
+                    imagePaths: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'Optional absolute or workspace-relative image paths to upload into the comment (.png, .jpg, .jpeg, .gif, .webp, .svg).',
+                    },
+                    videoPaths: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'Optional absolute or workspace-relative video paths to upload into the comment (.mp4, .webm, .mov, .avi, .mkv).',
+                    },
+                    sessionId: {
+                        type: 'string',
+                        description: 'Optional chat session ID to pull stored screenshots and recordings from. Defaults to the active chat session.',
+                    },
+                    messageId: {
+                        type: 'string',
+                        description: 'Optional evidence message ID to scope session media to a specific uploaded prompt.',
+                    },
+                    latestOnly: {
+                        type: 'boolean',
+                        description: 'Optional: when true, use only the latest evidence-bearing session message instead of the active evidence scope.',
+                    },
+                    includeVideoFrames: {
+                        type: 'boolean',
+                        description: 'Optional: include extracted or stored video preview frames inline in the comment. Defaults to true.',
+                    },
+                    frameTimestamps: {
+                        type: 'array',
+                        items: { type: 'number' },
+                        description: 'Optional: preferred frame timestamps in seconds for inline video previews.',
+                    },
+                    maxVideoFrames: {
+                        type: 'number',
+                        description: 'Optional maximum number of inline preview frames to add. Defaults to 4.',
+                    },
+                    imageLayout: {
+                        type: 'string',
+                        description: 'Optional ADF layout for inline images: "center" (default), "wrap-left", "wrap-right", "wide", "full-width".',
+                    },
+                    jiraBaseUrl: {
+                        type: 'string',
+                        description: 'Optional Jira base URL override.',
+                    },
+                },
+                required: ['ticketKey', 'comment'],
+            },
+            handler: async ({ ticketKey, comment, imagePaths, videoPaths, sessionId, messageId, latestOnly, includeVideoFrames, frameTimestamps, maxVideoFrames, imageLayout, jiraBaseUrl }) => {
+                try {
+                    loadEnvVars();
+
+                    if (!isValidTicketKey(ticketKey)) {
+                        return JSON.stringify({ success: false, error: 'Invalid ticket key format. Expected values like AOTF-16369.' });
+                    }
+
+                    const explicitImages = Array.isArray(imagePaths) ? imagePaths.filter(isNonEmptyString) : [];
+                    const explicitVideos = Array.isArray(videoPaths) ? videoPaths.filter(isNonEmptyString) : [];
+                    const wantsSessionEvidence = explicitImages.length === 0 && explicitVideos.length === 0
+                        ? true
+                        : isNonEmptyString(sessionId) || isNonEmptyString(messageId) || latestOnly === true;
+
+                    let sessionResult = null;
+                    if (wantsSessionEvidence) {
+                        const resolvedSession = getActiveSessionEntry(sessionId, deps);
+                        if (!resolvedSession.error) {
+                            sessionResult = resolvedSession;
+                        } else if (explicitImages.length === 0 && explicitVideos.length === 0) {
+                            return JSON.stringify({ success: false, error: resolvedSession.error });
+                        }
+                    }
+
+                    const jiraConfig = getJiraAttachmentConfig({ baseUrl: jiraBaseUrl });
+                    if (jiraConfig.error) {
+                        return JSON.stringify({ success: false, error: jiraConfig.error });
+                    }
+                    const apiConfig = getJiraApiConfig({ jiraBaseUrl });
+                    if (apiConfig.error) {
+                        return JSON.stringify({ success: false, error: apiConfig.error });
+                    }
+
+                    const result = await addCommentWithMediaToJira({
+                        ticketKey,
+                        comment,
+                        jiraConfig,
+                        apiConfig,
+                        imagePaths: explicitImages,
+                        videoPaths: explicitVideos,
+                        entry: sessionResult?.entry,
+                        messageId,
+                        activeEvidenceMessageId: sessionResult?.entry?.sessionContext?.activeEvidenceMessageId,
+                        latestOnly: latestOnly === true,
+                        includeVideoFrames: includeVideoFrames !== false,
+                        frameTimestamps,
+                        maxVideoFrames: Math.max(1, Math.min(Number(maxVideoFrames) || 4, 8)),
+                        imageLayout,
+                        toolName: 'add_comment_with_media',
+                        deps,
+                    });
+
+                    return JSON.stringify({
+                        success: result.success,
+                        ticketKey,
+                        ticketUrl: buildJiraBrowseUrl(apiConfig, ticketKey),
+                        sessionId: sessionResult?.sessionId || undefined,
+                        ...result,
+                    }, null, 2);
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `Jira mixed-media comment error: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 11b5: add_comment_with_images
+    // Available to: buggenie, testgenie, taskgenie
+    // Uploads image files as ticket attachments AND creates a comment
+    // with those images rendered inline via ADF mediaSingle nodes.
+    // This is the Jira-native approach: same mechanism the Jira UI uses
+    // when you paste/drag images into a comment.
+    // ───────────────────────────────────────────────────────────────────
+    if (['buggenie', 'testgenie', 'taskgenie'].includes(agentName)) {
+        tools.push(defineTool('add_comment_with_images', {
+            description:
+                'Adds a comment to a Jira ticket with inline images. ' +
+                'Uploads image files as ticket attachments, then creates a comment with the images ' +
+                'embedded inline using ADF mediaSingle nodes — the same mechanism the Jira UI uses. ' +
+                'The comment body (markdown) appears above the embedded images. ' +
+                'Use this instead of separate attach_file_to_jira + update_jira_ticket calls when ' +
+                'you need images to appear INSIDE the comment body, not just as ticket-level attachments.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    ticketKey: {
+                        type: 'string',
+                        description: 'Jira ticket key (e.g., "AOTF-16369")',
+                    },
+                    comment: {
+                        type: 'string',
+                        description: 'Markdown text for the comment body. Images will be appended below this text.',
+                    },
+                    filePaths: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'Array of absolute or workspace-relative paths to image files to embed in the comment (.png, .jpg, .jpeg, .gif, .webp, .svg).',
+                    },
+                    imageLayout: {
+                        type: 'string',
+                        description: 'Optional ADF layout for images: "center" (default), "wrap-left", "wrap-right", "wide", "full-width".',
+                    },
+                    jiraBaseUrl: {
+                        type: 'string',
+                        description: 'Optional Jira base URL override.',
+                    },
+                },
+                required: ['ticketKey', 'comment', 'filePaths'],
+            },
+            handler: async ({ ticketKey, comment, filePaths, imageLayout, jiraBaseUrl }) => {
+                try {
+                    loadEnvVars();
+
+                    if (!isValidTicketKey(ticketKey)) {
+                        return JSON.stringify({ success: false, error: 'Invalid ticket key format. Expected values like AOTF-16369.' });
+                    }
+                    if (!isNonEmptyString(comment)) {
+                        return JSON.stringify({ success: false, error: 'Comment text is required.' });
+                    }
+                    if (!Array.isArray(filePaths) || filePaths.length === 0) {
+                        return JSON.stringify({ success: false, error: 'At least one file path is required in filePaths array.' });
+                    }
+
+                    const jiraConfig = getJiraAttachmentConfig();
+                    if (jiraConfig.error) {
+                        return JSON.stringify({ success: false, error: jiraConfig.error });
+                    }
+                    const apiConfig = getJiraApiConfig({ jiraBaseUrl });
+                    if (apiConfig.error) {
+                        return JSON.stringify({ success: false, error: apiConfig.error });
+                    }
+
+                    const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']);
+                    const IMAGE_MIME_MAP = {
+                        '.png': 'image/png',
+                        '.jpg': 'image/jpeg',
+                        '.jpeg': 'image/jpeg',
+                        '.gif': 'image/gif',
+                        '.webp': 'image/webp',
+                        '.svg': 'image/svg+xml',
+                    };
+                    const MAX_ATTACHMENT_SIZE = 50 * 1024 * 1024;
+                    const workspaceRoot = path.resolve(__dirname, '..', '..');
+                    const layout = imageLayout || 'center';
+
+                    // ── Step 1: Validate and resolve all file paths ──
+                    const resolvedFiles = [];
+                    for (const rawPath of filePaths) {
+                        let resolved = rawPath;
+                        if (!path.isAbsolute(resolved)) {
+                            resolved = path.resolve(workspaceRoot, resolved);
+                        }
+                        if (!fs.existsSync(resolved)) {
+                            return JSON.stringify({ success: false, error: `File not found: ${rawPath}` });
+                        }
+                        const stat = fs.statSync(resolved);
+                        if (!stat.isFile()) {
+                            return JSON.stringify({ success: false, error: `Path is not a file: ${rawPath}` });
+                        }
+                        if (stat.size > MAX_ATTACHMENT_SIZE) {
+                            return JSON.stringify({ success: false, error: `File exceeds 50 MB limit: ${rawPath} (${(stat.size / (1024 * 1024)).toFixed(1)} MB)` });
+                        }
+                        const ext = path.extname(resolved).toLowerCase();
+                        if (!IMAGE_EXTENSIONS.has(ext)) {
+                            return JSON.stringify({ success: false, error: `Unsupported image format: ${ext}. Supported: ${[...IMAGE_EXTENSIONS].join(', ')}` });
+                        }
+                        resolvedFiles.push({
+                            resolved,
+                            fileName: path.basename(resolved),
+                            mimeType: IMAGE_MIME_MAP[ext] || 'application/octet-stream',
+                            size: stat.size,
+                        });
+                    }
+
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('add_comment_with_images', {
+                            phase: 'uploading',
+                            detail: `Uploading ${resolvedFiles.length} image(s) to ${ticketKey}…`,
+                        });
+                    }
+
+                    // ── Step 2: Upload each image as a ticket attachment ──
+                    const attachUrl = buildJiraAttachmentUrl(ticketKey, jiraConfig);
+                    const uploadedAttachments = [];
+                    const failedUploads = [];
+
+                    for (const file of resolvedFiles) {
+                        const buffer = fs.readFileSync(file.resolved);
+                        const result = await uploadJiraAttachment(
+                            attachUrl, jiraConfig, file.fileName, file.mimeType, buffer, 'CommentImg'
+                        );
+                        if (result.success && result.attachmentMeta) {
+                            uploadedAttachments.push({
+                                id: String(result.attachmentMeta.id || ''),
+                                filename: result.attachmentMeta.filename || file.fileName,
+                                mimeType: result.attachmentMeta.mimeType || file.mimeType,
+                                size: result.attachmentMeta.size || file.size,
+                                contentUrl: result.attachmentMeta.content || '',
+                            });
+                        } else if (result.success) {
+                            // Upload succeeded but no metadata — can't embed inline
+                            failedUploads.push({ fileName: file.fileName, error: 'Upload succeeded but Jira did not return attachment metadata for inline embedding.' });
+                        } else {
+                            failedUploads.push({ fileName: file.fileName, error: result.error });
+                        }
+                    }
+
+                    if (uploadedAttachments.length === 0) {
+                        return JSON.stringify({
+                            success: false,
+                            error: 'All image uploads failed. Cannot create comment with inline images.',
+                            failedUploads,
+                        });
+                    }
+
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('add_comment_with_images', {
+                            phase: 'commenting',
+                            detail: `Creating comment on ${ticketKey} with ${uploadedAttachments.length} inline image(s)…`,
+                        });
+                    }
+
+                    // ── Step 3: Post comment with inline images (multi-strategy) ──
+                    //
+                    // WHY THIS APPROACH:
+                    // Jira Cloud ADF mediaSingle nodes require a Media Services UUID
+                    // (not the numeric attachment ID) and a valid collection name.
+                    // The REST API v3 attachment upload returns numeric IDs, and the
+                    // Media Services token exchange needed for proper UUIDs requires
+                    // Forge/Connect app scopes not available to basic API token auth.
+                    //
+                    // SOLUTION: Use the REST API v2 endpoint with wiki markup notation.
+                    // In Jira wiki markup, `!filename.png!` renders inline images by
+                    // resolving the filename against the issue's attachment list.
+                    // Jira's server-side wiki→ADF converter handles all the Media
+                    // Services plumbing natively — exactly what the Jira UI does.
+                    //
+                    // Strategy A: REST API v2 + wiki markup (primary — most reliable)
+                    // Strategy B: REST API v3 + ADF mediaSingle with mediaApiFileId
+                    // Strategy C: REST API v3 + ADF text-link fallback
+                    //
+                    let commentResult = { success: false };
+
+                    // ── Strategy A: REST API v2 + wiki markup with !filename.png! ──
+                    // This is the breakthrough: Jira v2 accepts wiki notation as a plain
+                    // string in the `body` field. When Jira encounters `!filename.png!`,
+                    // it resolves the filename against the issue's attachments and renders
+                    // the image inline — the same mechanism the Jira web UI uses.
+                    try {
+                        // Build v2 API URL (swap /rest/api/3 → /rest/api/2)
+                        const v2Base = apiConfig.cloudId
+                            ? `https://api.atlassian.com/ex/jira/${apiConfig.cloudId}/rest/api/2`
+                            : `${(apiConfig.baseUrl || '').replace(/\/+$/, '')}/rest/api/2`;
+                        const v2CommentUrl = `${v2Base}/issue/${ticketKey}/comment`;
+
+                        // Convert markdown comment to wiki markup + append image references
+                        const wikiComment = markdownToWikiMarkup(comment);
+                        const imageRefs = uploadedAttachments
+                            .map(att => `!${att.filename}|thumbnail!`)
+                            .join('\n');
+                        const wikiBody = wikiComment + '\n\n' + imageRefs;
+
+                        const v2Resp = await fetch(v2CommentUrl, {
+                            method: 'POST',
+                            headers: apiConfig.headers,
+                            body: JSON.stringify({ body: wikiBody }),
+                        });
+
+                        if (v2Resp.ok) {
+                            let data = null;
+                            try { data = await v2Resp.json(); } catch (_) { /* best-effort */ }
+                            commentResult = {
+                                success: true,
+                                commentId: data?.id || null,
+                                strategy: 'v2-wiki-markup',
+                            };
+                        }
+                    } catch (_v2Err) {
+                        // Non-fatal: fall through to ADF strategies
+                    }
+
+                    // ── Strategy B: REST API v3 + ADF mediaSingle with mediaApiFileId ──
+                    // If v2 wiki markup fails, try v3 ADF with resolved Media Services UUIDs.
+                    if (!commentResult.success) {
+                        try {
+                            // Resolve mediaApiFileId UUIDs from the issue's attachment list
+                            const issueAttUrl = buildJiraIssueApiUrl(apiConfig, ticketKey, '?fields=attachment');
+                            const issueAttResp = await fetch(issueAttUrl, {
+                                method: 'GET',
+                                headers: apiConfig.headers,
+                            });
+                            if (issueAttResp.ok) {
+                                const issueData = await issueAttResp.json();
+                                const jiraAttachments = issueData?.fields?.attachment || [];
+                                for (const att of uploadedAttachments) {
+                                    const match = jiraAttachments.find(a => String(a.id) === String(att.id));
+                                    if (match?.mediaApiFileId) {
+                                        att.mediaFileId = match.mediaApiFileId;
+                                    }
+                                }
+                            }
+                        } catch (_) { /* non-fatal */ }
+
+                        const hasMediaFileIds = uploadedAttachments.some(a => a.mediaFileId);
+                        if (hasMediaFileIds) {
+                            const commentUrl = buildJiraIssueApiUrl(apiConfig, ticketKey, '/comment');
+                            const adf = markdownToAdf(comment);
+                            for (const att of uploadedAttachments) {
+                                const mediaId = att.mediaFileId || att.id;
+                                adf.content.push({
+                                    type: 'mediaSingle',
+                                    attrs: { layout },
+                                    content: [{
+                                        type: 'media',
+                                        attrs: {
+                                            id: mediaId,
+                                            type: 'file',
+                                            collection: '',
+                                        },
+                                    }],
+                                });
+                            }
+                            const resp = await fetch(commentUrl, {
+                                method: 'POST',
+                                headers: apiConfig.headers,
+                                body: JSON.stringify({ body: adf }),
+                            });
+                            if (resp.ok) {
+                                let data = null;
+                                try { data = await resp.json(); } catch (_) { /* best-effort */ }
+                                commentResult = {
+                                    success: true,
+                                    commentId: data?.id || null,
+                                    strategy: 'v3-adf-mediaFileId',
+                                };
+                            }
+                        }
+                    }
+
+                    // ── Strategy C: REST API v3 + ADF text-link fallback ──
+                    // Last resort — always works. Comment text + bullet list linking each image.
+                    if (!commentResult.success) {
+                        const commentUrl = buildJiraIssueApiUrl(apiConfig, ticketKey, '/comment');
+                        const fallbackAdf = markdownToAdf(comment);
+                        fallbackAdf.content.push({
+                            type: 'paragraph',
+                            content: [{ type: 'text', text: '📎 Attached images:', marks: [{ type: 'strong' }] }],
+                        });
+
+                        const attachmentListItems = uploadedAttachments.map(att => ({
+                            type: 'listItem',
+                            content: [{
+                                type: 'paragraph',
+                                content: att.contentUrl
+                                    ? [{ type: 'text', text: att.filename, marks: [{ type: 'link', attrs: { href: att.contentUrl } }] }]
+                                    : [{ type: 'text', text: `${att.filename} (attachment #${att.id})` }],
+                            }],
+                        }));
+
+                        fallbackAdf.content.push({
+                            type: 'bulletList',
+                            content: attachmentListItems,
+                        });
+
+                        const resp = await fetch(commentUrl, {
+                            method: 'POST',
+                            headers: apiConfig.headers,
+                            body: JSON.stringify({ body: fallbackAdf }),
+                        });
+
+                        if (resp.ok) {
+                            let data = null;
+                            try { data = await resp.json(); } catch (_) { /* best-effort */ }
+                            commentResult = {
+                                success: true,
+                                commentId: data?.id || null,
+                                strategy: 'v3-adf-text-links',
+                                note: 'Inline media embedding was not available — images are attached to the ticket and linked in the comment.',
+                            };
+                        } else {
+                            const errText = await resp.text();
+                            commentResult = {
+                                success: false,
+                                error: `Comment creation failed (all strategies exhausted). Last error: HTTP ${resp.status}: ${errText.slice(0, 300)}`,
+                            };
+                        }
+                    }
+
+                    const ticketUrl = buildJiraBrowseUrl(apiConfig, ticketKey);
+
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('add_comment_with_images', {
+                            phase: commentResult.success ? 'complete' : 'failed',
+                            detail: commentResult.success
+                                ? `✅ Comment with ${uploadedAttachments.length} image(s) added to ${ticketKey}`
+                                : `❌ ${commentResult.error}`,
+                        });
+                    }
+
+                    return JSON.stringify({
+                        success: commentResult.success,
+                        ticketKey,
+                        ticketUrl,
+                        commentId: commentResult.commentId || undefined,
+                        strategy: commentResult.strategy || undefined,
+                        imagesUploaded: uploadedAttachments.length,
+                        imagesFailed: failedUploads.length,
+                        uploadedAttachments: uploadedAttachments.map(a => ({
+                            id: a.id,
+                            filename: a.filename,
+                            mediaFileId: a.mediaFileId || undefined,
+                        })),
+                        failedUploads: failedUploads.length > 0 ? failedUploads : undefined,
+                        note: commentResult.note || undefined,
+                        error: commentResult.error || undefined,
+                    });
+                } catch (error) {
+                    return JSON.stringify({ success: false, error: `Comment with images error: ${error.message}` });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
     // TOOL 11c: update_jira_ticket
     // Available to: buggenie, testgenie, taskgenie
     // ───────────────────────────────────────────────────────────────────
@@ -6595,7 +8598,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
         tools.push(defineTool('update_jira_ticket', {
             description:
                 'Updates an existing Jira ticket via the Atlassian REST API. ' +
-                'Can update summary, description, labels, priority, or add comments. ' +
+                'Can update summary, description, labels, priority, fix versions, or add comments. ' +
                 'Use this when the user asks to edit, update, or modify an existing Jira ticket.',
             parameters: {
                 type: 'object',
@@ -6628,14 +8631,30 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         type: 'string',
                         description: 'Comma-separated labels to ADD to existing labels (without removing current ones). Optional.',
                     },
+                    fixVersions: {
+                        type: 'string',
+                        description: 'Comma-separated version names to SET as Fix Version/s on the ticket (replaces all existing fix versions). Use version names exactly as they appear in Jira (e.g., "v1.2.0" or "Sprint 42"). Optional.',
+                    },
+                    addFixVersions: {
+                        type: 'string',
+                        description: 'Comma-separated version names to ADD to existing Fix Version/s (without removing current ones). Optional.',
+                    },
+                    removeFixVersions: {
+                        type: 'string',
+                        description: 'Comma-separated version names to REMOVE from existing Fix Version/s. Optional.',
+                    },
                     jiraBaseUrl: {
                         type: 'string',
                         description: 'Jira base URL extracted from user-provided ticket URLs. Overrides JIRA_BASE_URL env var for the returned ticket URL.',
                     },
+                    mentions: {
+                        type: 'string',
+                        description: 'Optional JSON array of users to @mention in the description or comment. Each entry: {"accountId":"...","displayName":"..."}. Use search_jira_users to resolve names first. Mention nodes trigger Jira notifications.',
+                    },
                 },
                 required: ['ticketId'],
             },
-            handler: async ({ ticketId, summary, description, comment, priority, labels, addLabels, jiraBaseUrl }) => {
+            handler: async ({ ticketId, summary, description, comment, priority, labels, addLabels, fixVersions, addFixVersions, removeFixVersions, jiraBaseUrl, mentions }) => {
                 try {
                     const latestUserMessage = getLatestUserMessageText(deps);
                     const normalizedTicket = normalizeJiraTicketInput(ticketId, latestUserMessage);
@@ -6662,7 +8681,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     }
 
                     const ticketUrl = buildJiraBrowseUrl(jiraConfig, normalizedTicket.ticketId);
-                    const ticketState = await fetchJiraTicketState(jiraConfig, normalizedTicket.ticketId, ['summary', 'description', 'priority', 'labels']);
+                    const ticketState = await fetchJiraTicketState(jiraConfig, normalizedTicket.ticketId, ['summary', 'description', 'priority', 'labels', 'fixVersions']);
                     if (!ticketState.success) {
                         return JSON.stringify({
                             success: false,
@@ -6682,23 +8701,46 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     const replacementLabels = labels ? normalizeJiraLabelList(labels) : currentTicket.labels;
                     const additionalLabels = addLabels ? normalizeJiraLabelList(addLabels) : [];
                     const finalLabels = Array.from(new Set([...(Array.isArray(replacementLabels) ? replacementLabels : []), ...additionalLabels]));
+
+                    // ── Fix Versions computation ──
+                    const currentFixVersionNames = (currentTicket.fixVersions || []).map(v => v.name);
+                    let finalFixVersionNames = currentFixVersionNames;
+                    const hasFixVersionChange = Boolean(fixVersions || addFixVersions || removeFixVersions);
+                    if (fixVersions) {
+                        // SET mode: replace all existing fix versions
+                        finalFixVersionNames = fixVersions.split(',').map(v => v.trim()).filter(Boolean);
+                    } else {
+                        if (addFixVersions) {
+                            const toAdd = addFixVersions.split(',').map(v => v.trim()).filter(Boolean);
+                            finalFixVersionNames = Array.from(new Set([...finalFixVersionNames, ...toAdd]));
+                        }
+                        if (removeFixVersions) {
+                            const toRemove = new Set(removeFixVersions.split(',').map(v => v.trim().toLowerCase()));
+                            finalFixVersionNames = finalFixVersionNames.filter(name => !toRemove.has(name.toLowerCase()));
+                        }
+                    }
+
                     const fieldChanges = [
                         createMutationFieldChange({ field: 'summary', label: 'Summary', before: currentTicket.summary, after: summary || currentTicket.summary }),
                         createMutationFieldChange({ field: 'description', label: 'Description', before: currentTicket.description, after: description || currentTicket.description }),
                         createMutationFieldChange({ field: 'priority', label: 'Priority', before: currentTicket.priority, after: priority || currentTicket.priority }),
                         (labels || addLabels) ? createMutationFieldChange({ field: 'labels', label: 'Labels', before: currentTicket.labels, after: finalLabels }) : null,
+                        hasFixVersionChange ? createMutationFieldChange({ field: 'fixVersions', label: 'Fix Version/s', before: currentFixVersionNames, after: finalFixVersionNames }) : null,
                     ].filter(Boolean);
                     const updateNotes = [
                         addLabels ? `Adds labels: ${additionalLabels.join(', ')}` : '',
+                        addFixVersions ? `Adds fix versions: ${addFixVersions}` : '',
+                        removeFixVersions ? `Removes fix versions: ${removeFixVersions}` : '',
                         comment ? 'Adds a new comment.' : '',
                     ].filter(Boolean);
 
-                    // \u2500\u2500 Update issue fields (summary, description, priority, labels) \u2500\u2500
+                    // ── Update issue fields (summary, description, priority, labels, fixVersions) ──
                     const fieldsUpdate = {};
                     if (summary) fieldsUpdate.summary = summary;
-                    if (description) fieldsUpdate.description = markdownToAdf(description);
+                    if (description) fieldsUpdate.description = markdownToAdf(applyMentions(description, mentions));
                     if (priority) fieldsUpdate.priority = { name: priority };
                     if (labels) fieldsUpdate.labels = labels.split(',').map(l => l.trim());
+                    if (fixVersions) fieldsUpdate.fixVersions = finalFixVersionNames.map(name => ({ name }));
 
                     const needsApproval = Object.keys(fieldsUpdate).length > 0;
                     let updateApproval = {
@@ -6790,13 +8832,48 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         }
                     }
 
+                    // ── Add/Remove fix versions without replacing ──
+                    if ((addFixVersions || removeFixVersions) && !fixVersions) {
+                        const fixVersionOps = [];
+                        if (addFixVersions) {
+                            addFixVersions.split(',').map(v => v.trim()).filter(Boolean).forEach(name => {
+                                fixVersionOps.push({ add: { name } });
+                            });
+                        }
+                        if (removeFixVersions) {
+                            removeFixVersions.split(',').map(v => v.trim()).filter(Boolean).forEach(name => {
+                                fixVersionOps.push({ remove: { name } });
+                            });
+                        }
+                        if (fixVersionOps.length > 0) {
+                            const fvUrl = buildJiraIssueApiUrl(jiraConfig, normalizedTicket.ticketId);
+                            const fvResp = await fetch(fvUrl, {
+                                method: 'PUT',
+                                headers: jiraConfig.headers,
+                                body: JSON.stringify({
+                                    update: { fixVersions: fixVersionOps },
+                                }),
+                            });
+                            if (!fvResp.ok) {
+                                const errBody = await fvResp.text();
+                                const formattedError = formatJiraErrorResponse('Fix versions update failed', fvResp.status, errBody);
+                                results.errors.push(formattedError.message);
+                                results.errorMessages.push(...(formattedError.errorMessages || []));
+                                Object.assign(results.fieldErrors, formattedError.fieldErrors || {});
+                                if (!results.hint) results.hint = formattedError.hint;
+                            } else {
+                                results.updated.push('fixVersions-updated');
+                            }
+                        }
+                    }
+
                     // \u2500\u2500 Add comment \u2500\u2500
                     if (comment) {
                         const commentUrl = buildJiraIssueApiUrl(jiraConfig, normalizedTicket.ticketId, '/comment');
                         const commentResp = await fetch(commentUrl, {
                             method: 'POST',
                             headers: jiraConfig.headers,
-                            body: JSON.stringify({ body: markdownToAdf(comment) }),
+                            body: JSON.stringify({ body: markdownToAdf(applyMentions(comment, mentions)) }),
                         });
                         if (!commentResp.ok) {
                             const errBody = await commentResp.text();
@@ -6825,8 +8902,9 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     }
 
                     const appliedChanges = [
-                        results.updated.includes('fields') ? fieldChanges.filter(change => ['summary', 'description', 'priority'].includes(change.field) || (change.field === 'labels' && Boolean(labels))) : [],
+                        results.updated.includes('fields') ? fieldChanges.filter(change => ['summary', 'description', 'priority'].includes(change.field) || (change.field === 'labels' && Boolean(labels)) || (change.field === 'fixVersions' && Boolean(fixVersions))) : [],
                         results.updated.includes('labels-added') ? fieldChanges.filter(change => change.field === 'labels') : [],
+                        results.updated.includes('fixVersions-updated') ? fieldChanges.filter(change => change.field === 'fixVersions') : [],
                     ].flat();
                     const dedupedChanges = appliedChanges.filter((change, index, changes) => changes.findIndex(candidate => candidate.field === change.field) === index);
                     const receiptNotes = [
@@ -6865,6 +8943,82 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     return JSON.stringify({
                         success: false,
                         error: `Jira update error: ${error.message}`,
+                        hint: 'Check network connectivity and Jira credentials in agentic-workflow/.env',
+                    });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 11c2: get_jira_project_versions
+    // Available to: buggenie, testgenie, taskgenie
+    // Lists all versions (Fix Versions) for a Jira project.
+    // ───────────────────────────────────────────────────────────────────
+    if (['buggenie', 'testgenie', 'taskgenie'].includes(agentName)) {
+        tools.push(defineTool('get_jira_project_versions', {
+            description:
+                'Lists all versions (Fix Version/s) available in a Jira project. ' +
+                'Use this to discover valid version names before setting fixVersions on a ticket via update_jira_ticket. ' +
+                'Returns version name, id, released status, and release date.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    projectKey: {
+                        type: 'string',
+                        description: 'Jira project key (e.g., "AOTF"). Defaults to JIRA_PROJECT_KEY env var.',
+                    },
+                    jiraBaseUrl: {
+                        type: 'string',
+                        description: 'Optional Jira base URL override.',
+                    },
+                },
+                required: [],
+            },
+            handler: async ({ projectKey, jiraBaseUrl }) => {
+                try {
+                    const jiraConfig = getJiraApiConfig({ jiraBaseUrl });
+                    if (jiraConfig.error) {
+                        return JSON.stringify({ success: false, error: jiraConfig.error });
+                    }
+
+                    const resolvedProject = projectKey || process.env.JIRA_PROJECT_KEY || 'AOTF';
+                    const versionsUrl = `${jiraConfig.apiBase}/project/${resolvedProject}/versions`;
+                    const resp = await fetch(versionsUrl, {
+                        method: 'GET',
+                        headers: jiraConfig.headers,
+                    });
+
+                    if (!resp.ok) {
+                        const errBody = await resp.text();
+                        return JSON.stringify({
+                            success: false,
+                            error: `Failed to fetch versions for project ${resolvedProject}: HTTP ${resp.status}`,
+                            details: errBody,
+                        }, null, 2);
+                    }
+
+                    const data = await resp.json();
+                    const versions = (Array.isArray(data) ? data : []).map(v => ({
+                        id: v.id,
+                        name: v.name,
+                        description: v.description || '',
+                        released: v.released || false,
+                        archived: v.archived || false,
+                        releaseDate: v.releaseDate || null,
+                        startDate: v.startDate || null,
+                    }));
+
+                    return JSON.stringify({
+                        success: true,
+                        projectKey: resolvedProject,
+                        totalVersions: versions.length,
+                        versions,
+                    }, null, 2);
+                } catch (error) {
+                    return JSON.stringify({
+                        success: false,
+                        error: `Jira versions fetch error: ${error.message}`,
                         hint: 'Check network connectivity and Jira credentials in agentic-workflow/.env',
                     });
                 }
@@ -6922,10 +9076,14 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         type: 'string',
                         description: 'Optional Jira base URL to use for the returned browse link.',
                     },
+                    mentions: {
+                        type: 'string',
+                        description: 'Optional JSON array of users to @mention in the worklog comment. Each entry: {"accountId":"...","displayName":"..."}. Use search_jira_users to resolve names first.',
+                    },
                 },
                 required: ['ticketId'],
             },
-            handler: async ({ ticketId, timeSpent, timeSpentSeconds, started, comment, adjustEstimate, newEstimate, reduceBy, jiraBaseUrl }) => {
+            handler: async ({ ticketId, timeSpent, timeSpentSeconds, started, comment, adjustEstimate, newEstimate, reduceBy, jiraBaseUrl, mentions }) => {
                 try {
                     if (!isNonEmptyString(timeSpent) && !(typeof timeSpentSeconds === 'number' && timeSpentSeconds > 0)) {
                         return JSON.stringify({
@@ -6974,7 +9132,76 @@ function createCustomTools(defineTool, agentName, deps = {}) {
 
                     if (isNonEmptyString(timeSpent)) payload.timeSpent = timeSpent.trim();
                     if (typeof timeSpentSeconds === 'number' && timeSpentSeconds > 0) payload.timeSpentSeconds = timeSpentSeconds;
-                    if (comment) payload.comment = markdownToAdf(comment);
+                    if (comment) payload.comment = markdownToAdf(applyMentions(comment, mentions));
+
+                    const worklogTicketUrl = buildJiraBrowseUrl(jiraConfig, ticketId);
+                    const worklogDisplayTime = isNonEmptyString(timeSpent)
+                        ? timeSpent.trim()
+                        : (typeof timeSpentSeconds === 'number' && timeSpentSeconds > 0 ? `${timeSpentSeconds}s` : '(unspecified)');
+                    const worklogChanges = [
+                        createMutationFieldChange({
+                            field: 'timeSpent',
+                            label: 'Time logged',
+                            changeType: 'add',
+                            before: null,
+                            after: worklogDisplayTime,
+                            includeUnchanged: true,
+                        }),
+                        isNonEmptyString(comment)
+                            ? createMutationFieldChange({
+                                field: 'worklogComment',
+                                label: 'Worklog comment',
+                                changeType: 'add',
+                                before: null,
+                                after: comment.length > 240 ? `${comment.slice(0, 240)}…` : comment,
+                                includeUnchanged: true,
+                            })
+                            : null,
+                        isNonEmptyString(adjustEstimate)
+                            ? createMutationFieldChange({
+                                field: 'adjustEstimate',
+                                label: 'Estimate adjustment',
+                                changeType: 'replace',
+                                before: '(Jira default)',
+                                after: adjustEstimate,
+                                includeUnchanged: true,
+                            })
+                            : null,
+                    ].filter(Boolean);
+
+                    const worklogPreview = buildMutationPreview({
+                        guardrail: buildJiraMutationGuardrailMetadata('log_jira_work'),
+                        title: `Approve time log for ${ticketId}`,
+                        subject: buildJiraMutationSubject({
+                            ticketId,
+                            ticketUrl: worklogTicketUrl,
+                        }),
+                        changes: worklogChanges,
+                        notes: [
+                            `Start: ${payload.started}`,
+                        ],
+                        consequence: 'Jira will record the worklog entry and may adjust the remaining estimate based on adjustEstimate.',
+                    });
+                    const worklogPreviewLines = buildJiraMutationPreviewLines([], worklogPreview);
+
+                    const worklogApproval = await requireJiraMutationApproval({
+                        deps,
+                        toolName: 'log_jira_work',
+                        ticketId,
+                        consequence: 'Jira will record the worklog entry and may adjust the remaining estimate based on adjustEstimate.',
+                        previewLines: worklogPreviewLines,
+                        preview: worklogPreview,
+                    });
+
+                    if (!worklogApproval.approved) {
+                        return JSON.stringify(buildJiraMutationApprovalFailure({
+                            approval: worklogApproval,
+                            ticketId,
+                            ticketUrl: worklogTicketUrl,
+                            previewLines: worklogPreviewLines,
+                            preview: worklogPreview,
+                        }), null, 2);
+                    }
 
                     const worklogUrl = `${buildJiraIssueApiUrl(jiraConfig, ticketId, '/worklog')}${query.toString() ? `?${query.toString()}` : ''}`;
                     const response = await fetch(worklogUrl, {
@@ -7008,6 +9235,10 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                             timeSpent: worklog.timeSpent || payload.timeSpent || '',
                             timeSpentSeconds: typeof worklog.timeSpentSeconds === 'number' ? worklog.timeSpentSeconds : payload.timeSpentSeconds || null,
                         },
+                        guardrail: buildMutationResultGuardrail(worklogApproval.guardrail, {
+                            approved: true,
+                            mode: worklogApproval.mode,
+                        }),
                     }, null, 2);
                 } catch (error) {
                     return JSON.stringify({
@@ -7094,6 +9325,62 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     if (originalEstimate) edit.originalEstimate = originalEstimate;
                     if (remainingEstimate) edit.remainingEstimate = remainingEstimate;
 
+                    const estimateTicketUrl = buildJiraBrowseUrl(jiraConfig, ticketId);
+                    const estimateChanges = [
+                        isNonEmptyString(originalEstimate)
+                            ? createMutationFieldChange({
+                                field: 'originalEstimate',
+                                label: 'Original estimate',
+                                changeType: 'replace',
+                                before: '(current value)',
+                                after: originalEstimate,
+                                includeUnchanged: true,
+                            })
+                            : null,
+                        isNonEmptyString(remainingEstimate)
+                            ? createMutationFieldChange({
+                                field: 'remainingEstimate',
+                                label: 'Remaining estimate',
+                                changeType: 'replace',
+                                before: '(current value)',
+                                after: remainingEstimate,
+                                includeUnchanged: true,
+                            })
+                            : null,
+                    ].filter(Boolean);
+
+                    const estimatePreview = buildMutationPreview({
+                        guardrail: buildJiraMutationGuardrailMetadata('update_jira_estimates'),
+                        title: `Approve estimate update for ${ticketId}`,
+                        subject: buildJiraMutationSubject({
+                            ticketId,
+                            ticketUrl: estimateTicketUrl,
+                        }),
+                        changes: estimateChanges,
+                        notes: [],
+                        consequence: 'Jira time-tracking fields will be overwritten for this ticket and sprint burn-down reports will recalculate.',
+                    });
+                    const estimatePreviewLines = buildJiraMutationPreviewLines([], estimatePreview);
+
+                    const estimateApproval = await requireJiraMutationApproval({
+                        deps,
+                        toolName: 'update_jira_estimates',
+                        ticketId,
+                        consequence: 'Jira time-tracking fields will be overwritten for this ticket and sprint burn-down reports will recalculate.',
+                        previewLines: estimatePreviewLines,
+                        preview: estimatePreview,
+                    });
+
+                    if (!estimateApproval.approved) {
+                        return JSON.stringify(buildJiraMutationApprovalFailure({
+                            approval: estimateApproval,
+                            ticketId,
+                            ticketUrl: estimateTicketUrl,
+                            previewLines: estimatePreviewLines,
+                            preview: estimatePreview,
+                        }), null, 2);
+                    }
+
                     const response = await fetch(buildJiraIssueApiUrl(jiraConfig, ticketId), {
                         method: 'PUT',
                         headers: jiraConfig.headers,
@@ -7119,6 +9406,10 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         ticketId,
                         ticketUrl: buildJiraBrowseUrl(jiraConfig, ticketId),
                         updated: Object.keys(edit),
+                        guardrail: buildMutationResultGuardrail(estimateApproval.guardrail, {
+                            approved: true,
+                            mode: estimateApproval.mode,
+                        }),
                     }, null, 2);
                 } catch (error) {
                     return JSON.stringify({
@@ -7314,6 +9605,57 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                 const projectRoot = path.join(__dirname, '..', '..');
                 const searchType = filterType || 'both';
                 const results = [];
+                const normalizedQuery = String(query || '').trim().replace(/^['"]|['"]$/g, '');
+
+                if (!normalizedQuery) {
+                    return JSON.stringify({
+                        success: false,
+                        error: 'Query cannot be empty.',
+                    }, null, 2);
+                }
+
+                // If user passed a direct absolute path, validate and return immediately.
+                if (path.isAbsolute(normalizedQuery) && fs.existsSync(normalizedQuery)) {
+                    try {
+                        const stats = fs.statSync(normalizedQuery);
+                        const relativePath = _relativePathIfInside(projectRoot, normalizedQuery);
+
+                        if (stats.isDirectory() && (searchType === 'folder' || searchType === 'both')) {
+                            const specFileCount = _countSpecFiles(normalizedQuery);
+                            results.push({
+                                name: path.basename(normalizedQuery),
+                                path: normalizedQuery,
+                                relativePath,
+                                type: 'folder',
+                                specFileCount,
+                            });
+                        } else if (stats.isFile() && (searchType === 'file' || searchType === 'both')) {
+                            results.push({
+                                name: path.basename(normalizedQuery),
+                                path: normalizedQuery,
+                                relativePath,
+                                type: 'file',
+                                size: stats.size,
+                                modified: stats.mtime.toISOString(),
+                                isSpec: normalizedQuery.endsWith('.spec.js'),
+                            });
+                        }
+
+                        return JSON.stringify({
+                            success: true,
+                            query: normalizedQuery,
+                            directPathMatch: true,
+                            matchCount: results.length,
+                            results,
+                            searchedDirectories: [normalizedQuery],
+                        }, null, 2);
+                    } catch (error) {
+                        return JSON.stringify({
+                            success: false,
+                            error: `Could not inspect path: ${error.message}`,
+                        }, null, 2);
+                    }
+                }
 
                 // Directories to search
                 const searchDirs = [
@@ -7334,7 +9676,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     }
                 } catch { /* ignore config read errors */ }
 
-                const queryLower = query.toLowerCase();
+                const queryLower = normalizedQuery.toLowerCase();
 
                 function scanDir(dir, depth = 0) {
                     if (depth > 5 || !fs.existsSync(dir)) return;
@@ -7383,7 +9725,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
 
                 return JSON.stringify({
                     success: true,
-                    query,
+                    query: normalizedQuery,
                     matchCount: results.length,
                     results: results.slice(0, 50), // Cap at 50 results
                     searchedDirectories: searchDirs.map(d => path.relative(projectRoot, d).replace(/\\/g, '/')),
@@ -7395,52 +9737,68 @@ function createCustomTools(defineTool, agentName, deps = {}) {
     // ───────────────────────────────────────────────────────────────────
     // TOOL 12b: execute_test
     // Available to: scriptgenerator, codereviewer
-    // Runs a Playwright .spec.js file and saves raw JSON results for the
-    // Reports dashboard. This is the ONLY way for AI Chat to execute tests.
+    // Runs test files using auto-detected framework (Playwright, WebDriverIO,
+    // Cypress, Jest, Mocha, Vitest) and saves results for the Reports dashboard.
     // ───────────────────────────────────────────────────────────────────
     if (['scriptgenerator', 'codereviewer'].includes(agentName)) {
         tools.push(defineTool('execute_test', {
             description:
-                'Execute a Playwright .spec.js test file and return structured results. ' +
-                'Runs `npx playwright test` with JSON reporter, saves raw results to ' +
-                'test-artifacts/reports/ for the Reports dashboard, and returns a summary ' +
-                'with pass/fail counts, failed test names, and error details. ' +
-                'Use this after generating or modifying a test script to validate it works.',
+                'Execute test files using auto-detected framework and return structured results. ' +
+                'Auto-detects the test framework (Playwright, WebDriverIO, Cypress, Jest, Mocha, Vitest) ' +
+                'from config files and package.json, then runs the appropriate command. ' +
+                'Saves raw results to test-artifacts/reports/ for the Reports dashboard. ' +
+                'Returns a summary with pass/fail counts, failed test names, and error details. ' +
+                'Supports workspace-relative paths, absolute paths, folders, and external project paths. ' +
+                'For external paths, auto-detects the project root and framework.',
             parameters: {
                 type: 'object',
                 properties: {
                     specPath: {
                         type: 'string',
-                        description: 'Path to a .spec.js file OR a folder containing spec files (absolute or relative to workspace root). Can also be a keyword like "planner" or "notes" — auto-discovery will find it.',
+                        description: 'Path to a test file OR a folder containing test files (absolute or relative to workspace root). Can also be a keyword like "planner" or "notes" — auto-discovery will find it. Supports .spec.js, .test.js, .e2e.js, .cy.js, .spec.ts, .test.ts files.',
                     },
                     ticketId: {
                         type: 'string',
                         description: 'Jira ticket ID (e.g., AOTF-16461) for labeling the report. If omitted, derived from the folder name.',
                     },
+                    framework: {
+                        type: 'string',
+                        description: 'Test framework to use. Default: "auto" (auto-detect from config files). Options: auto, playwright, webdriverio, cypress, jest, mocha, vitest.',
+                    },
                 },
                 required: ['specPath'],
             },
-            handler: async ({ specPath, ticketId }) => {
-                const { execSync } = require('child_process');
+            handler: async ({ specPath, ticketId, framework: frameworkHint }) => {
+                const { runCommand } = require('./terminal-runner');
                 const projectRoot = path.join(__dirname, '..', '..');
+                const normalizedSpecPath = String(specPath || '').trim().replace(/^['"]|['"]$/g, '');
+
+                if (!normalizedSpecPath) {
+                    return JSON.stringify({
+                        success: false,
+                        error: 'specPath is required.',
+                    });
+                }
 
                 // Broadcast progress: resolving spec
                 if (deps?.chatManager?.broadcastToolProgress) {
                     deps.chatManager.broadcastToolProgress('execute_test', {
-                        phase: 'test', message: `Resolving test spec: ${specPath}...`, step: 1,
+                        phase: 'test', message: `Resolving test spec: ${normalizedSpecPath}...`, step: 1,
                     });
                 }
 
                 // Resolve spec path
-                let resolvedSpec = path.isAbsolute(specPath)
-                    ? specPath
-                    : path.join(projectRoot, specPath);
+                let resolvedSpec = path.isAbsolute(normalizedSpecPath)
+                    ? normalizedSpecPath
+                    : path.join(projectRoot, normalizedSpecPath);
 
                 let isDirectory = false;
+                let executionRoot = projectRoot;
+                let externalExecution = false;
 
                 // ── Auto-discovery: if not found, search by name ──
                 if (!fs.existsSync(resolvedSpec)) {
-                    const searchName = path.basename(specPath).toLowerCase();
+                    const searchName = path.basename(normalizedSpecPath).toLowerCase();
                     const searchDirs = [
                         path.join(projectRoot, 'tests', 'specs'),
                         path.join(projectRoot, 'tests-scratch', 'specs'),
@@ -7463,7 +9821,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                                         }
                                     }
                                     searchRecursive(entryPath, depth + 1);
-                                } else if (entry.isFile() && entry.name.toLowerCase().includes(searchName) && entry.name.endsWith('.spec.js')) {
+                                } else if (entry.isFile() && entry.name.toLowerCase().includes(searchName) && /\.(spec|test|e2e|cy)\.(js|ts|mjs|cjs)$/.test(entry.name)) {
                                     fileMatches.push(entryPath);
                                 }
                             }
@@ -7481,7 +9839,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     } else if (folderMatches.length > 1) {
                         return JSON.stringify({
                             success: false,
-                            error: `Multiple folder matches found for "${specPath}". Please specify which one.`,
+                            error: `Multiple folder matches found for "${normalizedSpecPath}". Please specify which one.`,
                             matches: folderMatches.map(m => ({
                                 path: path.relative(projectRoot, m.path).replace(/\\/g, '/'),
                                 specCount: m.specCount,
@@ -7492,13 +9850,13 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     } else if (fileMatches.length > 1) {
                         return JSON.stringify({
                             success: false,
-                            error: `Multiple file matches found for "${specPath}". Please specify the exact file.`,
+                            error: `Multiple file matches found for "${normalizedSpecPath}". Please specify the exact file.`,
                             matches: fileMatches.map(m => path.relative(projectRoot, m).replace(/\\/g, '/')),
                         });
                     } else {
                         return JSON.stringify({
                             success: false,
-                            error: `Spec file/folder not found: "${specPath}". No matches in tests/specs/ or tests-scratch/specs/.`,
+                            error: `Spec file/folder not found: "${normalizedSpecPath}". No matches in tests/specs/ or tests-scratch/specs/.`,
                         });
                     }
                 } else {
@@ -7506,13 +9864,40 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     isDirectory = fs.statSync(resolvedSpec).isDirectory();
                 }
 
-                // If it's a directory, verify it has spec files
+                const workspaceRelativePath = _relativePathIfInside(projectRoot, resolvedSpec);
+                if (!workspaceRelativePath) {
+                    // Use universal findProjectRoot — detects ANY framework, not just Playwright
+                    const { findProjectRoot } = require('./framework-detector');
+                    const externalRoot = findProjectRoot(resolvedSpec);
+                    if (externalRoot) {
+                        executionRoot = externalRoot;
+                        externalExecution = true;
+                    } else {
+                        // Fallback: remap to a workspace spec target when possible.
+                        const workspaceMatch = _resolveWorkspaceSpecTarget(projectRoot, resolvedSpec, isDirectory);
+                        if (workspaceMatch) {
+                            resolvedSpec = workspaceMatch;
+                            isDirectory = fs.statSync(resolvedSpec).isDirectory();
+                            executionRoot = projectRoot;
+                            externalExecution = false;
+                        } else {
+                            return JSON.stringify({
+                                success: false,
+                                error: `Spec path is outside this workspace and no project root was found: "${normalizedSpecPath}".`,
+                                hint: 'Use a workspace path under tests/specs, or provide a path inside a project with package.json or a test framework config file.',
+                            });
+                        }
+                    }
+                }
+
+                // If it's a directory, verify it has test files (any framework)
                 if (isDirectory) {
-                    const specCount = _countSpecFiles(resolvedSpec);
-                    if (specCount === 0) {
+                    const { countTestFiles } = require('./framework-detector');
+                    const testFileCount = countTestFiles(resolvedSpec);
+                    if (testFileCount === 0) {
                         return JSON.stringify({
                             success: false,
-                            error: `Folder "${specPath}" exists but contains no .spec.js files.`,
+                            error: `Folder "${normalizedSpecPath}" exists but contains no test files (.spec.js, .test.js, .e2e.js, .cy.js, etc.).`,
                         });
                     }
                 }
@@ -7533,86 +9918,400 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                 const runId = `chat_${derivedTicketId}_${Date.now()}`;
 
                 try {
-                    const relativePath = path.relative(projectRoot, resolvedSpec).replace(/\\/g, '/');
+                    const relativePath = _relativePathIfInside(executionRoot, resolvedSpec);
+                    if (!relativePath) {
+                        return JSON.stringify({
+                            success: false,
+                            error: `Resolved spec path is not inside execution root: "${resolvedSpec}".`,
+                        });
+                    }
 
-                    // For directories, pass directly to Playwright (no regex escaping needed)
-                    // For files, escape special chars for Playwright's grep
-                    const playwrightTarget = isDirectory
-                        ? relativePath
-                        : relativePath.replace(/[+.*?^${}()|[\]\\]/g, '\\$&');
+                    // For directories, pass directly; for files, framework-specific
+                    // escaping is handled inside the command construction block below.
+
+                    const scopeSuffix = externalExecution
+                        ? ` (external root: ${path.basename(executionRoot)})`
+                        : '';
 
                     // Broadcast progress: running
                     if (deps?.chatManager?.broadcastToolProgress) {
                         deps.chatManager.broadcastToolProgress('execute_test', {
                             phase: 'test', message: isDirectory
-                                ? `Running all specs in ${path.basename(resolvedSpec)}/...`
-                                : `Running ${path.basename(resolvedSpec)}...`,
+                                ? `Running all specs in ${path.basename(resolvedSpec)}${scopeSuffix}...`
+                                : `Running ${path.basename(resolvedSpec)}${scopeSuffix}...`,
                             step: 2,
                         });
                     }
 
                     let output;
-                    try {
-                        output = execSync(
-                            `npx playwright test "${playwrightTarget}" --reporter=json`,
-                            {
-                                encoding: 'utf-8',
-                                stdio: 'pipe',
-                                cwd: projectRoot,
-                                timeout: 300000,
-                            }
-                        );
-                    } catch (execError) {
-                        // Playwright exits non-zero on test failures — capture stdout
-                        output = execError.stdout || execError.stderr || execError.message;
+                    let exitCode = 0;
+                    let timedOut = false;
+                    let aborted = false;
+                    let lastProgressEmit = 0;
+
+                    // ── Framework detection + command construction ──
+                    const { detectFramework, buildRunCommand: buildFwCommand } = require('./framework-detector');
+                    const { getParserForFramework, parseJsonResults } = require('./output-parser');
+
+                    const fwHint = (frameworkHint || 'auto').toLowerCase().trim();
+                    let detectedFramework = 'playwright'; // default for this workspace
+                    let detection = null;
+
+                    if (fwHint !== 'auto' && fwHint !== 'playwright') {
+                        detectedFramework = fwHint;
+                    } else if (externalExecution || fwHint === 'auto') {
+                        detection = detectFramework(executionRoot);
+                        if (detection.confidence !== 'low') {
+                            detectedFramework = detection.framework;
+                        }
                     }
+
+                    const os = require('os');
+                    const jsonOutputFile = path.join(
+                        os.tmpdir(),
+                        `test-json-${runId}.json`
+                    );
+
+                    // Get framework-appropriate output parser for streaming
+                    const outputParser = getParserForFramework(detectedFramework);
+
+                    let eventBridge = null;
+                    let bridgeTypes = null;
+                    try {
+                        const bridgeModule = require('./event-bridge');
+                        eventBridge = bridgeModule.getEventBridge();
+                        bridgeTypes = bridgeModule.EVENT_TYPES;
+                    } catch { /* EventBridge not available — chat broadcast only */ }
+
+                    let testsSeen = 0;
+                    let testsPassed = 0;
+                    let testsFailed = 0;
+                    let totalFromHeader = null;
+
+                    const broadcastTestEvent = (evt) => {
+                        if (evt.kind === 'header') {
+                            totalFromHeader = evt.totalTests;
+                            if (deps?.chatManager?.broadcastToolProgress) {
+                                deps.chatManager.broadcastToolProgress('execute_test', {
+                                    phase: 'test',
+                                    message: `Starting ${evt.totalTests} test${evt.totalTests === 1 ? '' : 's'} (${evt.workerCount} worker${evt.workerCount === 1 ? '' : 's'})`,
+                                    step: 2,
+                                    totalTests: evt.totalTests,
+                                });
+                            }
+                            if (eventBridge && bridgeTypes) {
+                                eventBridge.push(bridgeTypes.TEST_PROGRESS, runId, {
+                                    kind: 'start',
+                                    totalTests: evt.totalTests,
+                                    workerCount: evt.workerCount,
+                                    ticketId: derivedTicketId,
+                                });
+                            }
+                            return;
+                        }
+                        if (evt.kind === 'test') {
+                            if (evt.status === 'passed') testsPassed++;
+                            else if (evt.status === 'failed') testsFailed++;
+                            if (evt.status !== 'running') testsSeen++;
+
+                            // Chat progress — throttled and terse
+                            if (deps?.chatManager?.broadcastToolProgress && evt.status !== 'running') {
+                                const now = Date.now();
+                                if (now - lastProgressEmit >= 500) {
+                                    lastProgressEmit = now;
+                                    const totalLabel = totalFromHeader ? `/${totalFromHeader}` : '';
+                                    deps.chatManager.broadcastToolProgress('execute_test', {
+                                        phase: 'test',
+                                        message: `${testsSeen}${totalLabel} — ${testsPassed} passed, ${testsFailed} failed`,
+                                        step: 2,
+                                        testIndex: evt.index,
+                                        testTitle: evt.title,
+                                        testStatus: evt.status,
+                                    });
+                                }
+                            }
+                            if (eventBridge && bridgeTypes) {
+                                eventBridge.push(bridgeTypes.TEST_RESULT, runId, {
+                                    ticketId: derivedTicketId,
+                                    index: evt.index,
+                                    title: evt.title,
+                                    project: evt.project,
+                                    status: evt.status,
+                                    durationText: evt.durationText,
+                                    runningTotals: { seen: testsSeen, passed: testsPassed, failed: testsFailed },
+                                });
+                            }
+                        }
+                    };
+
+                    const streamChunk = (chunk, stream) => {
+                        if (!chunk) return;
+                        // Feed into structured parser (emits per-test events)
+                        if (stream === 'stdout') {
+                            try {
+                                const events = outputParser.feed(chunk);
+                                for (const evt of events) broadcastTestEvent(evt);
+                            } catch { /* parser must never break execution */ }
+                        }
+
+                        // Legacy throttled progress fallback — keeps stderr visible and
+                        // covers any output the structured parser didn't match.
+                        if (!deps?.chatManager?.broadcastToolProgress) return;
+                        const now = Date.now();
+                        if (now - lastProgressEmit < 1500) return;
+                        // Only emit legacy progress for stderr (stdout handled above)
+                        if (stream !== 'stderr') return;
+                        lastProgressEmit = now;
+                        const firstLine = String(chunk)
+                            .split(/\r?\n/)
+                            .map((line) => line.trim())
+                            .find((line) => line.length > 0);
+                        if (!firstLine) return;
+                        deps.chatManager.broadcastToolProgress('execute_test', {
+                            phase: 'test',
+                            message: firstLine.length > 160 ? `${firstLine.slice(0, 160)}…` : firstLine,
+                            step: 2,
+                            stream,
+                        });
+                    };
+
+                    // ── Framework-aware command construction ──
+                    // For Playwright (this workspace's primary framework), use the proven
+                    // dual-reporter strategy. For other frameworks, use buildRunCommand.
+                    let runCommandName, runCommandArgs, execStrategy;
+                    const childEnv = {
+                        ...process.env,
+                        FORCE_COLOR: '0',
+                        CI: process.env.CI || '1',
+                    };
+
+                    if (detectedFramework === 'playwright') {
+                        const npxCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+                        const reporterArg = '--reporter=list,json';
+                        const playwrightTarget = isDirectory
+                            ? relativePath
+                            : relativePath.replace(/[+.*?^${}()|[\]\\]/g, '\\$&');
+                        const playwrightArgs = ['playwright', 'test', playwrightTarget, reporterArg];
+
+                        runCommandName = npxCommand;
+                        runCommandArgs = playwrightArgs;
+                        execStrategy = 'npx';
+
+                        const matchingScript = _findMatchingNpmScript(executionRoot, resolvedSpec, isDirectory);
+                        const localPlaywright = _resolveLocalPlaywrightBinary(executionRoot);
+
+                        if (matchingScript) {
+                            const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+                            runCommandName = npmCommand;
+                            runCommandArgs = ['run', matchingScript.scriptName, '--', reporterArg];
+                            execStrategy = `npm-script:${matchingScript.scriptName}`;
+                        } else if (localPlaywright) {
+                            runCommandName = localPlaywright.command;
+                            runCommandArgs = ['test', playwrightTarget, reporterArg];
+                            execStrategy = 'local-binary';
+                        }
+
+                        // Playwright-specific JSON output env vars
+                        childEnv.PLAYWRIGHT_JSON_OUTPUT_NAME = jsonOutputFile;
+                        childEnv.PLAYWRIGHT_JSON_OUTPUT_FILE = jsonOutputFile;
+                    } else {
+                        // Non-Playwright: use framework detector to build the right command
+                        const fwCmd = buildFwCommand(
+                            detection || { framework: detectedFramework, configFile: null, projectRoot: executionRoot, detectedScripts: [] },
+                            relativePath,
+                            { json: true, jsonOutputFile }
+                        );
+                        runCommandName = fwCmd.command;
+                        runCommandArgs = fwCmd.args;
+                        execStrategy = `${detectedFramework}:${fwCmd.strategy}`;
+                        Object.assign(childEnv, fwCmd.env || {});
+                    }
+
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('execute_test', {
+                            phase: 'test',
+                            message: `Framework: ${detectedFramework} | Strategy: ${execStrategy}`,
+                            step: 2,
+                        });
+                    }
+
+                    try {
+                        const result = await runCommand({
+                            command: runCommandName,
+                            args: runCommandArgs,
+                            cwd: executionRoot,
+                            timeoutMs: 300000,
+                            abortSignal: deps?.abortSignal || null,
+                            env: childEnv,
+                            onStdout: (chunk) => streamChunk(chunk, 'stdout'),
+                            onStderr: (chunk) => streamChunk(chunk, 'stderr'),
+                        });
+                        output = [result.stdout || '', result.stderr || ''].filter(Boolean).join('\n');
+                        exitCode = result.exitCode ?? 0;
+                    } catch (execError) {
+                        // Playwright exits non-zero on test failures — its stdout contains the JSON report.
+                        output = [execError.stdout || '', execError.stderr || ''].filter(Boolean).join('\n');
+                        exitCode = Number.isInteger(execError.exitCode) ? execError.exitCode : 1;
+                        timedOut = execError.timedOut === true;
+                        aborted = execError.aborted === true;
+
+                        // Spawn-level failure (ENOENT, EACCES, etc.) — return structured diagnostics
+                        // instead of an opaque "error with spawning the process" message so the agent
+                        // can actually recover.
+                        if (execError.code === 'SPAWN_ERROR' || execError.code === 'ENOENT') {
+                            try { fs.existsSync(jsonOutputFile) && fs.unlinkSync(jsonOutputFile); } catch { /* ignore */ }
+                            return JSON.stringify({
+                                success: false,
+                                error: `Failed to launch test runner (${execError.code}): ${execError.message}`,
+                                diagnostics: {
+                                    reason: 'SPAWN_FAILED',
+                                    framework: detectedFramework,
+                                    strategy: execStrategy,
+                                    command: runCommandName,
+                                    args: runCommandArgs,
+                                    executionRoot,
+                                    externalExecution,
+                                    hasPackageJson: fs.existsSync(path.join(executionRoot, 'package.json')),
+                                    hasNodeModules: fs.existsSync(path.join(executionRoot, 'node_modules')),
+                                },
+                                hint: !fs.existsSync(path.join(executionRoot, 'node_modules'))
+                                    ? `The project at "${executionRoot}" has no node_modules. Run "npm install" there first.`
+                                    : `The ${detectedFramework} runner could not be launched in "${executionRoot}". Verify the framework is installed (check node_modules/.bin/).`,
+                                runId,
+                            });
+                        }
+
+                        if (!output) {
+                            output = execError.message || '';
+                        }
+                    }
+
+                    if (aborted) {
+                        try { fs.existsSync(jsonOutputFile) && fs.unlinkSync(jsonOutputFile); } catch { /* ignore */ }
+                        return JSON.stringify({
+                            success: false,
+                            cancelled: true,
+                            error: 'Test execution cancelled.',
+                            runId,
+                            executionRoot,
+                            externalExecution,
+                        });
+                    }
+
+                    if (timedOut && !output) {
+                        try { fs.existsSync(jsonOutputFile) && fs.unlinkSync(jsonOutputFile); } catch { /* ignore */ }
+                        return JSON.stringify({
+                            success: false,
+                            error: 'Test execution timed out after 300s with no output.',
+                            runId,
+                            executionRoot,
+                            externalExecution,
+                        });
+                    }
+
+                    // Flush any residual buffered line from the streaming parser
+                    try {
+                        const tailEvents = outputParser.flush();
+                        for (const evt of tailEvents) broadcastTestEvent(evt);
+                    } catch { /* parser tail flush is best-effort */ }
 
                     // Strip dotenv banner and other non-JSON preamble from stdout
                     const cleanedOutput = output.replace(/^\[dotenv[^\]]*\][^\n]*\n?/gm, '').trim();
 
-                    // Parse JSON from output
+                    // Parse JSON — prefer the tempfile (dual-reporter writes there), fall back
+                    // to stdout parsing for backward compat / older Playwright versions.
                     const { extractJSON: parseJSON } = require('./utils');
-                    let playwrightResult;
-                    try {
-                        playwrightResult = parseJSON(cleanedOutput);
-                    } catch {
-                        // Could not parse JSON — save raw output as error envelope
-                        _saveTestReport(derivedTicketId, runId, resolvedSpec, {
-                            rawError: output.substring(0, 50000),
-                        });
-                        return JSON.stringify({
-                            success: false,
-                            error: `Playwright output could not be parsed as JSON`,
-                            rawOutput: output.substring(0, 2000),
-                            reportSaved: true,
-                            runId,
-                        });
+                    let jsonResult = null;
+                    let parseSource = null;
+
+                    if (fs.existsSync(jsonOutputFile)) {
+                        try {
+                            const fileContent = fs.readFileSync(jsonOutputFile, 'utf-8');
+                            if (fileContent && fileContent.trim().length > 0) {
+                                jsonResult = JSON.parse(fileContent);
+                                parseSource = 'file';
+                            }
+                        } catch { /* fall through to stdout parse */ }
                     }
 
-                    // Extract results
-                    const suites = playwrightResult.suites || [];
-                    let totalSpecs = 0, passed = 0, failed = 0;
-                    const failedTests = [];
+                    if (!jsonResult) {
+                        try {
+                            jsonResult = parseJSON(cleanedOutput);
+                            parseSource = 'stdout';
+                        } catch {
+                            // Could not parse JSON — for non-Playwright frameworks, use
+                            // the streaming parser's aggregated results as fallback.
+                            const streamResults = outputParser.getResults();
+                            if (streamResults.total > 0 || detectedFramework !== 'playwright') {
+                                _saveTestReport(derivedTicketId, runId, resolvedSpec, {
+                                    rawOutput: output.substring(0, 50000),
+                                    framework: detectedFramework,
+                                    streamResults,
+                                });
+                                try { fs.existsSync(jsonOutputFile) && fs.unlinkSync(jsonOutputFile); } catch { /* ignore */ }
 
-                    const walkSuites = (list) => {
-                        for (const suite of list) {
-                            for (const spec of (suite.specs || [])) {
-                                totalSpecs++;
-                                const test = spec.tests?.[0];
-                                if (test?.status === 'passed' || test?.status === 'expected') {
-                                    passed++;
-                                } else if (test?.status === 'failed' || test?.status === 'unexpected') {
-                                    failed++;
-                                    failedTests.push(spec.title);
+                                const effectiveFailedCount = streamResults.failed;
+                                if (deps?.chatManager?.broadcastToolProgress) {
+                                    deps.chatManager.broadcastToolProgress('execute_test', {
+                                        phase: 'test',
+                                        message: streamResults.total > 0
+                                            ? `${streamResults.passed}/${streamResults.total} passed, ${streamResults.failed} failed`
+                                            : `Exit code: ${exitCode}`,
+                                        step: 3,
+                                    });
                                 }
+
+                                return JSON.stringify({
+                                    success: exitCode === 0 && streamResults.failed === 0,
+                                    totalCount: streamResults.total,
+                                    passedCount: streamResults.passed,
+                                    failedCount: effectiveFailedCount,
+                                    failedTests: streamResults.failedTests,
+                                    runnerErrors: [],
+                                    reportSaved: true,
+                                    runId,
+                                    isFolder: isDirectory,
+                                    executionRoot,
+                                    externalExecution,
+                                    framework: detectedFramework,
+                                    strategy: execStrategy,
+                                    parseSource: 'stream',
+                                    streamedCount: testsSeen,
+                                    message: streamResults.total > 0
+                                        ? `${streamResults.passed}/${streamResults.total} tests passed`
+                                        : (exitCode === 0 ? 'Command succeeded (no structured results)' : `Command failed with exit code ${exitCode}`),
+                                });
                             }
-                            if (suite.suites) walkSuites(suite.suites);
+
+                            // No stream results and no JSON — save raw output as error
+                            _saveTestReport(derivedTicketId, runId, resolvedSpec, {
+                                rawError: output.substring(0, 50000),
+                            });
+                            try { fs.existsSync(jsonOutputFile) && fs.unlinkSync(jsonOutputFile); } catch { /* ignore */ }
+                            return JSON.stringify({
+                                success: false,
+                                error: `Test output could not be parsed as JSON (framework: ${detectedFramework})`,
+                                rawOutput: output.substring(0, 2000),
+                                reportSaved: true,
+                                runId,
+                                executionRoot,
+                                externalExecution,
+                                framework: detectedFramework,
+                            });
                         }
-                    };
-                    walkSuites(suites);
+                    }
+
+                    // Clean up the JSON tempfile — we've already read it
+                    try { fs.existsSync(jsonOutputFile) && fs.unlinkSync(jsonOutputFile); } catch { /* ignore */ }
+
+                    // Extract results using framework-aware parser
+                    const { totalSpecs, passed, failed, failedTests, runnerErrors } = parseJsonResults(jsonResult, detectedFramework);
+
+                    const syntheticFailures = totalSpecs === 0 ? runnerErrors.length : 0;
+                    const effectiveFailedCount = failed + syntheticFailures;
 
                     // Save raw report for dashboard
-                    _saveTestReport(derivedTicketId, runId, resolvedSpec, playwrightResult);
+                    _saveTestReport(derivedTicketId, runId, resolvedSpec, jsonResult);
 
                     // Broadcast progress: results
                     if (deps?.chatManager?.broadcastToolProgress) {
@@ -7620,7 +10319,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                             phase: 'test',
                             message: totalSpecs > 0
                                 ? `${passed}/${totalSpecs} passed, ${failed} failed`
-                                : 'No tests found in output',
+                                : (runnerErrors[0] ? `No tests found: ${runnerErrors[0]}` : 'No tests found in output'),
                             step: 3,
                         });
                     }
@@ -7629,19 +10328,278 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         success: failed === 0 && totalSpecs > 0,
                         totalCount: totalSpecs,
                         passedCount: passed,
-                        failedCount: failed,
+                        failedCount: effectiveFailedCount,
                         failedTests,
+                        runnerErrors,
                         reportSaved: true,
                         runId,
                         isFolder: isDirectory,
+                        executionRoot,
+                        externalExecution,
+                        framework: detectedFramework,
+                        strategy: execStrategy,
+                        parseSource,
+                        streamedCount: testsSeen,
                         message: totalSpecs > 0
                             ? `${passed}/${totalSpecs} tests passed`
-                            : 'No tests found in output',
+                            : (runnerErrors[0] ? `No tests found: ${runnerErrors[0]}` : 'No tests found in output'),
                     });
                 } catch (error) {
                     return JSON.stringify({
                         success: false,
-                        error: error.message?.substring(0, 1000),
+                        error: error.message?.substring(0, 1000) || 'Unknown execute_test error',
+                        diagnostics: {
+                            reason: 'HANDLER_EXCEPTION',
+                            errorName: error.name || null,
+                            errorCode: error.code || null,
+                            specPath: normalizedSpecPath,
+                        },
+                    });
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // TOOL 12c: run_command — Universal Shell Command Runner
+    // Available to: scriptgenerator, codereviewer
+    // Runs ANY shell command in a specified directory. This is the
+    // universal escape hatch for non-Playwright test runners, bash
+    // scripts, Python, WebDriverIO, Selenium, custom CLIs, etc.
+    // ───────────────────────────────────────────────────────────────────
+    if (['scriptgenerator', 'codereviewer'].includes(agentName)) {
+        // Safety: blocked destructive command patterns
+        const BLOCKED_COMMAND_PATTERNS = [
+            /\brm\s+(-rf?|--recursive)\s+[/\\]/i,
+            /\bformat\s+[A-Z]:/i,
+            /\bdel\s+\/s\s+\/q\s+[A-Z]:/i,
+            /\bmkfs\b/i,
+            /\bdd\s+if=/i,
+            /\bshutdown\b/i,
+            /\breboot\b/i,
+            /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;/,  // fork bomb
+            /\bkill\s+-9\s+(-1|0)\b/,
+            /\btaskkill\s+\/f\s+\/im\s+\*/i,
+        ];
+        const MAX_TIMEOUT_SECONDS = 600;
+        const DEFAULT_TIMEOUT_SECONDS = 300;
+        const MAX_OUTPUT_CHARS = 50 * 1024;
+
+        tools.push(defineTool('run_command', {
+            description:
+                'Run any shell command in a specified directory and return stdout/stderr. ' +
+                'Use this for non-Playwright test runners (WebDriverIO, Selenium, Cypress, Jest, Mocha), ' +
+                'bash/shell scripts, Python scripts, npm/yarn commands, or any CLI tool. ' +
+                'Supports absolute paths for working directory. Returns exit code, stdout, and stderr. ' +
+                'For structured test results with pass/fail parsing, prefer execute_test instead.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    command: {
+                        type: 'string',
+                        description: 'The full command to run (e.g., "npx wdio run wdio.conf.js", "npm test", "python -m pytest", "bash ./run-tests.sh"). Will be split into command + args automatically.',
+                    },
+                    cwd: {
+                        type: 'string',
+                        description: 'Working directory for the command. Absolute path required. Defaults to workspace root.',
+                    },
+                    timeoutSeconds: {
+                        type: 'number',
+                        description: `Max execution time in seconds. Default: ${DEFAULT_TIMEOUT_SECONDS}, Max: ${MAX_TIMEOUT_SECONDS}.`,
+                    },
+                    env: {
+                        type: 'object',
+                        description: 'Additional environment variables to merge with process.env. Keys are variable names, values are strings.',
+                    },
+                },
+                required: ['command'],
+            },
+            handler: async ({ command, cwd, timeoutSeconds, env: extraEnv }) => {
+                const { runCommand } = require('./terminal-runner');
+                const projectRoot = path.join(__dirname, '..', '..');
+
+                const rawCommand = String(command || '').trim();
+                if (!rawCommand) {
+                    return JSON.stringify({ success: false, error: 'command is required.' });
+                }
+
+                // Safety check: block destructive commands
+                for (const pattern of BLOCKED_COMMAND_PATTERNS) {
+                    if (pattern.test(rawCommand)) {
+                        return JSON.stringify({
+                            success: false,
+                            error: `Command blocked for safety: matches destructive pattern "${pattern.source}".`,
+                            blocked: true,
+                        });
+                    }
+                }
+
+                // Resolve working directory
+                let resolvedCwd = projectRoot;
+                if (cwd) {
+                    const cwdStr = String(cwd).trim();
+                    if (cwdStr) {
+                        resolvedCwd = path.isAbsolute(cwdStr) ? cwdStr : path.join(projectRoot, cwdStr);
+                    }
+                }
+                if (!fs.existsSync(resolvedCwd)) {
+                    return JSON.stringify({
+                        success: false,
+                        error: `Working directory does not exist: "${resolvedCwd}".`,
+                    });
+                }
+                try {
+                    if (!fs.statSync(resolvedCwd).isDirectory()) {
+                        return JSON.stringify({
+                            success: false,
+                            error: `Path is not a directory: "${resolvedCwd}".`,
+                        });
+                    }
+                } catch (e) {
+                    return JSON.stringify({
+                        success: false,
+                        error: `Cannot access working directory: "${resolvedCwd}" — ${e.message}`,
+                    });
+                }
+
+                // Resolve timeout
+                const timeout = Math.min(
+                    Math.max(1, Number(timeoutSeconds) || DEFAULT_TIMEOUT_SECONDS),
+                    MAX_TIMEOUT_SECONDS,
+                );
+
+                // Parse command string into command + args
+                // Handles quoted strings and Windows .cmd extensions
+                const parts = _shellSplit(rawCommand);
+                const cmdName = parts[0];
+                const cmdArgs = parts.slice(1);
+
+                // On Windows, if the command is a common npm/npx/yarn/node tool, append .cmd
+                let resolvedCmdName = cmdName;
+                if (process.platform === 'win32') {
+                    const CMD_TOOLS = ['npx', 'npm', 'yarn', 'pnpm', 'tsc', 'eslint', 'prettier', 'wdio', 'cypress', 'jest', 'mocha', 'vitest'];
+                    if (CMD_TOOLS.includes(cmdName.toLowerCase()) && !cmdName.endsWith('.cmd')) {
+                        resolvedCmdName = `${cmdName}.cmd`;
+                    }
+                }
+
+                // Build environment
+                const childEnv = {
+                    ...process.env,
+                    FORCE_COLOR: '0',
+                    ...(extraEnv && typeof extraEnv === 'object' ? extraEnv : {}),
+                };
+
+                // Broadcast progress
+                if (deps?.chatManager?.broadcastToolProgress) {
+                    deps.chatManager.broadcastToolProgress('run_command', {
+                        phase: 'command',
+                        message: `Running: ${rawCommand.length > 120 ? rawCommand.substring(0, 120) + '…' : rawCommand}`,
+                        step: 1,
+                        cwd: resolvedCwd,
+                    });
+                }
+
+                let lastProgressEmit = 0;
+                const streamProgress = (chunk, stream) => {
+                    if (!deps?.chatManager?.broadcastToolProgress) return;
+                    const now = Date.now();
+                    if (now - lastProgressEmit < 2000) return;
+                    lastProgressEmit = now;
+                    const text = String(chunk || '').trim();
+                    if (!text) return;
+                    const snippet = text.split(/\r?\n/).find(l => l.trim()) || '';
+                    deps.chatManager.broadcastToolProgress('run_command', {
+                        phase: 'command',
+                        message: snippet.length > 160 ? snippet.substring(0, 160) + '…' : snippet,
+                        step: 2,
+                        stream,
+                    });
+                };
+
+                try {
+                    const result = await runCommand({
+                        command: resolvedCmdName,
+                        args: cmdArgs,
+                        cwd: resolvedCwd,
+                        timeoutMs: timeout * 1000,
+                        abortSignal: deps?.abortSignal || null,
+                        env: childEnv,
+                        onStdout: (chunk) => streamProgress(chunk, 'stdout'),
+                        onStderr: (chunk) => streamProgress(chunk, 'stderr'),
+                    });
+
+                    const stdout = (result.stdout || '').substring(0, MAX_OUTPUT_CHARS);
+                    const stderr = (result.stderr || '').substring(0, MAX_OUTPUT_CHARS);
+                    const exitCode = result.exitCode ?? 0;
+
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('run_command', {
+                            phase: 'command',
+                            message: exitCode === 0 ? 'Command completed successfully' : `Command exited with code ${exitCode}`,
+                            step: 3,
+                        });
+                    }
+
+                    return JSON.stringify({
+                        success: exitCode === 0,
+                        exitCode,
+                        stdout,
+                        stderr,
+                        timedOut: false,
+                        durationMs: result.durationMs || null,
+                        command: rawCommand,
+                        cwd: resolvedCwd,
+                    });
+                } catch (execError) {
+                    const stdout = (execError.stdout || '').substring(0, MAX_OUTPUT_CHARS);
+                    const stderr = (execError.stderr || '').substring(0, MAX_OUTPUT_CHARS);
+                    const exitCode = Number.isInteger(execError.exitCode) ? execError.exitCode : 1;
+                    const timedOut = execError.timedOut === true;
+                    const aborted = execError.aborted === true;
+
+                    if (aborted) {
+                        return JSON.stringify({
+                            success: false,
+                            exitCode,
+                            stdout,
+                            stderr,
+                            timedOut: false,
+                            cancelled: true,
+                            durationMs: execError.durationMs || null,
+                            command: rawCommand,
+                            cwd: resolvedCwd,
+                            error: 'Command cancelled.',
+                        });
+                    }
+
+                    if (execError.code === 'SPAWN_ERROR' || execError.code === 'ENOENT') {
+                        return JSON.stringify({
+                            success: false,
+                            exitCode,
+                            stdout,
+                            stderr,
+                            timedOut,
+                            durationMs: execError.durationMs || null,
+                            command: rawCommand,
+                            cwd: resolvedCwd,
+                            error: `Failed to launch command: ${execError.message}`,
+                            hint: execError.code === 'ENOENT'
+                                ? `Command "${cmdName}" not found. Check spelling, or ensure it is installed and in PATH.`
+                                : 'The command could not be started. Verify the executable exists.',
+                        });
+                    }
+
+                    return JSON.stringify({
+                        success: exitCode === 0,
+                        exitCode,
+                        stdout,
+                        stderr,
+                        timedOut,
+                        durationMs: execError.durationMs || null,
+                        command: rawCommand,
+                        cwd: resolvedCwd,
+                        ...(timedOut ? { error: `Command timed out after ${timeout}s.` } : {}),
                     });
                 }
             },
@@ -9477,6 +12435,7 @@ function formatJiraTicket(data, ticketId) {
         commentCount,
         commentsTruncated,
         storyPoints: fields.story_points || fields.customfield_10016 || null,
+        fixVersions: (fields.fixVersions || []).map(v => ({ id: v.id, name: v.name, released: v.released || false })),
         sprint: fields.sprint?.name || '',
         created: fields.created || '',
         updated: fields.updated || '',
@@ -9597,6 +12556,62 @@ async function createSimpleExcel(outputPath, ticketId, testSuiteName, preConditi
     }
 }
 
+function _relativePathIfInside(rootPath, targetPath) {
+    const relative = path.relative(rootPath, targetPath);
+    if (!relative) {
+        return '.';
+    }
+
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+        return null;
+    }
+
+    return relative.replace(/\\/g, '/');
+}
+
+function _findPlaywrightProjectRoot(candidatePath) {
+    if (!candidatePath || !fs.existsSync(candidatePath)) return null;
+
+    let currentPath;
+    try {
+        const stats = fs.statSync(candidatePath);
+        currentPath = stats.isDirectory() ? candidatePath : path.dirname(candidatePath);
+    } catch {
+        return null;
+    }
+
+    const configFiles = [
+        'playwright.config.js',
+        'playwright.config.ts',
+        'playwright.config.mjs',
+        'playwright.config.cjs',
+    ];
+
+    let packageJsonFallback = null;
+
+    while (true) {
+        const hasPlaywrightConfig = configFiles.some(fileName =>
+            fs.existsSync(path.join(currentPath, fileName))
+        );
+        if (hasPlaywrightConfig) {
+            return currentPath;
+        }
+
+        if (!packageJsonFallback && fs.existsSync(path.join(currentPath, 'package.json'))) {
+            packageJsonFallback = currentPath;
+        }
+
+        const parent = path.dirname(currentPath);
+        if (parent === currentPath) {
+            break;
+        }
+
+        currentPath = parent;
+    }
+
+    return packageJsonFallback;
+}
+
 // ─── Helper: Save raw test report for Reports dashboard ─────────────────────
 function _saveTestReport(ticketId, runId, specPath, playwrightResult) {
     try {
@@ -9634,6 +12649,56 @@ function _saveTestReport(ticketId, runId, specPath, playwrightResult) {
     }
 }
 
+// ─── Helper: Resolve outside-workspace path to local specs by basename ──────
+function _resolveWorkspaceSpecTarget(projectRoot, candidatePath, preferDirectory = false) {
+    const searchName = path.basename(candidatePath || '').toLowerCase();
+    if (!searchName) return null;
+
+    const searchDirs = [
+        path.join(projectRoot, 'tests', 'specs'),
+        path.join(projectRoot, 'tests-scratch', 'specs'),
+    ];
+    const folderMatches = [];
+    const fileMatches = [];
+
+    function searchRecursive(dir, depth = 0) {
+        if (depth > 5 || !fs.existsSync(dir)) return;
+        try {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const entry of entries) {
+                const entryPath = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                    if (entry.name.toLowerCase() === searchName) {
+                        const specCount = _countSpecFiles(entryPath);
+                        if (specCount > 0) {
+                            folderMatches.push({ path: entryPath, specCount });
+                        }
+                    }
+                    searchRecursive(entryPath, depth + 1);
+                } else if (entry.isFile() && entry.name.toLowerCase() === searchName && entry.name.endsWith('.spec.js')) {
+                    fileMatches.push(entryPath);
+                }
+            }
+        } catch {
+            // ignore unreadable folders
+        }
+    }
+
+    for (const dir of searchDirs) {
+        searchRecursive(dir);
+    }
+
+    if (preferDirectory) {
+        if (folderMatches.length === 1) return folderMatches[0].path;
+        if (folderMatches.length === 0 && fileMatches.length === 1) return fileMatches[0];
+        return null;
+    }
+
+    if (fileMatches.length === 1) return fileMatches[0];
+    if (fileMatches.length === 0 && folderMatches.length === 1) return folderMatches[0].path;
+    return null;
+}
+
 // ─── Helper: Count .spec.js files inside a directory ─────────────────────────
 function _countSpecFiles(dir) {
     let count = 0;
@@ -9647,12 +12712,129 @@ function _countSpecFiles(dir) {
     return count;
 }
 
+// ─── Helper: Detect a locally-installed Playwright CLI in an exec root ──────
+// Returns { command, args } for the most reliable way to invoke Playwright,
+// or null if Playwright isn't installed locally (caller should fall back to npx).
+function _resolveLocalPlaywrightBinary(executionRoot) {
+    if (!executionRoot) return null;
+    const binDir = path.join(executionRoot, 'node_modules', '.bin');
+    const candidates = process.platform === 'win32'
+        ? ['playwright.cmd', 'playwright.CMD', 'playwright']
+        : ['playwright'];
+    for (const name of candidates) {
+        const full = path.join(binDir, name);
+        try {
+            if (fs.existsSync(full)) {
+                return { command: full, args: [] };
+            }
+        } catch { /* ignore */ }
+    }
+    return null;
+}
+
+// ─── Helper: Find a matching npm script for a spec path ─────────────────────
+// When a user runs a suite like `tests/specs/consumer`, external projects
+// often define a tailored script (e.g., `"consumer": "playwright test ..."`) that
+// carries the right config, workers, and retries. Prefer that over raw
+// `npx playwright test <path>` when an unambiguous match exists.
+function _findMatchingNpmScript(executionRoot, resolvedSpec, isDirectory) {
+    if (!executionRoot || !resolvedSpec) return null;
+    const pkgPath = path.join(executionRoot, 'package.json');
+    if (!fs.existsSync(pkgPath)) return null;
+
+    let pkg;
+    try {
+        pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    } catch {
+        return null;
+    }
+    const scripts = pkg.scripts && typeof pkg.scripts === 'object' ? pkg.scripts : null;
+    if (!scripts) return null;
+
+    // Only auto-match for directory targets — for single spec files the user's
+    // intent is unambiguous and a script could run a broader scope than requested.
+    if (!isDirectory) return null;
+
+    const specBase = path.basename(resolvedSpec).toLowerCase();
+    if (!specBase) return null;
+
+    // Candidate script name patterns, in priority order.
+    const candidatePatterns = [
+        specBase,
+        `test:${specBase}`,
+        `${specBase}:test`,
+        `e2e:${specBase}`,
+        `test-${specBase}`,
+        `${specBase}-test`,
+    ];
+
+    const normalizedSpec = resolvedSpec.replace(/\\/g, '/').toLowerCase();
+
+    for (const candidate of candidatePatterns) {
+        const scriptBody = scripts[candidate];
+        if (!scriptBody || typeof scriptBody !== 'string') continue;
+        const bodyLower = scriptBody.toLowerCase();
+        // Must be a Playwright invocation AND mention the target dir (basename at minimum)
+        // to avoid hijacking an unrelated script that happens to share the name.
+        if (!/playwright(\s|$)/.test(bodyLower) && !bodyLower.includes('playwright test')) continue;
+        const refsPath = bodyLower.includes(specBase) || bodyLower.includes(normalizedSpec);
+        if (!refsPath) continue;
+        return { scriptName: candidate, scriptBody };
+    }
+    return null;
+}
+
+/**
+ * Split a shell command string into [command, ...args], respecting quotes.
+ * Simple implementation for common cases — not a full POSIX shell parser.
+ */
+function _shellSplit(commandStr) {
+    const parts = [];
+    let current = '';
+    let inSingle = false;
+    let inDouble = false;
+    let escape = false;
+
+    for (let i = 0; i < commandStr.length; i++) {
+        const ch = commandStr[i];
+
+        if (escape) {
+            current += ch;
+            escape = false;
+            continue;
+        }
+        if (ch === '\\' && !inSingle) {
+            escape = true;
+            continue;
+        }
+        if (ch === "'" && !inDouble) {
+            inSingle = !inSingle;
+            continue;
+        }
+        if (ch === '"' && !inSingle) {
+            inDouble = !inDouble;
+            continue;
+        }
+        if ((ch === ' ' || ch === '\t') && !inSingle && !inDouble) {
+            if (current.length > 0) {
+                parts.push(current);
+                current = '';
+            }
+            continue;
+        }
+        current += ch;
+    }
+    if (current.length > 0) parts.push(current);
+    return parts.length > 0 ? parts : [commandStr];
+}
+
 module.exports = {
     createCustomTools,
     getToolCache,
     formatJiraTicket,
     collectSessionEvidence,
     attachEvidenceToJira,
+    addCommentWithMediaToJira,
     computeSparseTicketScore,
     buildSparseKbQueries,
     enrichSparseTicketWithKnowledgeBase,

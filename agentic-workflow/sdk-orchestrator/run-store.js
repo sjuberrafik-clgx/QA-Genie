@@ -37,6 +37,13 @@ const STAGE_STATUS = {
 
 const DEFAULT_MISSION_HISTORY_LIMIT = 100;
 const DEFAULT_MISSION_OBSERVATION_LIMIT = 100;
+const DEFAULT_COMMAND_OUTPUT_LIMIT = 400;
+const DEFAULT_COMMAND_TEXT_LIMIT = 240;
+const DEFAULT_COMMAND_RAW_CHUNK_LIMIT = 8 * 1024; // 8 KB per chunk entry
+const COMMAND_ENTRY_KINDS = {
+    PROGRESS: 'progress',
+    CHUNK: 'chunk',
+};
 const DUAL_AUTH_STRATEGIES = new Set([
     'both',
     'dual',
@@ -44,6 +51,7 @@ const DUAL_AUTH_STRATEGIES = new Set([
     'authenticated-vs-unauthenticated',
     'authenticated-and-unauthenticated',
 ]);
+const TICKET_ID_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/i;
 
 // ─── Run Store ──────────────────────────────────────────────────────────────
 
@@ -87,12 +95,15 @@ class RunStore {
         const run = {
             runId,
             ticketId: params.ticketId,
+            inputIdentifier: params.inputIdentifier || params.ticketId,
+            identifierType: params.identifierType || 'ticket',
             mode: params.mode || 'full',
             environment: params.environment || 'UAT',
             status: RUN_STATUS.QUEUED,
             batchId: params.batchId || null,
             triggeredBy: params.triggeredBy || 'api',
             model: params.model || null,
+            hybridContext: this._normalizeHybridContext(params.hybridContext),
             createdAt: now,
             startedAt: null,
             completedAt: null,
@@ -204,6 +215,151 @@ class RunStore {
     }
 
     /**
+     * Append command output telemetry for a run.
+     * Stored under run.artifacts.commandOutput with capped history.
+     *
+     * @param {string} runId
+     * @param {Object} entry
+     * @param {Object} [options]
+     * @param {number} [options.maxEntries]
+     * @param {number} [options.textLimit]
+     */
+    appendCommandOutput(runId, entry = {}, options = {}) {
+        const run = this._runs.get(runId);
+        if (!run) return null;
+
+        const now = new Date().toISOString();
+        const artifact = this._ensureCommandOutputArtifact(run, options.maxEntries);
+        const textLimit = Number.isFinite(options.textLimit)
+            ? Math.max(40, Math.floor(options.textLimit))
+            : DEFAULT_COMMAND_TEXT_LIMIT;
+        const rawLimit = Number.isFinite(options.rawTextLimit)
+            ? Math.max(256, Math.floor(options.rawTextLimit))
+            : DEFAULT_COMMAND_RAW_CHUNK_LIMIT;
+
+        const truncateText = (value) => {
+            if (!value) return null;
+            const normalized = String(value)
+                .replace(/\r/g, ' ')
+                .replace(/\n+/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+            if (!normalized) return null;
+            return normalized.length > textLimit
+                ? `${normalized.slice(0, textLimit - 1)}…`
+                : normalized;
+        };
+
+        const truncateRaw = (value) => {
+            if (value == null) return null;
+            const raw = String(value);
+            if (!raw) return null;
+            return raw.length > rawLimit
+                ? raw.slice(raw.length - rawLimit)
+                : raw;
+        };
+
+        const kind = entry.kind === COMMAND_ENTRY_KINDS.CHUNK
+            ? COMMAND_ENTRY_KINDS.CHUNK
+            : COMMAND_ENTRY_KINDS.PROGRESS;
+
+        const seq = Number.isFinite(artifact.nextSeq) ? artifact.nextSeq : 0;
+        artifact.nextSeq = seq + 1;
+
+        const commandEntry = {
+            seq,
+            kind,
+            timestamp: entry.timestamp || now,
+            eventType: entry.eventType || 'progress',
+            stage: entry.stage || null,
+            scenarioId: entry.scenarioId || null,
+            scenarioName: entry.scenarioName || null,
+            authState: entry.authState || null,
+            stream: entry.stream || null,
+            command: entry.command || null,
+            target: entry.target || null,
+            text: kind === COMMAND_ENTRY_KINDS.CHUNK
+                ? truncateRaw(entry.text)
+                : truncateText(entry.text),
+            error: truncateText(entry.error),
+            exitCode: Number.isInteger(entry.exitCode) ? entry.exitCode : null,
+            durationMs: Number.isFinite(entry.durationMs) ? Math.max(0, Math.round(entry.durationMs)) : null,
+            cancelToKillLatencyMs: Number.isFinite(entry.cancelToKillLatencyMs)
+                ? Math.max(0, Math.round(entry.cancelToKillLatencyMs))
+                : null,
+        };
+
+        artifact.entries.push(commandEntry);
+        artifact.totalEntries += 1;
+
+        if (artifact.entries.length > artifact.maxEntries) {
+            artifact.entries.shift();
+            artifact.droppedEntries += 1;
+        }
+
+        artifact.updatedAt = now;
+        artifact.lastSeq = seq;
+        run.updatedAt = now;
+        this._persist();
+        return commandEntry;
+    }
+
+    /**
+     * Read buffered command output for a run.
+     *
+     * @param {string} runId
+     * @param {Object} [options]
+     * @param {number} [options.limit=200]
+     * @returns {Object|null}
+     */
+    getCommandOutput(runId, options = {}) {
+        const run = this._runs.get(runId);
+        if (!run) return null;
+
+        const artifact = this._ensureCommandOutputArtifact(run);
+        const limit = Number.isFinite(options.limit)
+            ? Math.max(1, Math.floor(options.limit))
+            : 200;
+
+        const sinceSeq = Number.isFinite(options.sinceSeq)
+            ? Math.max(-1, Math.floor(options.sinceSeq))
+            : null;
+        const includeKinds = Array.isArray(options.kinds) && options.kinds.length > 0
+            ? new Set(options.kinds)
+            : null;
+
+        let source = artifact.entries;
+        if (sinceSeq !== null) {
+            source = source.filter((item) => Number.isFinite(item?.seq) && item.seq > sinceSeq);
+        }
+        if (includeKinds) {
+            source = source.filter((item) => includeKinds.has(item?.kind || COMMAND_ENTRY_KINDS.PROGRESS));
+        }
+
+        const entries = sinceSeq !== null ? source : source.slice(-limit);
+        const hasMore = sinceSeq === null && artifact.totalEntries > entries.length;
+        const lastSeq = entries.length > 0
+            ? entries[entries.length - 1].seq ?? null
+            : (Number.isFinite(artifact.lastSeq) ? artifact.lastSeq : null);
+
+        return {
+            runId: run.runId,
+            ticketId: run.ticketId,
+            status: run.status,
+            updatedAt: artifact.updatedAt,
+            maxEntries: artifact.maxEntries,
+            totalEntries: artifact.totalEntries,
+            droppedEntries: artifact.droppedEntries,
+            lastSeq,
+            sinceSeq,
+            limit,
+            hasMore,
+            entries,
+            executionMetrics: run.artifacts?.executionMetrics || null,
+        };
+    }
+
+    /**
      * Mark a run as completed (success or failure).
      *
      * @param {string} runId
@@ -214,12 +370,21 @@ class RunStore {
         if (!run) return;
 
         const now = new Date().toISOString();
-        run.status = result.success ? RUN_STATUS.COMPLETED : RUN_STATUS.FAILED;
+        const runSucceeded = result?.success === true;
+        const runCancelled = result?.cancelled === true || run.status === RUN_STATUS.CANCELLED;
+        run.status = runCancelled
+            ? RUN_STATUS.CANCELLED
+            : (runSucceeded ? RUN_STATUS.COMPLETED : RUN_STATUS.FAILED);
         run.completedAt = now;
         run.updatedAt = now;
         run.result = result;
-        run.error = result.error || null;
-        run.artifacts = result.artifacts || {};
+        run.error = runCancelled
+            ? (result.error || run.error || 'Cancelled by user')
+            : (result.error || null);
+        run.artifacts = {
+            ...(run.artifacts || {}),
+            ...(result.artifacts || {}),
+        };
 
         if (run.startedAt) {
             run.duration = formatDuration(
@@ -232,9 +397,10 @@ class RunStore {
             run.mission.completedAt = now;
             run.mission.updatedAt = now;
             run.mission.result = {
-                success: !!result.success,
+                success: runSucceeded,
+                cancelled: runCancelled,
                 duration: result.duration || run.duration,
-                error: result.error || null,
+                error: result.error || run.error || null,
             };
             run.mission.evidence = run.mission.evidence || {};
             run.mission.evidence.artifacts = Object.keys(run.artifacts || {});
@@ -386,6 +552,11 @@ class RunStore {
         if (!run || !run.mission) return;
 
         const now = new Date().toISOString();
+        const hybrid = this._normalizeHybridContext({
+            ...(run.mission.hybrid || run.hybridContext || {}),
+            ...(patch.hybrid || {}),
+        });
+
         run.mission = {
             ...run.mission,
             ...patch,
@@ -393,11 +564,13 @@ class RunStore {
                 ...(run.mission.evidence || {}),
                 ...(patch.evidence || {}),
             },
+            hybrid,
             checkpoint: run.mission.checkpoint,
             observations: run.mission.observations,
             scenarios: run.mission.scenarios,
             updatedAt: now,
         };
+        run.hybridContext = hybrid;
         run.updatedAt = now;
         this._persist();
     }
@@ -457,6 +630,7 @@ class RunStore {
                 scenarios: run.mission.scenarios,
                 observations: run.mission.observations,
                 evidence: run.mission.evidence,
+                hybrid: run.mission.hybrid,
                 updatedAt: run.mission.updatedAt,
             },
         };
@@ -528,7 +702,9 @@ class RunStore {
         const total = runs.length;
         const offset = filters.offset || 0;
         const limit = filters.limit || 50;
-        runs = runs.slice(offset, offset + limit);
+        runs = runs
+            .slice(offset, offset + limit)
+            .map(run => this._toListRunSnapshot(run));
 
         return { runs, total };
     }
@@ -708,16 +884,18 @@ class RunStore {
     _normalizeMission(runId, params = {}, now = new Date().toISOString()) {
         const mission = params.mission || {};
         const scenarioInput = this._resolveMissionScenarios(mission);
+        const hybrid = this._normalizeHybridContext(mission.hybrid || params.hybridContext);
 
         return {
             missionId: mission.missionId || `mission_${runId}`,
             enabled: mission.enabled === true,
             kind: mission.kind || 'pipeline-run',
-            objective: mission.objective || params.ticketId || 'Pipeline execution',
+            objective: mission.objective || params.inputIdentifier || params.ticketId || 'Pipeline execution',
             source: mission.source || params.triggeredBy || 'api',
             status: RUN_STATUS.QUEUED,
             authStrategy: mission.authStrategy || null,
             owner: mission.owner || null,
+            hybrid,
             scenarioCount: scenarioInput.length,
             scenarios: scenarioInput.map((scenario, index) => ({
                 id: scenario.id || `scenario_${index + 1}`,
@@ -754,6 +932,30 @@ class RunStore {
             updatedAt: now,
             result: mission.result || null,
         };
+    }
+
+    _normalizeHybridContext(hybrid = {}) {
+        const raw = (hybrid && typeof hybrid === 'object' && !Array.isArray(hybrid)) ? hybrid : {};
+        const normalizedMode = this._normalizeOptionalString(raw.frameworkMode);
+        const frameworkMode = (normalizedMode && ['existing', 'manual'].includes(normalizedMode.toLowerCase()))
+            ? normalizedMode.toLowerCase()
+            : 'existing';
+
+        return {
+            frameworkMode,
+            appUrl: this._normalizeOptionalString(raw.appUrl),
+            testCaseSource: this._normalizeOptionalString(raw.testCaseSource),
+            testDataOverride: raw.testDataOverride === undefined ? null : raw.testDataOverride,
+            executionTarget: this._normalizeOptionalString(raw.executionTarget),
+            requestedTicketId: this._normalizeOptionalString(raw.requestedTicketId),
+            requestedRunId: this._normalizeOptionalString(raw.requestedRunId),
+        };
+    }
+
+    _normalizeOptionalString(value) {
+        if (typeof value !== 'string') return null;
+        const trimmed = value.trim();
+        return trimmed || null;
     }
 
     _resolveMissionScenarios(mission = {}) {
@@ -803,6 +1005,87 @@ class RunStore {
         return DUAL_AUTH_STRATEGIES.has(strategy);
     }
 
+    _ensureCommandOutputArtifact(run, maxEntries = DEFAULT_COMMAND_OUTPUT_LIMIT) {
+        if (!run.artifacts || typeof run.artifacts !== 'object') {
+            run.artifacts = {};
+        }
+
+        const normalizedMax = Number.isFinite(maxEntries)
+            ? Math.max(50, Math.floor(maxEntries))
+            : DEFAULT_COMMAND_OUTPUT_LIMIT;
+
+        const existing = run.artifacts.commandOutput;
+        if (!existing || typeof existing !== 'object') {
+            run.artifacts.commandOutput = {
+                maxEntries: normalizedMax,
+                totalEntries: 0,
+                droppedEntries: 0,
+                updatedAt: null,
+                nextSeq: 0,
+                lastSeq: null,
+                entries: [],
+            };
+            return run.artifacts.commandOutput;
+        }
+
+        existing.maxEntries = Number.isFinite(existing.maxEntries)
+            ? Math.max(50, Math.floor(existing.maxEntries))
+            : normalizedMax;
+        existing.totalEntries = Number.isFinite(existing.totalEntries)
+            ? Math.max(existing.totalEntries, 0)
+            : (Array.isArray(existing.entries) ? existing.entries.length : 0);
+        existing.droppedEntries = Number.isFinite(existing.droppedEntries)
+            ? Math.max(existing.droppedEntries, 0)
+            : 0;
+        existing.updatedAt = existing.updatedAt || null;
+        existing.entries = Array.isArray(existing.entries)
+            ? existing.entries.slice(-existing.maxEntries)
+            : [];
+
+        // Reconcile seq bookkeeping against loaded entries
+        const maxLoadedSeq = existing.entries.reduce((acc, item) => {
+            const value = Number.isFinite(item?.seq) ? item.seq : -1;
+            return value > acc ? value : acc;
+        }, -1);
+        existing.lastSeq = Number.isFinite(existing.lastSeq)
+            ? Math.max(existing.lastSeq, maxLoadedSeq)
+            : (maxLoadedSeq >= 0 ? maxLoadedSeq : null);
+        existing.nextSeq = Number.isFinite(existing.nextSeq)
+            ? Math.max(existing.nextSeq, (existing.lastSeq ?? -1) + 1)
+            : ((existing.lastSeq ?? -1) + 1);
+
+        return existing;
+    }
+
+    _toListRunSnapshot(run) {
+        if (!run || typeof run !== 'object') return run;
+
+        const artifacts = run.artifacts && typeof run.artifacts === 'object'
+            ? { ...run.artifacts }
+            : {};
+
+        if (artifacts.commandOutput && typeof artifacts.commandOutput === 'object') {
+            artifacts.commandOutput = {
+                maxEntries: artifacts.commandOutput.maxEntries || DEFAULT_COMMAND_OUTPUT_LIMIT,
+                totalEntries: artifacts.commandOutput.totalEntries || 0,
+                droppedEntries: artifacts.commandOutput.droppedEntries || 0,
+                updatedAt: artifacts.commandOutput.updatedAt || null,
+            };
+        }
+
+        if (artifacts.executionMetrics && typeof artifacts.executionMetrics === 'object') {
+            artifacts.executionMetrics = {
+                generatedAt: artifacts.executionMetrics.generatedAt || null,
+                summary: artifacts.executionMetrics.summary || null,
+            };
+        }
+
+        return {
+            ...run,
+            artifacts,
+        };
+    }
+
     _normalizeLoadedRun(run) {
         const now = new Date().toISOString();
 
@@ -812,6 +1095,7 @@ class RunStore {
 
         if (!Array.isArray(run.stages)) run.stages = [];
         if (!run.artifacts || typeof run.artifacts !== 'object') run.artifacts = {};
+        this._ensureCommandOutputArtifact(run);
 
         const mission = run.mission || {};
         run.mission = this._normalizeMission(run.runId, {
@@ -822,8 +1106,13 @@ class RunStore {
                 scenarios: Array.isArray(mission.scenarios) ? mission.scenarios : [],
             },
             ticketId: run.ticketId,
+            inputIdentifier: run.inputIdentifier || run.ticketId,
             triggeredBy: run.triggeredBy,
+            hybridContext: run.hybridContext,
         }, run.createdAt || now);
+        run.hybridContext = this._normalizeHybridContext(run.hybridContext || mission.hybrid || {});
+        run.identifierType = run.identifierType || (TICKET_ID_PATTERN.test(String(run.ticketId || '')) ? 'ticket' : 'custom');
+        run.inputIdentifier = run.inputIdentifier || run.ticketId;
 
         run.mission.status = mission.status || run.status || RUN_STATUS.QUEUED;
         run.mission.startedAt = mission.startedAt || run.startedAt || null;
@@ -901,4 +1190,4 @@ class RunStore {
 
 // ─── Exports ────────────────────────────────────────────────────────────────
 
-module.exports = { RunStore, RUN_STATUS, STAGE_STATUS };
+module.exports = { RunStore, RUN_STATUS, STAGE_STATUS, COMMAND_ENTRY_KINDS };

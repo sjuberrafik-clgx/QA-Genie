@@ -1,0 +1,545 @@
+[
+    {
+        "name": "add_comment_with_media",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Add a Jira comment with inline screenshots or preview frames plus linked video recordings in one flow."
+    },
+    {
+        "name": "add_comment_with_images",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Add a Jira comment with inline image attachments."
+    },
+    {
+        "name": "analyze_test_failure",
+        "category": "framework",
+        "ownerAgents": [
+            "scriptgenerator",
+            "buggenie"
+        ],
+        "description": "Analyze a Playwright test failure to extract failure details, screenshots, and root cause."
+    },
+    {
+        "name": "analyze_video_recording",
+        "category": "evidence",
+        "ownerAgents": [
+            "buggenie"
+        ],
+        "description": "Analyze a video recording from a test session, extracting key frames and failure moments."
+    },
+    {
+        "name": "assign_jira_ticket",
+        "category": "jira",
+        "ownerAgents": [
+            "taskgenie"
+        ],
+        "description": "Assign or reassign a Jira ticket to a specific user by accountId."
+    },
+    {
+        "name": "attach_file_to_jira",
+        "category": "jira",
+        "ownerAgents": [
+            "testgenie",
+            "buggenie",
+            "taskgenie"
+        ],
+        "description": "Attach a file to a Jira ticket — supports .xlsx, .pdf, .json, .csv, etc."
+    },
+    {
+        "name": "attach_session_evidence_to_jira",
+        "category": "evidence",
+        "ownerAgents": [
+            "buggenie"
+        ],
+        "description": "Attach chat session evidence (screenshots, logs) to a Jira ticket."
+    },
+    {
+        "name": "attach_session_images_to_jira",
+        "category": "evidence",
+        "ownerAgents": [
+            "buggenie"
+        ],
+        "description": "Attach session images to a Jira ticket as evidence."
+    },
+    {
+        "name": "attach_video_frames_to_jira",
+        "category": "evidence",
+        "ownerAgents": [
+            "buggenie"
+        ],
+        "description": "Attach extracted video frames to a Jira ticket."
+    },
+    {
+        "name": "check_existing_coverage",
+        "category": "grounding",
+        "ownerAgents": [
+            "scriptgenerator",
+            "testgenie"
+        ],
+        "description": "Check if existing spec files cover a given feature to avoid duplicate automation."
+    },
+    {
+        "name": "create_jira_ticket",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Create a new Jira ticket with optional linking and subtask creation."
+    },
+    {
+        "name": "delete_jira_comment",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Delete a specific comment from a Jira ticket."
+    },
+    {
+        "name": "delete_jira_ticket",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Permanently delete a Jira ticket with explicit user confirmation."
+    },
+    {
+        "name": "edit_jira_comment",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Edit the body of an existing Jira comment."
+    },
+    {
+        "name": "execute_test",
+        "category": "framework",
+        "ownerAgents": [
+            "scriptgenerator",
+            "codereviewer"
+        ],
+        "description": "Execute test files using auto-detected framework (Playwright, WebDriverIO, Cypress, Jest, Mocha, Vitest) and return structured results."
+    },
+    {
+        "name": "run_command",
+        "category": "execution",
+        "ownerAgents": [
+            "scriptgenerator",
+            "codereviewer"
+        ],
+        "description": "Run any shell command in a specified directory. Supports npm, npx, bash, Python, WebDriverIO, Selenium, custom CLIs."
+    },
+    {
+        "name": "fetch_jira_ticket",
+        "category": "jira",
+        "ownerAgents": [
+            "testgenie",
+            "buggenie",
+            "taskgenie"
+        ],
+        "description": "Fetch full details of a Jira ticket by key or URL."
+    },
+    {
+        "name": "find_test_files",
+        "category": "framework",
+        "ownerAgents": [
+            "scriptgenerator",
+            "codereviewer"
+        ],
+        "description": "Search for test spec files in the project."
+    },
+    {
+        "name": "generate_chart_image",
+        "category": "document",
+        "ownerAgents": [
+            "docgenie",
+            "buggenie"
+        ],
+        "description": "Generate a chart image (bar, pie, line, etc.) from data."
+    },
+    {
+        "name": "generate_diagram",
+        "category": "document",
+        "ownerAgents": [
+            "docgenie",
+            "buggenie",
+            "scriptgenerator"
+        ],
+        "description": "Generate a diagram (flowchart, sequence, etc.) from a specification."
+    },
+    {
+        "name": "generate_docx",
+        "category": "document",
+        "ownerAgents": [
+            "docgenie",
+            "buggenie"
+        ],
+        "description": "Generate a Word document from structured content."
+    },
+    {
+        "name": "generate_excel_report",
+        "category": "document",
+        "ownerAgents": [
+            "docgenie",
+            "buggenie"
+        ],
+        "description": "Generate an Excel report from structured data."
+    },
+    {
+        "name": "generate_html_report",
+        "category": "document",
+        "ownerAgents": [
+            "docgenie",
+            "buggenie"
+        ],
+        "description": "Generate an HTML report from structured content."
+    },
+    {
+        "name": "generate_infographic",
+        "category": "document",
+        "ownerAgents": [
+            "docgenie",
+            "buggenie"
+        ],
+        "description": "Generate infographic components from data."
+    },
+    {
+        "name": "generate_infographic_poster",
+        "category": "document",
+        "ownerAgents": [
+            "docgenie",
+            "buggenie"
+        ],
+        "description": "Generate a full infographic poster PNG."
+    },
+    {
+        "name": "generate_markdown",
+        "category": "document",
+        "ownerAgents": [
+            "docgenie",
+            "buggenie",
+            "scriptgenerator"
+        ],
+        "description": "Generate a Markdown document from structured content."
+    },
+    {
+        "name": "generate_pdf",
+        "category": "document",
+        "ownerAgents": [
+            "docgenie",
+            "buggenie"
+        ],
+        "description": "Generate a PDF document from structured content."
+    },
+    {
+        "name": "generate_pptx",
+        "category": "document",
+        "ownerAgents": [
+            "docgenie",
+            "buggenie"
+        ],
+        "description": "Generate a PowerPoint presentation from structured content."
+    },
+    {
+        "name": "generate_test_case_excel",
+        "category": "testcase",
+        "ownerAgents": [
+            "testgenie"
+        ],
+        "description": "Generate an Excel file with test cases from structured test data."
+    },
+    {
+        "name": "generate_video",
+        "category": "document",
+        "ownerAgents": [
+            "docgenie"
+        ],
+        "description": "Generate a video from structured content and assets."
+    },
+    {
+        "name": "get_assertion_config",
+        "category": "framework",
+        "ownerAgents": [
+            "scriptgenerator"
+        ],
+        "description": "Get assertion configuration for script generation."
+    },
+    {
+        "name": "get_design_score",
+        "category": "document",
+        "ownerAgents": [
+            "docgenie",
+            "buggenie"
+        ],
+        "description": "Score a generated document's design quality."
+    },
+    {
+        "name": "get_exploration_data",
+        "category": "framework",
+        "ownerAgents": [
+            "scriptgenerator",
+            "codereviewer"
+        ],
+        "description": "Get saved MCP exploration data for a ticket."
+    },
+    {
+        "name": "get_feature_map",
+        "category": "grounding",
+        "ownerAgents": [
+            "scriptgenerator",
+            "testgenie",
+            "buggenie",
+            "codereviewer"
+        ],
+        "description": "Get feature-specific context including pages, page objects, and keywords."
+    },
+    {
+        "name": "get_framework_inventory",
+        "category": "framework",
+        "ownerAgents": [
+            "scriptgenerator",
+            "codereviewer"
+        ],
+        "description": "Get a summary of the test framework structure."
+    },
+    {
+        "name": "get_historical_failures",
+        "category": "framework",
+        "ownerAgents": [
+            "scriptgenerator"
+        ],
+        "description": "Get historical test failure patterns from the learning store."
+    },
+    {
+        "name": "get_jira_current_user",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Get the authenticated Jira user's accountId for self-assignment."
+    },
+    {
+        "name": "get_jira_epic",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Get details of a Jira epic by key."
+    },
+    {
+        "name": "get_jira_epic_issues",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "List all issues within a Jira epic."
+    },
+    {
+        "name": "get_jira_project_versions",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "List available Fix Versions for a Jira project."
+    },
+    {
+        "name": "get_jira_ticket_capabilities",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Inspect editable fields and available transitions for a Jira ticket."
+    },
+    {
+        "name": "get_selector_recommendations",
+        "category": "grounding",
+        "ownerAgents": [
+            "scriptgenerator",
+            "codereviewer"
+        ],
+        "description": "Get ranked selector recommendations for a page element."
+    },
+    {
+        "name": "get_snapshot_quality",
+        "category": "framework",
+        "ownerAgents": [
+            "scriptgenerator"
+        ],
+        "description": "Assess the quality of an MCP snapshot."
+    },
+    {
+        "name": "get_test_results",
+        "category": "framework",
+        "ownerAgents": [
+            "buggenie"
+        ],
+        "description": "Read test execution results for bug analysis."
+    },
+    {
+        "name": "link_jira_issues",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Create a link between two existing Jira issues (relates to, blocks, etc.)."
+    },
+    {
+        "name": "list_jira_issues_without_epic",
+        "category": "jira",
+        "ownerAgents": [
+            "taskgenie"
+        ],
+        "description": "List Jira issues that are not assigned to any epic."
+    },
+    {
+        "name": "log_jira_work",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Log work time on a Jira ticket."
+    },
+    {
+        "name": "refresh_grounding_context",
+        "category": "grounding",
+        "ownerAgents": [
+            "scriptgenerator",
+            "codereviewer"
+        ],
+        "description": "Refresh the grounding context index."
+    },
+    {
+        "name": "remove_jira_issue_link",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Remove an existing link between two Jira issues."
+    },
+    {
+        "name": "save_exploration_data",
+        "category": "framework",
+        "ownerAgents": [
+            "scriptgenerator"
+        ],
+        "description": "Save MCP exploration data for a ticket."
+    },
+    {
+        "name": "search_jira_epics",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Search for Jira epics by text query."
+    },
+    {
+        "name": "search_jira_issues",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Search Jira issues using JQL."
+    },
+    {
+        "name": "search_jira_users",
+        "category": "jira",
+        "ownerAgents": [
+            "taskgenie"
+        ],
+        "description": "Search Jira assignable users by name or email."
+    },
+    {
+        "name": "search_project_context",
+        "category": "grounding",
+        "ownerAgents": [
+            "scriptgenerator",
+            "testgenie",
+            "buggenie",
+            "codereviewer"
+        ],
+        "description": "BM25 search across page objects, business functions, and utilities."
+    },
+    {
+        "name": "suggest_popup_handler",
+        "category": "framework",
+        "ownerAgents": [
+            "scriptgenerator"
+        ],
+        "description": "Suggest popup handler patterns for a given page."
+    },
+    {
+        "name": "transition_jira_ticket",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Change a Jira ticket's status via available transitions."
+    },
+    {
+        "name": "update_jira_estimates",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Update original and remaining time estimates on a Jira ticket."
+    },
+    {
+        "name": "update_jira_ticket",
+        "category": "jira",
+        "ownerAgents": [
+            "buggenie",
+            "testgenie",
+            "taskgenie"
+        ],
+        "description": "Update fields on an existing Jira ticket."
+    },
+    {
+        "name": "validate_generated_script",
+        "category": "framework",
+        "ownerAgents": [
+            "scriptgenerator",
+            "codereviewer"
+        ],
+        "description": "Validate a generated Playwright script against quality rules."
+    }
+]

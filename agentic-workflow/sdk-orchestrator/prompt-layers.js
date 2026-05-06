@@ -38,6 +38,8 @@
 const fs = require('fs');
 const path = require('path');
 
+const { buildProjectSkillActivationGuide } = require('./project-skills-catalog');
+
 // ─── Layer Definitions ──────────────────────────────────────────────────────
 
 /**
@@ -206,6 +208,8 @@ function buildJiraLayer() {
 - **MLS:** Which MLS environment
 - **Environment:** UAT/INT/PROD
 - **Attachments:** Screenshots, logs, error traces
+- When documenting an additional observation, issue, blocker, or risk, start the line or heading with that exact label, for example \`Observation:\`, \`Issue:\`, \`Blocker:\`, or \`Risk:\`.
+- Keep those labels at the start of a new line or heading instead of burying them mid-paragraph so Jira and the dashboard can auto-emphasize them.
 `.trim();
 }
 
@@ -374,19 +378,34 @@ Add to your Chain-of-Thought analysis:
 `.trim();
 }
 
+// ─── Skills Layer ───────────────────────────────────────────────────────────
+
+/**
+ * SKILLS LAYER — Project-wide skill discovery and routing hints.
+ * Injected into agents that support skill activation (all agents by default).
+ * Built dynamically from .github/skills/ and studio workspace skill folders.
+ */
+function buildSkillsLayer() {
+    const guide = buildProjectSkillActivationGuide();
+    if (!guide) {
+        return '## Skills\nNo project skills discovered. Create skills in .github/skills/ or via Studio workspaces.';
+    }
+    return guide;
+}
+
 // ─── Layer Assembly ─────────────────────────────────────────────────────────
 
 /**
  * Agent → Layer mapping: which layers each agent inherits
  */
 const AGENT_LAYERS = {
-    orchestrator: ['base'],
-    testgenie: ['base', 'jira', 'testCase'],
-    scriptgenerator: ['base', 'automation', 'mcp'],
-    buggenie: ['base', 'jira', 'video'],
-    taskgenie: ['base', 'jira'],
-    codereviewer: ['base', 'automation'],
-    docgenie: ['base', 'document'],
+    orchestrator: ['base', 'skills'],
+    testgenie: ['base', 'jira', 'testCase', 'skills'],
+    scriptgenerator: ['base', 'automation', 'mcp', 'skills'],
+    buggenie: ['base', 'jira', 'video', 'skills'],
+    taskgenie: ['base', 'jira', 'skills'],
+    codereviewer: ['base', 'automation', 'skills'],
+    docgenie: ['base', 'document', 'skills'],
 };
 
 /**
@@ -400,6 +419,7 @@ const LAYER_BUILDERS = {
     testCase: buildTestCaseLayer,
     document: buildDocumentLayer,
     video: buildVideoLayer,
+    skills: buildSkillsLayer,
 };
 
 /**
@@ -478,6 +498,7 @@ module.exports = {
     buildMcpLayer,
     buildTestCaseLayer,
     buildVideoLayer,
+    buildSkillsLayer,
     getAgentLayers,
     getSharedLayerSize,
     getLayerStats,

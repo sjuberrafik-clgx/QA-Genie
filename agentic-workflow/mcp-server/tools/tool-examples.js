@@ -164,6 +164,28 @@ export const TOOL_EXAMPLES = {
         },
     ],
 
+    unified_wait_for_load_state: [
+        {
+            description: 'Wait until DOM content is loaded',
+            input: { state: 'domcontentloaded', timeout: 10000 },
+        },
+        {
+            description: 'Wait until network is idle before extracting selectors',
+            input: { state: 'networkidle', timeout: 20000 },
+        },
+    ],
+
+    unified_wait_for_navigation: [
+        {
+            description: 'Wait for navigation to a URL pattern after interaction',
+            input: { urlPattern: '**/property/**', waitUntil: 'load', timeout: 15000 },
+        },
+        {
+            description: 'Wait for any URL transition to commit',
+            input: { waitUntil: 'commit', timeout: 10000 },
+        },
+    ],
+
     unified_wait_for_element: [
         {
             description: 'Wait for a button to become visible',
@@ -179,6 +201,40 @@ export const TOOL_EXAMPLES = {
         {
             description: 'Wait for an API response matching a URL pattern',
             input: { urlPattern: '**/api/v1/properties**', timeout: 15000 },
+        },
+    ],
+
+    unified_collect_virtualized_list: [
+        {
+            description: 'Collect items from an infinite scroll list within a scrollable container',
+            input: {
+                containerSelector: '#results-list',
+                itemSelector: '.result-card',
+                maxScrolls: 15,
+                stopWhenNoNewItems: 2,
+                captureAttributes: ['data-id', 'href'],
+            },
+        },
+        {
+            description: 'Collect page-level feed cards with conservative pacing',
+            input: {
+                containerSelector: 'body',
+                itemSelector: '[data-qa="feed-card"]',
+                maxScrolls: 10,
+                waitBetweenMs: 300,
+                maxReturnedItems: 50,
+            },
+        },
+    ],
+
+    unified_snapshot_diff: [
+        {
+            description: 'Set a baseline snapshot before a UI action',
+            input: { mode: 'set-baseline', filter: { interactiveOnly: true } },
+        },
+        {
+            description: 'Diff current UI state against baseline and include unchanged counts',
+            input: { mode: 'diff', filter: { roles: ['button', 'link', 'textbox'] }, includeUnchanged: true },
         },
     ],
 

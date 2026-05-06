@@ -52,6 +52,51 @@ import { getTemplates } from './tools/exploration-templates.js';
 import { ServerConfig } from './config/server-config.js';
 import { EventManager } from './utils/event-manager.js';
 
+const FORBIDDEN_TOP_LEVEL_SCHEMA_KEYS = ['anyOf', 'oneOf', 'allOf', 'enum', 'not'];
+
+function sanitizeInputSchemaForCapi(inputSchema, toolName) {
+    const schema = inputSchema && typeof inputSchema === 'object' && !Array.isArray(inputSchema)
+        ? { ...inputSchema }
+        : { type: 'object', properties: {} };
+
+    if (schema.type !== 'object') {
+        schema.type = 'object';
+    }
+
+    if (!schema.properties || typeof schema.properties !== 'object' || Array.isArray(schema.properties)) {
+        schema.properties = {};
+    }
+
+    if (Array.isArray(schema.allOf)) {
+        const requiredFromAllOf = schema.allOf
+            .flatMap(clause => Array.isArray(clause?.required) ? clause.required : [])
+            .filter(field => typeof field === 'string' && field.length > 0);
+
+        if (requiredFromAllOf.length > 0) {
+            const mergedRequired = new Set(Array.isArray(schema.required) ? schema.required : []);
+            for (const field of requiredFromAllOf) {
+                mergedRequired.add(field);
+            }
+            schema.required = Array.from(mergedRequired);
+        }
+    }
+
+    const removedKeywords = [];
+    for (const keyword of FORBIDDEN_TOP_LEVEL_SCHEMA_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(schema, keyword)) {
+            delete schema[keyword];
+            removedKeywords.push(keyword);
+        }
+    }
+
+    if (removedKeywords.length > 0) {
+        console.error(`[UnifiedMCP] Sanitized schema for ${toolName}: removed top-level ${removedKeywords.join(', ')}`);
+    }
+
+    schema.additionalProperties = false;
+    return schema;
+}
+
 function classifyToolFailure(error) {
     const blocker = error?.blocker || null;
     const message = error?.message || 'Unknown tool execution error';
@@ -190,13 +235,8 @@ class UnifiedAutomationServer {
 
         const sanitizedTools = toolsToExpose.map(tool => {
             const { _meta, ...cleanTool } = tool;
-            if (cleanTool.inputSchema &&
-                cleanTool.inputSchema.properties &&
-                Object.keys(cleanTool.inputSchema.properties).length > 0) {
-                cleanTool.inputSchema = {
-                    ...cleanTool.inputSchema,
-                    additionalProperties: false,
-                };
+            if (cleanTool.inputSchema) {
+                cleanTool.inputSchema = sanitizeInputSchemaForCapi(cleanTool.inputSchema, cleanTool.name);
             }
 
             const examples = getToolExamples(cleanTool.name);
@@ -206,21 +246,15 @@ class UnifiedAutomationServer {
             return cleanTool;
         });
 
-        if (deferredLoading) {
+        if (!sanitizedTools.some(t => t.name === 'unified_tool_search')) {
             const { _meta, ...cleanSearch } = TOOL_SEARCH_DEFINITION;
-            cleanSearch.inputSchema = {
-                ...cleanSearch.inputSchema,
-                additionalProperties: false,
-            };
+            cleanSearch.inputSchema = sanitizeInputSchemaForCapi(cleanSearch.inputSchema, cleanSearch.name);
             sanitizedTools.push(cleanSearch);
         }
 
         if (!sanitizedTools.some(t => t.name === 'unified_execute_exploration')) {
             const { _meta, ...cleanExec } = EXECUTE_EXPLORATION_DEFINITION;
-            cleanExec.inputSchema = {
-                ...cleanExec.inputSchema,
-                additionalProperties: false,
-            };
+            cleanExec.inputSchema = sanitizeInputSchemaForCapi(cleanExec.inputSchema, cleanExec.name);
             const examples = getToolExamples('unified_execute_exploration');
             if (examples) {
                 cleanExec.examples = examples;

@@ -19,8 +19,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
 const { extractJSON, getStageTimeout } = require('./utils');
+const { runCommand } = require('./terminal-runner');
 
 class SelfHealingEngine {
     /**
@@ -54,6 +54,7 @@ class SelfHealingEngine {
         // Apply cognitive scaling overrides if provided
         const effectiveMaxIterations = runtimeOptions.maxIterations || this.maxIterations;
         const cognitiveTier = runtimeOptions.cognitiveTier || null;
+        const abortSignal = runtimeOptions.abortSignal || null;
 
         this._log('═══════════════════════════════════════════════');
         this._log('  SELF-HEALING ENGINE');
@@ -78,15 +79,45 @@ class SelfHealingEngine {
         let iteration = 0;
         let lastTestResult = null;
         let totalFixesApplied = 0;
+        let cancelled = false;
+        const commandMetrics = [];
         const healingLog = [];
 
         while (iteration < effectiveMaxIterations) {
+            if (this._isCancellationRequested(abortSignal)) {
+                cancelled = true;
+                healingLog.push({
+                    iteration,
+                    action: 'cancelled',
+                    reason: 'Self-healing cancelled by user',
+                });
+                break;
+            }
+
             iteration++;
             this._log(`\n── Iteration ${iteration}/${effectiveMaxIterations} ──`);
 
             // Step 1: Run tests
-            const testResult = await this._runTests(resolvedSpec);
+            const testResult = await this._runTests(resolvedSpec, {
+                timeoutMs: runtimeOptions.timeoutMs,
+                abortSignal,
+                onCommandEvent: runtimeOptions.onCommandEvent,
+            });
             lastTestResult = testResult;
+
+            if (testResult.commandMetric) {
+                commandMetrics.push(testResult.commandMetric);
+            }
+
+            if (testResult.cancelled) {
+                cancelled = true;
+                healingLog.push({
+                    iteration,
+                    action: 'cancelled',
+                    reason: 'Self-healing cancelled by user',
+                });
+                break;
+            }
 
             if (testResult.passed) {
                 this._log(`✅ All tests passed on iteration ${iteration}!`);
@@ -244,7 +275,7 @@ class SelfHealingEngine {
             break;
         }
 
-        const success = lastTestResult?.passed || false;
+        const success = !cancelled && (lastTestResult?.passed || false);
 
         // Save final test results for the Reports dashboard
         if (lastTestResult?.rawOutput) {
@@ -265,15 +296,21 @@ class SelfHealingEngine {
 
         const result = {
             success,
+            cancelled,
             iterations: iteration,
             totalFixesApplied,
             passRate: lastTestResult
-                ? Math.round(((lastTestResult.totalCount - lastTestResult.failedCount) / lastTestResult.totalCount) * 100)
+                ? (lastTestResult.totalCount > 0
+                    ? Math.round(((lastTestResult.totalCount - lastTestResult.failedCount) / lastTestResult.totalCount) * 100)
+                    : 0)
                 : 0,
             healingLog,
-            message: success
-                ? `Tests healed after ${iteration} iteration(s) with ${totalFixesApplied} fix(es)`
-                : `Self-healing exhausted ${iteration} iterations — ${lastTestResult?.failedCount || 0} tests still failing`,
+            commandMetrics,
+            message: cancelled
+                ? 'Self-healing cancelled by user'
+                : success
+                    ? `Tests healed after ${iteration} iteration(s) with ${totalFixesApplied} fix(es)`
+                    : `Self-healing exhausted ${iteration} iterations — ${lastTestResult?.failedCount || 0} tests still failing`,
         };
 
         this._log('\n═══════════════════════════════════════════════');
@@ -288,25 +325,102 @@ class SelfHealingEngine {
     /**
      * Run Playwright tests and collect structured results.
      */
-    async _runTests(specPath) {
-        try {
-            const relativePath = path.relative(this.projectRoot, specPath).replace(/\\/g, '/');
-            const escapedPath = relativePath.replace(/[+.*?^${}()|[\]\\]/g, '\\$&');
-            this._log(`Running: npx playwright test "${escapedPath}"`);
+    async _runTests(specPath, options = {}) {
+        const relativePath = path.relative(this.projectRoot, specPath).replace(/\\/g, '/');
+        const npxCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+        const commandArgs = ['playwright', 'test', relativePath, '--reporter=json'];
+        const timeoutMs = options.timeoutMs || getStageTimeout(this.config, 'execution', 120000);
 
-            const output = execSync(
-                `npx playwright test "${escapedPath}" --reporter=json`,
-                {
-                    encoding: 'utf-8',
-                    stdio: 'pipe',
-                    cwd: this.projectRoot,
-                    timeout: getStageTimeout(this.config, 'execution', 120000),
-                }
-            );
+        const emitCommandEvent = (payload) => {
+            if (typeof options.onCommandEvent !== 'function') return;
+            try {
+                options.onCommandEvent({
+                    stage: 'healing',
+                    specPath: relativePath,
+                    ...payload,
+                });
+            } catch {
+                // Telemetry callbacks are best-effort.
+            }
+        };
+
+        let lastOutputHeartbeat = 0;
+        const onOutput = (chunk, stream) => {
+            const raw = chunk == null ? '' : String(chunk);
+            if (!raw) return;
+
+            // Emit a raw output chunk so dashboards can render the live tail.
+            const maxChunkChars = 8 * 1024;
+            const chunkText = raw.length > maxChunkChars
+                ? raw.slice(raw.length - maxChunkChars)
+                : raw;
+            emitCommandEvent({
+                type: 'output_chunk',
+                kind: 'chunk',
+                stream,
+                text: chunkText,
+                droppedChars: raw.length - chunkText.length,
+            });
+
+            // Throttled normalized heartbeat for legacy stage panels.
+            const normalized = this._normalizeOutputChunk(raw);
+            if (!normalized) return;
+
+            const now = Date.now();
+            if (now - lastOutputHeartbeat < 2500) return;
+            lastOutputHeartbeat = now;
+
+            emitCommandEvent({
+                type: 'output',
+                stream,
+                text: normalized.substring(0, 220),
+            });
+        };
+
+        try {
+            this._log(`Running: ${npxCommand} ${commandArgs.join(' ')}`);
+            emitCommandEvent({
+                type: 'start',
+                command: `${npxCommand} ${commandArgs.join(' ')}`,
+                timeoutMs,
+            });
+
+            const { stdout, stderr, startedAt, endedAt, durationMs, cancelToKillLatencyMs } = await runCommand({
+                command: npxCommand,
+                args: commandArgs,
+                cwd: this.projectRoot,
+                timeoutMs,
+                abortSignal: options.abortSignal || null,
+                onStdout: (chunk) => onOutput(chunk, 'stdout'),
+                onStderr: (chunk) => onOutput(chunk, 'stderr'),
+            });
+
+            emitCommandEvent({
+                type: 'exit',
+                exitCode: 0,
+                startedAt,
+                endedAt,
+                durationMs: Number.isFinite(durationMs) ? durationMs : null,
+                cancelToKillLatencyMs: Number.isFinite(cancelToKillLatencyMs) ? cancelToKillLatencyMs : null,
+            });
+
+            const output = [stdout, stderr].filter(Boolean).join('\n');
 
             const result = extractJSON(output);
             const specs = result.suites?.[0]?.specs || [];
             const failed = specs.filter(s => s.tests?.[0]?.status === 'failed');
+
+            const commandMetric = {
+                stage: 'healing',
+                command: `${npxCommand} ${commandArgs.join(' ')}`,
+                startedAt: startedAt || null,
+                endedAt: endedAt || null,
+                durationMs: Number.isFinite(durationMs) ? durationMs : null,
+                cancelToKillLatencyMs: Number.isFinite(cancelToKillLatencyMs) ? cancelToKillLatencyMs : null,
+                cancelled: false,
+                timedOut: false,
+                exitCode: 0,
+            };
 
             return {
                 passed: failed.length === 0,
@@ -316,9 +430,54 @@ class SelfHealingEngine {
                 passedTests: specs.filter(s => s.tests?.[0]?.status === 'passed').map(s => s.title),
                 error: null,
                 rawOutput: output,
+                commandMetric,
             };
         } catch (error) {
-            const errorOutput = error.stdout || error.stderr || error.message;
+            const errorOutput = [error.stdout, error.stderr, error.message]
+                .filter(Boolean)
+                .join('\n');
+
+            const commandMetric = {
+                stage: 'healing',
+                command: `${npxCommand} ${commandArgs.join(' ')}`,
+                startedAt: error.startedAt || null,
+                endedAt: error.endedAt || null,
+                durationMs: Number.isFinite(error.durationMs) ? error.durationMs : null,
+                cancelToKillLatencyMs: Number.isFinite(error.cancelToKillLatencyMs) ? error.cancelToKillLatencyMs : null,
+                cancelled: this._isAbortError(error),
+                timedOut: error.timedOut === true,
+                exitCode: Number.isInteger(error.exitCode) ? error.exitCode : null,
+                error: error.message,
+            };
+
+            if (this._isAbortError(error)) {
+                emitCommandEvent({
+                    type: 'cancelled',
+                    error: 'Cancelled by user',
+                    durationMs: Number.isFinite(error.durationMs) ? error.durationMs : null,
+                    cancelToKillLatencyMs: Number.isFinite(error.cancelToKillLatencyMs) ? error.cancelToKillLatencyMs : null,
+                });
+                return {
+                    passed: false,
+                    cancelled: true,
+                    totalCount: 0,
+                    failedCount: 0,
+                    failedTests: [],
+                    passedTests: [],
+                    error: 'Cancelled by user',
+                    rawOutput: errorOutput,
+                    commandMetric,
+                };
+            }
+
+            emitCommandEvent({
+                type: 'exit',
+                exitCode: error.exitCode ?? null,
+                signal: error.signal || null,
+                error: error.message,
+                durationMs: Number.isFinite(error.durationMs) ? error.durationMs : null,
+                cancelToKillLatencyMs: Number.isFinite(error.cancelToKillLatencyMs) ? error.cancelToKillLatencyMs : null,
+            });
 
             // Try to parse JSON from error output (Playwright exits non-zero on failures)
             try {
@@ -333,6 +492,7 @@ class SelfHealingEngine {
                     passedTests: specs.filter(s => s.tests?.[0]?.status === 'passed').map(s => s.title),
                     error: null,
                     rawOutput: errorOutput,
+                    commandMetric,
                 };
             } catch { /* JSON parse failed */ }
 
@@ -346,8 +506,26 @@ class SelfHealingEngine {
                 passedTests: [],
                 error: errorOutput,
                 rawOutput: errorOutput,
+                commandMetric,
             };
         }
+    }
+
+    _isCancellationRequested(abortSignal) {
+        return !!abortSignal?.aborted;
+    }
+
+    _isAbortError(error) {
+        return error?.code === 'ABORT_ERR' || error?.name === 'AbortError';
+    }
+
+    _normalizeOutputChunk(chunk) {
+        if (!chunk) return '';
+        return String(chunk)
+            .replace(/\r/g, ' ')
+            .replace(/\n+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
     }
 
     /**

@@ -5,7 +5,7 @@
  *
  * Chains agent SDK sessions into a complete pipeline:
  *
- *   PREFLIGHT → TESTGENIE → QG_EXCEL → SCRIPTGEN → QG_SCRIPT → EXECUTE
+ *   PREFLIGHT → TESTGENIE → QG_EXCEL → SCRIPTGEN → QG_EXPLORATION → QG_SCRIPT → EXECUTE
  *     → SELF_HEAL → BUGGENIE (if failures persist) → REPORT
  *
  * Key capabilities:
@@ -21,8 +21,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
 const { extractJSON, getStageTimeout } = require('./utils');
+const { runCommand } = require('./terminal-runner');
 const { getContextStoreManager } = require('./shared-context-store');
 const { AgentCoordinator, ROUTE } = require('./agent-coordinator');
 const { SupervisorSession } = require('./supervisor-session');
@@ -37,6 +37,7 @@ const STAGES = {
     TESTGENIE: 'testgenie',
     QG_EXCEL: 'qg_excel',
     SCRIPTGEN: 'scriptgenerator',
+    QG_EXPLORATION: 'qg_exploration',
     QG_SCRIPT: 'qg_script',
     EXECUTE: 'execute',
     SELF_HEAL: 'healing',
@@ -49,6 +50,7 @@ const STAGE_ORDER = [
     STAGES.TESTGENIE,
     STAGES.QG_EXCEL,
     STAGES.SCRIPTGEN,
+    STAGES.QG_EXPLORATION,
     STAGES.QG_SCRIPT,
     STAGES.EXECUTE,
     STAGES.SELF_HEAL,
@@ -60,7 +62,7 @@ const STAGE_ORDER = [
 const MODE_STAGES = {
     full: STAGE_ORDER,
     testcase: [STAGES.PREFLIGHT, STAGES.TESTGENIE, STAGES.QG_EXCEL, STAGES.REPORT],
-    generate: [STAGES.PREFLIGHT, STAGES.SCRIPTGEN, STAGES.QG_SCRIPT, STAGES.EXECUTE, STAGES.SELF_HEAL, STAGES.REPORT],
+    generate: [STAGES.PREFLIGHT, STAGES.SCRIPTGEN, STAGES.QG_EXPLORATION, STAGES.QG_SCRIPT, STAGES.EXECUTE, STAGES.SELF_HEAL, STAGES.REPORT],
     heal: [STAGES.EXECUTE, STAGES.SELF_HEAL, STAGES.REPORT],
     execute: [STAGES.EXECUTE, STAGES.REPORT],
 };
@@ -107,6 +109,7 @@ class PipelineRunner {
         const scenario = options.scenario || null;
         const scenarioId = scenario?.id || options.scenarioId || null;
         const authState = options.authState || scenario?.authState || 'unspecified';
+        const hybridContext = this._normalizeHybridContext(options);
 
         const startTime = Date.now();
         const runId = options.runId || `run_${ticketId}_${Date.now()}`;
@@ -115,6 +118,10 @@ class PipelineRunner {
         // Initialize shared context store for this run
         const contextStore = this._contextStoreManager.getStore(contextRunId);
         contextStore.addNote('coordinator', `Pipeline started: ${ticketId} [mode: ${mode}]${scenarioId ? ` [scenario: ${scenarioId}]` : ''}`);
+        contextStore.addNote('coordinator', `Input strategy: ${hybridContext.frameworkMode === 'manual' ? 'manual-url+testcases' : 'framework-autofetch'}`);
+        if (hybridContext.executionTarget) {
+            contextStore.addNote('coordinator', `Execution target override: ${hybridContext.executionTarget}`);
+        }
 
         // Initialize agent coordinator for smart routing
         const coordinator = new AgentCoordinator({
@@ -147,11 +154,22 @@ class PipelineRunner {
             startTime,
             runId,
             contextRunId,
+            onProgress,
+            onCommandEvent: typeof options.onCommandEvent === 'function' ? options.onCommandEvent : null,
+            abortSignal: options.abortSignal || null,
+            shouldCancel: typeof options.shouldCancel === 'function' ? options.shouldCancel : null,
+            cancelled: false,
             scenario,
             scenarioId,
             scenarioName: scenario?.name || null,
             authState,
             scenarioSlug: this._getScenarioSlug(scenarioId, authState),
+            frameworkMode: hybridContext.frameworkMode,
+            appUrl: hybridContext.appUrl,
+            testCaseSource: hybridContext.testCaseSource,
+            testDataOverride: hybridContext.testDataOverride,
+            executionTarget: hybridContext.executionTarget,
+            hybridContext,
             // Shared context store — agents read/write decisions here
             contextStore,
             // Agent coordinator — handles routing and collaboration
@@ -170,12 +188,21 @@ class PipelineRunner {
             healingResult: null,
             evidenceManifestPath: null,
             reportPath: null,
+            commandMetrics: [],
             // Stage results
             stageResults: {},
         };
 
+        if (!context.appUrl && context.frameworkMode !== 'manual') {
+            context.appUrl = this._resolveFrameworkBaseUrl();
+            context.hybridContext.appUrl = context.appUrl;
+        }
+
         this._log(`\n${'═'.repeat(60)}`);
         this._log(`  PIPELINE: ${ticketId} [mode: ${mode}]${scenarioId ? ` [scenario: ${scenarioId}/${authState}]` : ''}`);
+        if (context.appUrl) {
+            this._log(`  URL: ${context.appUrl}`);
+        }
         this._log(`  Stages: ${stages.join(' → ')}`);
         this._log(`${'═'.repeat(60)}`);
 
@@ -251,7 +278,9 @@ class PipelineRunner {
                 duration: `${duration}s`,
                 lastCompletedStage: null,
                 stageResults: context.stageResults,
-                artifacts: {},
+                artifacts: {
+                    executionMetrics: this._buildExecutionMetricsArtifact(context),
+                },
                 orchestration: {},
                 error: pipelineError,
             };
@@ -259,6 +288,13 @@ class PipelineRunner {
 
         for (let i = 0; i < stages.length; i++) {
             const stage = stages[i];
+
+            if (this._isCancellationRequested(context)) {
+                context.cancelled = true;
+                pipelineError = 'Cancelled by user';
+                this._log('🛑 Pipeline cancellation requested');
+                break;
+            }
 
             // Skip stages that the coordinator decided to skip
             if (skipStages.has(stage)) {
@@ -286,6 +322,13 @@ class PipelineRunner {
                 const result = await this._executeStage(stage, context, onProgress);
                 context.stageResults[stage] = result;
                 lastCompletedStage = stage;
+
+                if (result?.cancelled) {
+                    context.cancelled = true;
+                    pipelineError = 'Cancelled by user';
+                    this._log(`🛑 Stage ${stage} cancelled by user`);
+                    break;
+                }
 
                 // Context compaction: shrink completed stage data to free budget
                 // for downstream agents (context engineering pattern)
@@ -464,10 +507,22 @@ class PipelineRunner {
                 if (pipelineError) break;
 
             } catch (error) {
-                pipelineError = `Stage ${stage} threw: ${error.message}`;
-                context.stageResults[stage] = { success: false, error: error.message, blocking: true };
-                this._log(`💥 Stage ${stage} threw: ${error.message}`);
-                onProgress(stage, `ERROR: ${error.message}`);
+                if (this._isAbortError(error) || this._isCancellationRequested(context)) {
+                    context.cancelled = true;
+                    pipelineError = 'Cancelled by user';
+                    context.stageResults[stage] = {
+                        success: false,
+                        cancelled: true,
+                        error: 'Cancelled by user',
+                        blocking: false,
+                    };
+                    this._log(`🛑 Stage ${stage} cancelled`);
+                } else {
+                    pipelineError = `Stage ${stage} threw: ${error.message}`;
+                    context.stageResults[stage] = { success: false, error: error.message, blocking: true };
+                    this._log(`💥 Stage ${stage} threw: ${error.message}`);
+                    onProgress(stage, `ERROR: ${error.message}`);
+                }
                 break;
             }
         }
@@ -481,18 +536,34 @@ class PipelineRunner {
                 const remainingStages = stages.slice(restartIdx);
                 pipelineError = null;
                 for (const stage of remainingStages) {
+                    if (this._isCancellationRequested(context)) {
+                        context.cancelled = true;
+                        pipelineError = 'Cancelled by user';
+                        break;
+                    }
+
                     onProgress(stage, `Starting ${stage} (restart)...`);
                     try {
                         const result = await this._executeStage(stage, context, onProgress);
                         context.stageResults[stage] = result;
                         lastCompletedStage = stage;
+                        if (result?.cancelled) {
+                            context.cancelled = true;
+                            pipelineError = 'Cancelled by user';
+                            break;
+                        }
                         if (!result.success && result.blocking) {
                             pipelineError = `Stage ${stage} failed on restart: ${result.error || 'unknown'}`;
                             break;
                         }
                         onProgress(stage, result.message || 'Completed');
                     } catch (error) {
-                        pipelineError = `Stage ${stage} threw on restart: ${error.message}`;
+                        pipelineError = this._isAbortError(error) || this._isCancellationRequested(context)
+                            ? 'Cancelled by user'
+                            : `Stage ${stage} threw on restart: ${error.message}`;
+                        if (pipelineError === 'Cancelled by user') {
+                            context.cancelled = true;
+                        }
                         break;
                     }
                 }
@@ -524,6 +595,11 @@ class PipelineRunner {
         }
         const coordinatorStats = coordinator.getStats();
 
+        const finalSuccess = !context.cancelled && !pipelineError && this._computeOverallSuccess(context);
+        const finalError = context.cancelled
+            ? 'Cancelled by user'
+            : this._derivePipelineFailureReason(context, pipelineError);
+
         const result = {
             ticketId,
             mode,
@@ -533,7 +609,8 @@ class PipelineRunner {
                 name: context.scenarioName,
                 authState: context.authState,
             } : null,
-            success: !pipelineError,
+            success: finalSuccess,
+            cancelled: context.cancelled === true,
             duration: `${duration}s`,
             lastCompletedStage,
             stageResults: context.stageResults,
@@ -545,6 +622,7 @@ class PipelineRunner {
                 healingResult: context.healingResult,
                 evidenceManifest: context.evidenceManifestPath,
                 report: context.reportPath,
+                executionMetrics: this._buildExecutionMetricsArtifact(context),
             },
             orchestration: {
                 routingDecisions: coordinatorStats.routingDecisions,
@@ -556,11 +634,11 @@ class PipelineRunner {
                 supervisorConversationTurns: supervisor ? supervisor.getConversationLength() : 0,
                 supervisorSummary,
             },
-            error: pipelineError,
+            error: finalError,
         };
 
         this._log(`\n${'═'.repeat(60)}`);
-        this._log(`  PIPELINE ${result.success ? 'COMPLETED' : 'FAILED'}`);
+        this._log(`  PIPELINE ${finalSuccess ? 'COMPLETED' : 'FAILED'}`);
         this._log(`  Duration: ${duration}s | Last stage: ${lastCompletedStage}`);
         this._log(`${'═'.repeat(60)}`);
 
@@ -582,6 +660,9 @@ class PipelineRunner {
 
             case STAGES.SCRIPTGEN:
                 return this._runScriptGeneratorDispatch(context, onProgress);
+
+            case STAGES.QG_EXPLORATION:
+                return this._runQualityGate('exploration', context);
 
             case STAGES.QG_SCRIPT:
                 return this._runQualityGate('script', context);
@@ -618,11 +699,19 @@ class PipelineRunner {
             { name: 'popup-handler', rel: 'tests/utils/popupHandler.js' },
         ];
 
-        for (const file of requiredFiles) {
+        if (context.frameworkMode === 'manual') {
             checks.push({
-                name: file.name,
-                passed: fs.existsSync(path.join(this.projectRoot, file.rel)),
+                name: 'framework-files',
+                passed: true,
+                note: 'Skipped in manual mode (URL + testCaseSource provided)',
             });
+        } else {
+            for (const file of requiredFiles) {
+                checks.push({
+                    name: file.name,
+                    passed: fs.existsSync(path.join(this.projectRoot, file.rel)),
+                });
+            }
         }
 
         // ── OODA: Include health check summary from context store ───
@@ -662,6 +751,33 @@ class PipelineRunner {
         this._log('📝 Running TestGenie session...');
         let session = null;
         let sessionId = null;
+
+        const providedTestCasesPath = this._materializeProvidedTestCases(context);
+        if (providedTestCasesPath) {
+            context.testCasesPath = this._copyArtifactForScenario(providedTestCasesPath, context);
+            if (context.contextStore) {
+                context.contextStore.registerArtifact('testgenie', 'testCases', context.testCasesPath, {
+                    summary: 'Using provided test cases input',
+                    source: 'manual-input',
+                });
+            }
+
+            return {
+                success: true,
+                blocking: false,
+                message: `Using provided test cases: ${path.basename(context.testCasesPath)}`,
+                artifact: context.testCasesPath,
+            };
+        }
+
+        if (context.frameworkMode === 'manual') {
+            return {
+                success: false,
+                blocking: true,
+                message: 'Manual mode requires testCaseSource input',
+                error: 'Missing testCaseSource for manual run mode',
+            };
+        }
 
         try {
             // Create TestGenie session
@@ -836,6 +952,8 @@ class PipelineRunner {
                     : '',
                 testCasesPath: context.testCasesPath,
                 appUrl: context.appUrl,
+                frameworkMode: context.frameworkMode,
+                testDataOverride: context.testDataOverride,
                 contextStore: context.contextStore,
             }, (phase, message) => {
                 onProgress(STAGES.SCRIPTGEN, `[${phase.toUpperCase()}] ${message}`);
@@ -912,9 +1030,45 @@ class PipelineRunner {
             // Build test case context from TestGenie output
             let testCaseContext = '';
             if (context.testCasesPath && fs.existsSync(context.testCasesPath)) {
-                testCaseContext = `Test cases Excel file is at: ${context.testCasesPath}`;
+                testCaseContext = `Test cases source is at: ${context.testCasesPath}`;
             }
             const scenarioPrompt = this._buildScenarioPrompt(context);
+            const appUrlContext = context.appUrl
+                ? `Target app URL: ${context.appUrl}`
+                : 'Target app URL must be auto-resolved from framework test data (baseUrl/userTokens).';
+            const runInputContext = `Framework mode: ${context.frameworkMode}`;
+            const testDataOverrideContext = context.testDataOverride !== null && context.testDataOverride !== undefined
+                ? 'Runtime test data override is provided for this run; use it when generating data-dependent steps.'
+                : '';
+            const useFrameworkConventions = context.frameworkMode !== 'manual';
+            const frameworkDiscoveryStep = useFrameworkConventions
+                ? '6. Call get_framework_inventory to discover reusable code (page objects, business functions, PopupHandler, test data) before creating the spec file\n'
+                : '6. Framework inventory is optional in manual mode; proceed with standalone Playwright if no framework artifacts exist\n';
+            const scriptBuildStep = useFrameworkConventions
+                ? '8. Generate the .spec.js file using CAPTURED selectors + EXISTING framework methods\n'
+                : '8. Generate the .spec.js file using CAPTURED selectors + standalone Playwright patterns (CommonJS)\n';
+            const frameworkRequirementsBlock = useFrameworkConventions
+                ? 'FRAMEWORK REQUIREMENTS (enforced — script will be REJECTED if violated):\n' +
+                '- Import launchBrowser from ../../config/config — NOT manual browser setup\n' +
+                '- Import POmanager from ../../pageobjects/POmanager — use existing page objects\n' +
+                '- Import { PopupHandler } from ../../utils/popupHandler — for popup dismissal\n' +
+                '- Import { userTokens, baseUrl } from ../../test-data/testData — NO hardcoded URLs/tokens\n' +
+                '- Use test.describe.serial() — NOT test.describe() — for shared browser state\n' +
+                '- Use auto-retrying assertions ONLY — NO expect(await el.textContent())\n' +
+                '- NO page.waitForTimeout() — use waitForLoadState, toBeVisible, waitForSelector\n' +
+                '- Close page, context, AND browser in afterAll with null/closed guards\n' +
+                '- REUSE existing business functions and page object methods from the framework inventory\n\n'
+                : 'MANUAL MODE REQUIREMENTS (framework not required):\n' +
+                '- Use CommonJS with require(\'@playwright/test\')\n' +
+                '- Keep selectors MCP-derived and stable; avoid brittle nth-child chains\n' +
+                '- Use auto-retrying assertions and avoid page.waitForTimeout()\n' +
+                '- Include cleanup hooks if browser/context are created explicitly\n\n';
+            const frameworkProhibitedRule = useFrameworkConventions
+                ? '- Do NOT launch standalone Playwright browsers via require("playwright")\n'
+                : '';
+            const frameworkInventoryToolHint = useFrameworkConventions
+                ? '- get_framework_inventory: Scan test framework codebase (MANDATORY before writing spec)\n'
+                : '- get_framework_inventory: Optional in manual mode; use only if reusable framework code exists\n';
 
             // Create session
             const sessionInfo = await this.sessionFactory.createAgentSession('scriptgenerator', {
@@ -922,9 +1076,12 @@ class PipelineRunner {
                 runId: context.runId,
                 scenarioId: context.scenarioId,
                 authState: context.authState,
+                frameworkMode: context.frameworkMode,
+                appUrl: context.appUrl,
+                testDataOverride: context.testDataOverride,
                 frameworkInventory,
                 historicalContext,
-                ticketContext: [testCaseContext, scenarioPrompt].filter(Boolean).join('\n'),
+                ticketContext: [runInputContext, appUrlContext, testCaseContext, testDataOverrideContext, scenarioPrompt].filter(Boolean).join('\n'),
                 taskDescription: `Generate Playwright automation script for ticket ${context.ticketId}${context.scenarioId ? ` (${context.scenarioName || context.scenarioId})` : ''}`,
                 contextStore: context.contextStore,
             });
@@ -937,19 +1094,26 @@ class PipelineRunner {
             // unified_snapshot (NOT mcp_unified-autom_unified_snapshot)
             const prompt =
                 `Generate a Playwright automation script for ticket ${context.ticketId}.\n\n` +
+                'RUN INPUT STRATEGY:\n' +
+                `- Framework mode: ${context.frameworkMode}\n` +
+                (context.appUrl
+                    ? `- Use this URL for first navigation: ${context.appUrl}\n`
+                    : '- Resolve application URL from existing framework test data exports (baseUrl/userTokens) before navigation.\n') +
+                (testDataOverrideContext ? `- ${testDataOverrideContext}\n` : '') +
+                '\n' +
                 (context.scenarioId
                     ? `MISSION SCENARIO:\n- Scenario ID: ${context.scenarioId}\n- Scenario Name: ${context.scenarioName || context.scenarioId}\n- Auth State: ${context.authState}\n- Generate and validate ONLY this scenario branch.\n- Authenticated branch: use existing framework login/business functions and validate post-login behavior.\n- Unauthenticated branch: do not perform login unless the application redirects to an auth wall that must be asserted.\n\n`
                     : '') +
                 'MANDATORY STEPS (in this exact order):\n' +
-                '0. FIRST: Call get_framework_inventory to discover reusable code (page objects, business functions, PopupHandler, test data)\n' +
-                '1. Navigate to the application using the unified_navigate MCP tool\n' +
-                '2. Take accessibility snapshots using unified_snapshot\n' +
-                '3. Validate key elements with SEMANTIC selectors (unified_get_by_role, unified_get_by_test_id, unified_get_by_label, unified_get_by_text)\n' +
-                '4. Extract REAL content for assertions (unified_get_text_content, unified_get_attribute, unified_get_input_value)\n' +
-                '5. Verify navigation state (unified_get_page_url or unified_expect_url)\n' +
-                '6. Navigate through ALL pages in the test flow, snapshot each one, repeat steps 3-5\n' +
+                `0. FIRST: Navigate to the application using unified_navigate to ${context.appUrl || 'the resolved framework baseUrl'} (or unified_execute_exploration with an explicit navigate step)\n` +
+                '1. Take accessibility snapshots using unified_snapshot\n' +
+                '2. Validate key elements with SEMANTIC selectors (unified_get_by_role, unified_get_by_test_id, unified_get_by_label, unified_get_by_text)\n' +
+                '3. Extract REAL content for assertions (unified_get_text_content, unified_get_attribute, unified_get_input_value)\n' +
+                '4. Verify navigation state (unified_get_page_url or unified_expect_url)\n' +
+                '5. Navigate through ALL pages in the test flow, snapshot each one, repeat steps 2-4\n' +
+                frameworkDiscoveryStep +
                 '7. Save exploration data using save_exploration_data custom tool\n' +
-                '8. Generate the .spec.js file using CAPTURED selectors + EXISTING framework methods\n' +
+                scriptBuildStep +
                 '9. Validate the script using validate_generated_script\n\n' +
                 'AVAILABLE MCP TOOLS — Navigation & Page:\n' +
                 '- unified_navigate: Navigate to a URL\n' +
@@ -998,31 +1162,27 @@ class PipelineRunner {
                 '- unified_console_messages: Get browser console messages\n' +
                 '- unified_page_errors: Get page JS errors\n\n' +
                 'AVAILABLE CUSTOM TOOLS:\n' +
-                '- get_framework_inventory: Scan test framework codebase (MANDATORY — call FIRST)\n' +
+                frameworkInventoryToolHint +
                 '- save_exploration_data: Save exploration JSON\n' +
                 '- validate_generated_script: Validate the .spec.js file\n' +
                 '- get_assertion_config: Get assertion patterns and rules\n' +
                 '- suggest_popup_handler: Get popup handling recommendations\n' +
                 '- get_historical_failures: Check for known failures on target pages\n\n' +
                 `${testCaseContext ? `Test cases reference: ${testCaseContext}\n\n` : ''}` +
-                'FRAMEWORK REQUIREMENTS (enforced — script will be REJECTED if violated):\n' +
-                '- Import launchBrowser from ../../config/config — NOT manual browser setup\n' +
-                '- Import POmanager from ../../pageobjects/POmanager — use existing page objects\n' +
-                '- Import { PopupHandler } from ../../utils/popupHandler — for popup dismissal\n' +
-                '- Import { userTokens, baseUrl } from ../../test-data/testData — NO hardcoded URLs/tokens\n' +
-                '- Use test.describe.serial() — NOT test.describe() — for shared browser state\n' +
-                '- Use auto-retrying assertions ONLY — NO expect(await el.textContent())\n' +
-                '- NO page.waitForTimeout() — use waitForLoadState, toBeVisible, waitForSelector\n' +
-                '- Close page, context, AND browser in afterAll with null/closed guards\n' +
-                '- REUSE existing business functions and page object methods from the framework inventory\n\n' +
+                frameworkRequirementsBlock +
                 'PROHIBITED ACTIONS (strictly enforced):\n' +
                 '- Do NOT use runInTerminal, powershell, or any shell/terminal tool\n' +
                 '- Do NOT run npx playwright test — test execution is a SEPARATE pipeline stage\n' +
-                '- Do NOT launch standalone Playwright browsers via require("playwright")\n' +
+                frameworkProhibitedRule +
                 '- Do NOT guess selectors — every selector MUST come from MCP snapshot/get_by_* output\n' +
                 '- Do NOT hardcode URLs containing token= — use userTokens from testData.js';
 
-            onProgress(STAGES.SCRIPTGEN, 'Exploring application via MCP...');
+            onProgress(
+                STAGES.SCRIPTGEN,
+                context.appUrl
+                    ? `Exploring application via MCP (${context.appUrl})...`
+                    : 'Exploring application via MCP...'
+            );
             const scriptResponse = await this.sessionFactory.sendAndWait(session, prompt, {
                 timeout: getStageTimeout(this.config, 'scriptgenerator', 600000),
                 onDelta: (delta) => {
@@ -1127,20 +1287,89 @@ class PipelineRunner {
                 return { success: true, blocking: false, message: `Unknown gate: ${gate}` };
         }
 
+        if (gate === 'exploration' && (!artifactPath || !fs.existsSync(artifactPath))) {
+            const fallbackExploration = path.join(
+                __dirname,
+                '..',
+                'exploration-data',
+                `${context.ticketId}-exploration.json`
+            );
+            if (fs.existsSync(fallbackExploration)) {
+                artifactPath = fallbackExploration;
+                context.explorationPath = fallbackExploration;
+            }
+        }
+
         if (!artifactPath || !fs.existsSync(artifactPath)) {
             return {
                 success: false,
-                blocking: gate === 'script', // Only script gate is blocking
+                blocking: gate === 'script' || gate === 'exploration',
                 message: `${gate} artifact not found`,
                 error: `No artifact at ${artifactPath || 'null'}`,
             };
         }
 
+        if (gate === 'exploration') {
+            try {
+                const { QualityGates } = require('../../.github/agents/lib/quality-gates');
+                const gateResult = QualityGates.validateMCPExploration({
+                    ticketId: context.ticketId,
+                    artifacts: { explorationPath: artifactPath },
+                }, context.ticketId);
+
+                return {
+                    success: !!gateResult.passed,
+                    blocking: !gateResult.passed,
+                    message: gateResult.passed
+                        ? 'Exploration quality gate passed'
+                        : `Exploration quality gate failed: ${gateResult.error || 'validation failed'}`,
+                    details: gateResult,
+                    error: gateResult.passed ? null : (gateResult.error || 'Exploration validation failed'),
+                };
+            } catch (error) {
+                return {
+                    success: false,
+                    blocking: true,
+                    message: `Exploration gate validation error: ${error.message}`,
+                    error: error.message,
+                };
+            }
+        }
+
         // For script gate, run validate-script.js
         if (gate === 'script') {
             try {
-                const { validateGeneratedScript } = require('../scripts/validate-script');
                 const content = fs.readFileSync(artifactPath, 'utf-8');
+
+                if (context.frameworkMode === 'manual') {
+                    const errors = [];
+                    const warnings = [];
+
+                    if (!artifactPath.endsWith('.spec.js')) {
+                        errors.push('Manual mode script must use .spec.js extension');
+                    }
+                    if (!content.includes("require('@playwright/test')")) {
+                        errors.push('Manual mode script must import @playwright/test via require()');
+                    }
+                    if (!/\btest\s*\(|test\.describe\s*\(/.test(content)) {
+                        errors.push('Manual mode script must define at least one Playwright test');
+                    }
+                    if (content.includes('page.waitForTimeout(')) {
+                        warnings.push('Avoid page.waitForTimeout(); use condition-based waits');
+                    }
+
+                    return {
+                        success: errors.length === 0,
+                        blocking: errors.length > 0,
+                        errors,
+                        warnings,
+                        message: errors.length === 0
+                            ? 'Manual mode script validation passed'
+                            : `Manual mode validation failed: ${errors.length} error(s)`,
+                    };
+                }
+
+                const { validateGeneratedScript } = require('../scripts/validate-script');
 
                 // Suppress console
                 const origLog = console.log;
@@ -1176,12 +1405,34 @@ class PipelineRunner {
     async _runExecution(context) {
         this._log('🧪 Running test execution...');
 
-        if (!context.specPath || !fs.existsSync(context.specPath)) {
+        const explicitExecutionTarget = this._resolveExecutionTarget(context.executionTarget);
+        if (explicitExecutionTarget?.exists && explicitExecutionTarget.type === 'file') {
+            context.specPath = explicitExecutionTarget.absolutePath;
+        }
+
+        const useExplicitTarget = context.mode === 'execute' && !!explicitExecutionTarget;
+        const resolvedSpecPath = context.specPath && fs.existsSync(context.specPath)
+            ? context.specPath
+            : null;
+
+        const targetArg = useExplicitTarget
+            ? explicitExecutionTarget.targetArg
+            : (resolvedSpecPath ? this._toRelativeTargetPath(resolvedSpecPath) : null);
+
+        const targetLabel = useExplicitTarget
+            ? explicitExecutionTarget.displayLabel
+            : (resolvedSpecPath ? this._toRelativeTargetPath(resolvedSpecPath) : 'default');
+
+        if (!targetArg) {
+            const missingReason = useExplicitTarget
+                ? `Execution target not found: ${context.executionTarget}`
+                : 'No spec file to execute';
+
             return {
                 success: false,
-                blocking: false,
-                message: 'No spec file to execute',
-                error: 'specPath is missing',
+                blocking: true,
+                message: missingReason,
+                error: missingReason,
             };
         }
 
@@ -1195,33 +1446,115 @@ class PipelineRunner {
             this._log(`🧠 Execution timeout scaled for tier=${context.cognitiveTier}: ${executionTimeout}ms`);
         }
 
+        const npxCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+        const commandArgs = ['playwright', 'test', targetArg, '--reporter=json'];
+        const commandLabel = `${npxCommand} ${commandArgs.join(' ')}`;
+        const baseCommandMetric = {
+            stage: STAGES.EXECUTE,
+            scenarioId: context.scenarioId || null,
+            scenarioName: context.scenarioName || null,
+            authState: context.authState || 'unspecified',
+            target: targetLabel,
+            command: commandLabel,
+        };
+
+        if (this._isCancellationRequested(context)) {
+            return {
+                success: false,
+                cancelled: true,
+                blocking: false,
+                message: `Execution cancelled (${targetLabel})`,
+                error: 'Cancelled by user',
+            };
+        }
+
+        this._emitCommandEvent(context, 'start', {
+            stage: STAGES.EXECUTE,
+            target: targetLabel,
+            timeoutMs: executionTimeout,
+            command: commandLabel,
+        });
+
+        let lastOutputHeartbeat = 0;
+        const onOutput = (chunk, stream) => {
+            const raw = chunk == null ? '' : String(chunk);
+            if (!raw) return;
+
+            // Emit a raw output chunk (preserves newlines) for the Live
+            // Command Output tail. This is the lossless feed — consumers
+            // that only care about a status heartbeat can ignore this.
+            this._emitCommandChunk(context, {
+                stage: STAGES.EXECUTE,
+                target: targetLabel,
+                stream,
+                text: raw,
+            });
+
+            // Keep the pre-existing throttled, normalized status event so
+            // stage panels stay stable and SSE clients with older handlers
+            // continue to work.
+            const normalized = this._normalizeCommandOutput(raw);
+            if (!normalized) return;
+
+            const now = Date.now();
+            if (now - lastOutputHeartbeat < 2500) return;
+            lastOutputHeartbeat = now;
+
+            const snippet = normalized.substring(0, 220);
+            this._emitCommandEvent(context, 'output', {
+                stage: STAGES.EXECUTE,
+                target: targetLabel,
+                stream,
+                text: snippet,
+            });
+        };
+
         try {
-            // Make path relative to project root to avoid regex issues with special chars
-            const relativePath = path.relative(this.projectRoot, context.specPath).replace(/\\/g, '/');
-            // Escape regex metacharacters in path for Playwright's filter
-            const escapedPath = relativePath.replace(/[+.*?^${}()|[\]\\]/g, '\\$&');
-            const output = execSync(
-                `npx playwright test "${escapedPath}" --reporter=json`,
-                {
-                    encoding: 'utf-8',
-                    stdio: 'pipe',
-                    cwd: this.projectRoot,
-                    timeout: executionTimeout,
-                    env: {
-                        ...process.env,
-                        SDK_RUN_ID: context.runId,
-                        SDK_TICKET_ID: context.ticketId,
-                        SDK_SCENARIO_ID: context.scenarioId || '',
-                        SDK_AUTH_STATE: context.authState || 'unspecified',
-                        QA_EVIDENCE_ENABLED: process.env.QA_EVIDENCE_ENABLED || 'true',
-                    },
-                }
-            );
+            const { stdout, stderr, exitCode, signal, startedAt, endedAt, durationMs, cancelToKillLatencyMs } = await runCommand({
+                command: npxCommand,
+                args: commandArgs,
+                cwd: this.projectRoot,
+                timeoutMs: executionTimeout,
+                abortSignal: context.abortSignal || null,
+                env: {
+                    ...process.env,
+                    SDK_RUN_ID: context.runId,
+                    SDK_TICKET_ID: context.ticketId,
+                    SDK_SCENARIO_ID: context.scenarioId || '',
+                    SDK_AUTH_STATE: context.authState || 'unspecified',
+                    QA_EVIDENCE_ENABLED: process.env.QA_EVIDENCE_ENABLED || 'true',
+                },
+                onStdout: (chunk) => onOutput(chunk, 'stdout'),
+                onStderr: (chunk) => onOutput(chunk, 'stderr'),
+            });
+
+            this._emitCommandEvent(context, 'exit', {
+                stage: STAGES.EXECUTE,
+                target: targetLabel,
+                exitCode: exitCode ?? 0,
+                signal: signal || null,
+                durationMs: Number.isFinite(durationMs) ? durationMs : null,
+                cancelToKillLatencyMs: Number.isFinite(cancelToKillLatencyMs) ? cancelToKillLatencyMs : null,
+            });
+
+            this._recordCommandMetric(context, {
+                ...baseCommandMetric,
+                startedAt: startedAt || null,
+                endedAt: endedAt || null,
+                durationMs: Number.isFinite(durationMs) ? durationMs : null,
+                cancelToKillLatencyMs: Number.isFinite(cancelToKillLatencyMs) ? cancelToKillLatencyMs : null,
+                exitCode: Number.isInteger(exitCode) ? exitCode : 0,
+                timedOut: false,
+                cancelled: false,
+            });
+
+            const output = [stdout, stderr].filter(Boolean).join('\n');
 
             const result = extractJSON(output);
-            const specs = result.suites?.[0]?.specs || [];
+            const specs = this._collectPlaywrightSpecs(result);
             const failed = specs.filter(s => s.tests?.[0]?.status === 'failed');
             const passed = specs.filter(s => s.tests?.[0]?.status === 'passed');
+            const passedAll = failed.length === 0 && specs.length > 0;
 
             // Save raw Playwright JSON for the Reports dashboard
             const rawResultsPath = this._saveRawTestResults(context, result);
@@ -1230,26 +1563,84 @@ class PipelineRunner {
                 totalCount: specs.length,
                 passedCount: passed.length,
                 failedCount: failed.length,
-                passed: failed.length === 0,
+                passed: passedAll,
                 failedTests: failed.map(s => s.title),
                 rawResultsFile: rawResultsPath,
+                executionTarget: targetLabel,
             };
 
             this._refreshEvidenceManifest(context, { phase: STAGES.EXECUTE });
 
             return {
-                success: failed.length === 0,
-                blocking: false,
-                message: `${passed.length}/${specs.length} tests passed`,
+                success: passedAll,
+                blocking: !passedAll && this._shouldExecutionFailureBlock(context, 'test-failure'),
+                message: `${passed.length}/${specs.length} tests passed (${targetLabel})`,
                 testResults: context.testResults,
             };
         } catch (error) {
-            const errorOutput = error.stdout || error.stderr || error.message;
+            const errorOutput = [error.stdout, error.stderr, error.message]
+                .filter(Boolean)
+                .join('\n');
+            const blockingOnFailure = this._shouldExecutionFailureBlock(context, 'execution-error');
+
+            if (this._isAbortError(error) || this._isCancellationRequested(context)) {
+                this._emitCommandEvent(context, 'cancelled', {
+                    stage: STAGES.EXECUTE,
+                    target: targetLabel,
+                    error: 'Cancelled by user',
+                    durationMs: Number.isFinite(error.durationMs) ? error.durationMs : null,
+                    cancelToKillLatencyMs: Number.isFinite(error.cancelToKillLatencyMs) ? error.cancelToKillLatencyMs : null,
+                });
+
+                this._recordCommandMetric(context, {
+                    ...baseCommandMetric,
+                    startedAt: error.startedAt || null,
+                    endedAt: error.endedAt || null,
+                    durationMs: Number.isFinite(error.durationMs) ? error.durationMs : null,
+                    cancelToKillLatencyMs: Number.isFinite(error.cancelToKillLatencyMs) ? error.cancelToKillLatencyMs : null,
+                    exitCode: Number.isInteger(error.exitCode) ? error.exitCode : null,
+                    signal: error.signal || null,
+                    timedOut: error.timedOut === true,
+                    cancelled: true,
+                    error: error.message,
+                });
+
+                return {
+                    success: false,
+                    cancelled: true,
+                    blocking: false,
+                    message: `Execution cancelled (${targetLabel})`,
+                    error: 'Cancelled by user',
+                };
+            }
+
+            this._emitCommandEvent(context, 'exit', {
+                stage: STAGES.EXECUTE,
+                target: targetLabel,
+                exitCode: error.exitCode ?? null,
+                signal: error.signal || null,
+                error: error.message,
+                durationMs: Number.isFinite(error.durationMs) ? error.durationMs : null,
+                cancelToKillLatencyMs: Number.isFinite(error.cancelToKillLatencyMs) ? error.cancelToKillLatencyMs : null,
+            });
+
+            this._recordCommandMetric(context, {
+                ...baseCommandMetric,
+                startedAt: error.startedAt || null,
+                endedAt: error.endedAt || null,
+                durationMs: Number.isFinite(error.durationMs) ? error.durationMs : null,
+                cancelToKillLatencyMs: Number.isFinite(error.cancelToKillLatencyMs) ? error.cancelToKillLatencyMs : null,
+                exitCode: Number.isInteger(error.exitCode) ? error.exitCode : null,
+                signal: error.signal || null,
+                timedOut: error.timedOut === true,
+                cancelled: false,
+                error: error.message,
+            });
 
             // Try to parse JSON from error output (Playwright exits non-zero on test failures)
             try {
                 const result = extractJSON(errorOutput);
-                const specs = result.suites?.[0]?.specs || [];
+                const specs = this._collectPlaywrightSpecs(result);
                 const failed = specs.filter(s => s.tests?.[0]?.status === 'failed');
                 const passed = specs.filter(s => s.tests?.[0]?.status === 'passed');
 
@@ -1264,15 +1655,16 @@ class PipelineRunner {
                     failedTests: failed.map(s => s.title),
                     errors: result.errors || [],
                     rawResultsFile: rawResultsPath,
+                    executionTarget: targetLabel,
                 };
 
                 this._refreshEvidenceManifest(context, { phase: STAGES.EXECUTE });
 
                 return {
                     success: context.testResults.passed,
-                    blocking: false,
+                    blocking: !context.testResults.passed && blockingOnFailure,
                     message: specs.length > 0
-                        ? `${passed.length}/${specs.length} tests passed`
+                        ? `${passed.length}/${specs.length} tests passed (${targetLabel})`
                         : `Test execution error: ${(result.errors?.[0]?.message || '').substring(0, 200)}`,
                     testResults: context.testResults,
                 };
@@ -1289,14 +1681,15 @@ class PipelineRunner {
                 totalCount: 0,
                 failedCount: 0,
                 rawResultsFile: rawErrorPath,
+                executionTarget: targetLabel,
             };
 
             this._refreshEvidenceManifest(context, { phase: STAGES.EXECUTE });
 
             return {
                 success: false,
-                blocking: false,
-                message: 'Test execution failed',
+                blocking: blockingOnFailure,
+                message: `Test execution failed (${targetLabel})`,
                 error: errorOutput.substring(0, 500),
             };
         }
@@ -1304,6 +1697,16 @@ class PipelineRunner {
 
     async _runSelfHealing(context) {
         this._log('🔧 Running self-healing...');
+
+        if (this._isCancellationRequested(context)) {
+            return {
+                success: false,
+                cancelled: true,
+                blocking: false,
+                message: 'Self-healing cancelled by user',
+                error: 'Cancelled by user',
+            };
+        }
 
         // Skip if tests passed
         if (context.testResults?.passed) {
@@ -1334,8 +1737,50 @@ class PipelineRunner {
             maxIterations: scaling?.healingMaxIterations,
             timeoutMs: scaling?.healingTimeoutMs,
             cognitiveTier: context.cognitiveTier,
+            abortSignal: context.abortSignal || null,
+            onCommandEvent: (event = {}) => {
+                const type = event.type || 'progress';
+                // Route raw output chunks to the lossless tail, keep other
+                // events on the throttled status channel.
+                if (type === 'output_chunk') {
+                    this._emitCommandChunk(context, {
+                        stage: STAGES.SELF_HEAL,
+                        target: event.specPath || null,
+                        stream: event.stream || 'stdout',
+                        text: event.text || '',
+                    });
+                    return;
+                }
+                this._emitCommandEvent(context, `healing_${type}`, {
+                    stage: STAGES.SELF_HEAL,
+                    ...event,
+                });
+            },
         });
         context.healingResult = healResult;
+
+        if (Array.isArray(healResult.commandMetrics)) {
+            for (const metric of healResult.commandMetrics) {
+                this._recordCommandMetric(context, {
+                    scenarioId: context.scenarioId || null,
+                    scenarioName: context.scenarioName || null,
+                    authState: context.authState || 'unspecified',
+                    ...metric,
+                });
+            }
+        }
+
+        if (healResult.cancelled) {
+            return {
+                success: false,
+                cancelled: true,
+                blocking: false,
+                message: 'Self-healing cancelled by user',
+                error: 'Cancelled by user',
+                iterations: healResult.iterations,
+                fixesApplied: healResult.totalFixesApplied,
+            };
+        }
 
         // If healing succeeded, save the final passing results as a report
         if (healResult.success && healResult.healingLog?.length > 0) {
@@ -1498,9 +1943,7 @@ class PipelineRunner {
             },
             testResults: context.testResults || null,
             healingResult: context.healingResult || null,
-            overallSuccess: !context.stageResults.execute?.success
-                ? (context.healingResult?.success || false)
-                : true,
+            overallSuccess: this._computeOverallSuccess(context),
         };
 
         // Save report
@@ -1591,9 +2034,370 @@ class PipelineRunner {
         }
     }
 
+    _isCancellationRequested(context) {
+        if (!context || typeof context !== 'object') return false;
+        if (context.abortSignal?.aborted) return true;
+
+        if (typeof context.shouldCancel === 'function') {
+            try {
+                return context.shouldCancel() === true;
+            } catch {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    _isAbortError(error) {
+        return error?.code === 'ABORT_ERR' || error?.name === 'AbortError';
+    }
+
+    _emitCommandEvent(context, eventType, payload = {}) {
+        if (!context?.runId) return;
+
+        const commandEvent = {
+            eventType,
+            scenarioId: context.scenarioId || null,
+            scenarioName: context.scenarioName || null,
+            authState: context.authState || 'unspecified',
+            ...payload,
+        };
+
+        if (this._eventBridge) {
+            this._eventBridge.push('command_progress', context.runId, commandEvent);
+        }
+
+        if (typeof context.onCommandEvent === 'function') {
+            try {
+                context.onCommandEvent(commandEvent);
+            } catch {
+                // Command event callback is best-effort telemetry.
+            }
+        }
+    }
+
+    /**
+     * Emit a raw (multi-line, newline-preserving) output chunk for the Live
+     * Command Output tail. Chunks are capped server-side by RunStore when
+     * persisted, and the SSE frame size is bounded by `maxChunkChars`.
+     */
+    _emitCommandChunk(context, payload = {}) {
+        if (!context?.runId) return;
+
+        const raw = payload.text == null ? '' : String(payload.text);
+        if (!raw) return;
+
+        const maxChunkChars = 8 * 1024; // 8 KB per SSE frame
+        const text = raw.length > maxChunkChars
+            ? raw.slice(raw.length - maxChunkChars)
+            : raw;
+        const droppedChars = raw.length > maxChunkChars ? raw.length - text.length : 0;
+
+        const chunkEvent = {
+            eventType: 'output_chunk',
+            kind: 'chunk',
+            scenarioId: context.scenarioId || null,
+            scenarioName: context.scenarioName || null,
+            authState: context.authState || 'unspecified',
+            stage: payload.stage || null,
+            target: payload.target || null,
+            stream: payload.stream || 'stdout',
+            text,
+            droppedChars,
+        };
+
+        if (this._eventBridge) {
+            this._eventBridge.push('command_output_chunk', context.runId, chunkEvent);
+        }
+
+        if (typeof context.onCommandEvent === 'function') {
+            try {
+                context.onCommandEvent(chunkEvent);
+            } catch {
+                // Command event callback is best-effort telemetry.
+            }
+        }
+    }
+
+    _recordCommandMetric(context, metric = {}) {
+        if (!context || !Array.isArray(context.commandMetrics)) return;
+
+        const durationMs = Number.isFinite(metric.durationMs)
+            ? Math.max(0, Math.round(metric.durationMs))
+            : null;
+        const cancelToKillLatencyMs = Number.isFinite(metric.cancelToKillLatencyMs)
+            ? Math.max(0, Math.round(metric.cancelToKillLatencyMs))
+            : null;
+
+        context.commandMetrics.push({
+            stage: metric.stage || null,
+            scenarioId: metric.scenarioId ?? context.scenarioId ?? null,
+            scenarioName: metric.scenarioName ?? context.scenarioName ?? null,
+            authState: metric.authState ?? context.authState ?? 'unspecified',
+            target: metric.target || null,
+            command: metric.command || null,
+            startedAt: metric.startedAt || null,
+            endedAt: metric.endedAt || null,
+            durationMs,
+            cancelToKillLatencyMs,
+            exitCode: Number.isInteger(metric.exitCode) ? metric.exitCode : null,
+            signal: metric.signal || null,
+            timedOut: metric.timedOut === true,
+            cancelled: metric.cancelled === true,
+            error: metric.error || null,
+        });
+    }
+
+    _buildExecutionMetricsArtifact(context) {
+        const metrics = Array.isArray(context?.commandMetrics)
+            ? context.commandMetrics
+            : [];
+
+        const durations = metrics
+            .map(item => item.durationMs)
+            .filter(value => Number.isFinite(value) && value >= 0)
+            .sort((a, b) => a - b);
+        const cancelLatencies = metrics
+            .map(item => item.cancelToKillLatencyMs)
+            .filter(value => Number.isFinite(value) && value >= 0)
+            .sort((a, b) => a - b);
+
+        const totalCommands = metrics.length;
+        const cancelledCommands = metrics.filter(item => item.cancelled).length;
+        const timedOutCommands = metrics.filter(item => item.timedOut).length;
+        const failedCommands = metrics.filter(item => item.error && !item.cancelled).length;
+
+        const averageDurationMs = durations.length > 0
+            ? Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length)
+            : null;
+        const percentile95DurationMs = durations.length > 0
+            ? durations[Math.min(durations.length - 1, Math.floor(0.95 * durations.length))]
+            : null;
+        const maxDurationMs = durations.length > 0 ? durations[durations.length - 1] : null;
+        const averageCancelToKillLatencyMs = cancelLatencies.length > 0
+            ? Math.round(cancelLatencies.reduce((sum, value) => sum + value, 0) / cancelLatencies.length)
+            : null;
+        const maxCancelToKillLatencyMs = cancelLatencies.length > 0
+            ? cancelLatencies[cancelLatencies.length - 1]
+            : null;
+
+        return {
+            generatedAt: new Date().toISOString(),
+            summary: {
+                totalCommands,
+                cancelledCommands,
+                timedOutCommands,
+                failedCommands,
+                averageDurationMs,
+                percentile95DurationMs,
+                maxDurationMs,
+                averageCancelToKillLatencyMs,
+                maxCancelToKillLatencyMs,
+            },
+            commands: metrics,
+        };
+    }
+
+    _normalizeCommandOutput(chunk) {
+        if (!chunk) return '';
+        return String(chunk)
+            .replace(/\r/g, ' ')
+            .replace(/\n+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    _computeOverallSuccess(context) {
+        const stageResults = context.stageResults || {};
+        const blockingFailure = Object.values(stageResults).some(result => result?.success === false && result?.blocking);
+        if (blockingFailure) return false;
+
+        const executeStage = stageResults[STAGES.EXECUTE];
+        const healingStage = stageResults[STAGES.SELF_HEAL];
+
+        if (context.mode === 'execute') {
+            return executeStage?.success === true;
+        }
+
+        if (['full', 'generate', 'heal'].includes(context.mode)) {
+            if (executeStage?.success === true) return true;
+            return healingStage?.success === true;
+        }
+
+        return true;
+    }
+
+    _derivePipelineFailureReason(context, pipelineError) {
+        if (pipelineError) return pipelineError;
+
+        const executeStage = context.stageResults?.[STAGES.EXECUTE];
+        const healingStage = context.stageResults?.[STAGES.SELF_HEAL];
+
+        if (context.mode === 'execute' && executeStage?.success === false) {
+            return executeStage.error || executeStage.message || 'Execution stage failed';
+        }
+
+        if (['full', 'generate', 'heal'].includes(context.mode) && executeStage?.success === false && healingStage?.success !== true) {
+            return healingStage?.error
+                || healingStage?.message
+                || executeStage.error
+                || executeStage.message
+                || 'Execution failed and self-healing did not recover';
+        }
+
+        return null;
+    }
+
+    _collectPlaywrightSpecs(result) {
+        const collected = [];
+
+        const walkSuite = (suite) => {
+            if (!suite || typeof suite !== 'object') return;
+            if (Array.isArray(suite.specs)) {
+                collected.push(...suite.specs);
+            }
+            if (Array.isArray(suite.suites)) {
+                for (const child of suite.suites) {
+                    walkSuite(child);
+                }
+            }
+        };
+
+        if (Array.isArray(result?.suites)) {
+            for (const suite of result.suites) {
+                walkSuite(suite);
+            }
+        }
+
+        return collected;
+    }
+
+    _shouldExecutionFailureBlock(context, failureType = 'test-failure') {
+        if (failureType === 'missing-target') return true;
+        return context.mode === 'execute';
+    }
+
+    _toRelativeTargetPath(absolutePath) {
+        const relativePath = path.relative(this.projectRoot, absolutePath).replace(/\\/g, '/');
+        if (!relativePath || relativePath.startsWith('..')) {
+            return absolutePath.replace(/\\/g, '/');
+        }
+        return relativePath;
+    }
+
+    _resolveExecutionTarget(rawTarget) {
+        const normalizedTarget = this._normalizeOptionalString(rawTarget);
+        if (!normalizedTarget) return null;
+
+        const absolutePath = path.isAbsolute(normalizedTarget)
+            ? normalizedTarget
+            : path.join(this.projectRoot, normalizedTarget);
+
+        if (fs.existsSync(absolutePath)) {
+            const stats = fs.statSync(absolutePath);
+            return {
+                rawTarget: normalizedTarget,
+                exists: true,
+                type: stats.isDirectory() ? 'directory' : 'file',
+                absolutePath,
+                targetArg: this._toRelativeTargetPath(absolutePath),
+                displayLabel: this._toRelativeTargetPath(absolutePath),
+            };
+        }
+
+        const patternTarget = normalizedTarget.replace(/\\/g, '/');
+        return {
+            rawTarget: normalizedTarget,
+            exists: false,
+            type: 'pattern',
+            absolutePath: null,
+            targetArg: patternTarget,
+            displayLabel: patternTarget,
+        };
+    }
+
+    _normalizeHybridContext(options = {}) {
+        const raw = (options.hybridContext && typeof options.hybridContext === 'object' && !Array.isArray(options.hybridContext))
+            ? options.hybridContext
+            : {};
+
+        const frameworkModeInput = this._normalizeOptionalString(raw.frameworkMode || options.frameworkMode);
+        const frameworkMode = frameworkModeInput && frameworkModeInput.toLowerCase() === 'manual'
+            ? 'manual'
+            : 'existing';
+
+        const testDataOverride = raw.testDataOverride !== undefined
+            ? raw.testDataOverride
+            : (options.testDataOverride !== undefined ? options.testDataOverride : null);
+
+        return {
+            frameworkMode,
+            appUrl: this._normalizeOptionalString(raw.appUrl || options.appUrl),
+            testCaseSource: this._normalizeOptionalString(raw.testCaseSource || options.testCaseSource),
+            testDataOverride,
+            executionTarget: this._normalizeOptionalString(raw.executionTarget || options.executionTarget),
+            requestedTicketId: this._normalizeOptionalString(raw.requestedTicketId),
+            requestedRunId: this._normalizeOptionalString(raw.requestedRunId),
+        };
+    }
+
+    _normalizeOptionalString(value) {
+        if (typeof value !== 'string') return null;
+        const trimmed = value.trim();
+        return trimmed || null;
+    }
+
+    _resolveFrameworkBaseUrl() {
+        const testDataPath = path.join(this.projectRoot, 'tests', 'test-data', 'testData.js');
+        if (!fs.existsSync(testDataPath)) return null;
+
+        try {
+            delete require.cache[require.resolve(testDataPath)];
+            const testData = require(testDataPath);
+            return this._normalizeOptionalString(testData?.baseUrl);
+        } catch (error) {
+            this._log(`⚠️ Failed to resolve framework baseUrl: ${error.message}`);
+            return null;
+        }
+    }
+
+    _materializeProvidedTestCases(context) {
+        const source = this._normalizeOptionalString(context.testCaseSource);
+        if (!source) return null;
+
+        if (!source.includes('\n') && this._isLikelyPathInput(source)) {
+            const candidatePath = path.isAbsolute(source)
+                ? source
+                : path.join(this.projectRoot, source);
+            if (fs.existsSync(candidatePath)) {
+                return candidatePath;
+            }
+        }
+
+        const testCasesDir = path.join(__dirname, '..', 'test-cases');
+        if (!fs.existsSync(testCasesDir)) {
+            fs.mkdirSync(testCasesDir, { recursive: true });
+        }
+
+        const targetPath = path.join(testCasesDir, `${this._getScenarioFileStem(context, 'provided-testcases')}.md`);
+        fs.writeFileSync(targetPath, source, 'utf-8');
+        return targetPath;
+    }
+
+    _isLikelyPathInput(value) {
+        return /[\\/]/.test(value) || /\.(xlsx|xls|csv|md|txt|json)$/i.test(value);
+    }
+
     _resolveExistingArtifacts(context) {
         const ticketId = context.ticketId;
         const scenarioSlug = context.scenarioSlug;
+
+        const explicitExecutionTarget = this._resolveExecutionTarget(context.executionTarget);
+        const hasExplicitSpecTarget = explicitExecutionTarget?.exists && explicitExecutionTarget.type === 'file';
+        if (explicitExecutionTarget?.exists && explicitExecutionTarget.type === 'file') {
+            context.specPath = explicitExecutionTarget.absolutePath;
+        }
 
         // Check for existing spec file
         const specsDir = path.join(this.projectRoot, 'tests', 'specs');
@@ -1607,10 +2411,12 @@ class PipelineRunner {
             path.join(specsDir, `${ticketId.toLowerCase()}`, `${ticketId.toUpperCase()}.spec.js`),
         ];
 
-        for (const v of variations) {
-            if (fs.existsSync(v)) {
-                context.specPath = v;
-                break;
+        if (!hasExplicitSpecTarget) {
+            for (const v of variations) {
+                if (fs.existsSync(v)) {
+                    context.specPath = v;
+                    break;
+                }
             }
         }
 

@@ -41,6 +41,9 @@ class SessionEnforcementState {
         this.mcpStateChecked = false;        // is_visible / is_enabled / is_checked / is_hidden called
         this.mcpAssertionVerified = false;   // expect_element_text / expect_title / expect_checked / expect_enabled called
         this.frameworkInventoryScanned = false; // get_framework_inventory called (Phase 1.5)
+        this.currentPageKey = null;
+        this.visitedPages = [];
+        this.pageEvidenceByUrl = new Map();
         this.snapshotData = [];          // Captured selector data from snapshots
         this.specFileCreated = false;
         this.toolCallCount = 0;
@@ -116,6 +119,307 @@ function extractRuntimeObservation(toolName, result) {
     }
 
     return null;
+}
+
+function executeExplorationIncludesNavigate(toolArgs = {}) {
+    const template = String(toolArgs.templateName || '').toLowerCase();
+    if (template === 'explore_page' || template === 'login_and_navigate') {
+        return true;
+    }
+
+    const script = String(toolArgs.script || '').toLowerCase();
+    return script.includes('tools.navigate(') || script.includes('.navigate(');
+}
+
+function executeExplorationIncludesSnapshot(toolArgs = {}) {
+    const template = String(toolArgs.templateName || '').toLowerCase();
+    if (template === 'explore_page' || template === 'login_and_navigate') {
+        return true;
+    }
+
+    const script = String(toolArgs.script || '').toLowerCase();
+    return script.includes('tools.snapshot(') || script.includes('.snapshot(');
+}
+
+const SELECTOR_VALIDATION_TOOL_PATTERNS = [
+    'unified_get_by_role',
+    'unified_get_by_test_id',
+    'unified_get_by_label',
+    'unified_get_by_text',
+    'unified_get_by_placeholder',
+    'unified_get_by_alt_text',
+    'unified_get_by_title',
+];
+
+const CONTENT_EXTRACTION_TOOL_PATTERNS = [
+    'unified_get_text_content',
+    'unified_get_attribute',
+    'unified_get_inner_text',
+    'unified_get_input_value',
+];
+
+const URL_VERIFICATION_TOOL_PATTERNS = [
+    'unified_get_page_url',
+    'unified_expect_url',
+];
+
+function matchesToolPattern(toolName = '', patterns = []) {
+    const normalized = String(toolName).toLowerCase();
+    return patterns.some(pattern => normalized.includes(String(pattern).toLowerCase()));
+}
+
+function normalizePageKey(rawUrl) {
+    if (typeof rawUrl !== 'string') {
+        return null;
+    }
+
+    const trimmed = rawUrl.trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    try {
+        const parsed = new URL(trimmed);
+        parsed.hash = '';
+        parsed.search = '';
+        return parsed.toString().replace(/\/$/, '');
+    } catch {
+        const noHash = trimmed.split('#')[0];
+        const noQuery = noHash.split('?')[0];
+        return noQuery || trimmed;
+    }
+}
+
+function ensurePageEvidenceRecord(state, pageKey) {
+    if (!pageKey) {
+        return null;
+    }
+
+    if (!state.pageEvidenceByUrl.has(pageKey)) {
+        state.pageEvidenceByUrl.set(pageKey, {
+            selectorValidated: false,
+            contentExtracted: false,
+            urlVerified: false,
+            touchedBy: {
+                selector: [],
+                content: [],
+                url: [],
+            },
+            sources: [],
+            updatedAt: new Date().toISOString(),
+        });
+        state.visitedPages.push(pageKey);
+    }
+
+    return state.pageEvidenceByUrl.get(pageKey);
+}
+
+function registerVisitedPage(state, rawUrl, source = null) {
+    const pageKey = normalizePageKey(rawUrl);
+    if (!pageKey) {
+        return null;
+    }
+
+    const record = ensurePageEvidenceRecord(state, pageKey);
+    if (record && source && !record.sources.includes(source)) {
+        record.sources.push(source);
+    }
+
+    if (record) {
+        record.updatedAt = new Date().toISOString();
+    }
+
+    state.currentPageKey = pageKey;
+    return pageKey;
+}
+
+function markPageEvidence(state, evidenceType, toolName, rawUrl = null) {
+    let pageKey = null;
+    if (rawUrl) {
+        pageKey = registerVisitedPage(state, rawUrl, `url:${toolName}`);
+    }
+
+    if (!pageKey) {
+        pageKey = state.currentPageKey;
+    }
+
+    if (!pageKey) {
+        return false;
+    }
+
+    const record = ensurePageEvidenceRecord(state, pageKey);
+    if (!record) {
+        return false;
+    }
+
+    if (evidenceType === 'selector') {
+        record.selectorValidated = true;
+    } else if (evidenceType === 'content') {
+        record.contentExtracted = true;
+    } else if (evidenceType === 'url') {
+        record.urlVerified = true;
+    }
+
+    const touchedBy = record.touchedBy[evidenceType] || [];
+    if (toolName && !touchedBy.includes(toolName)) {
+        touchedBy.push(toolName);
+    }
+    record.touchedBy[evidenceType] = touchedBy;
+    record.updatedAt = new Date().toISOString();
+    return true;
+}
+
+function extractUrlCandidatesFromPayload(payload) {
+    if (!payload || typeof payload !== 'object') {
+        return [];
+    }
+
+    const candidates = new Set();
+    const pushCandidate = (value) => {
+        const normalized = normalizePageKey(value);
+        if (normalized) {
+            candidates.add(normalized);
+        }
+    };
+
+    pushCandidate(payload.url);
+    pushCandidate(payload.currentUrl);
+    pushCandidate(payload.pageUrl);
+    pushCandidate(payload.href);
+
+    if (Array.isArray(payload.pagesVisited)) {
+        payload.pagesVisited.forEach(pushCandidate);
+    }
+
+    if (Array.isArray(payload.snapshots)) {
+        payload.snapshots.forEach(snapshot => pushCandidate(snapshot?.url));
+    }
+
+    const nestedPayloads = [payload.data, payload.result];
+    for (const nested of nestedPayloads) {
+        if (!nested || typeof nested !== 'object') {
+            continue;
+        }
+        pushCandidate(nested.url);
+        pushCandidate(nested.currentUrl);
+        pushCandidate(nested.pageUrl);
+        if (Array.isArray(nested.pagesVisited)) {
+            nested.pagesVisited.forEach(pushCandidate);
+        }
+        if (Array.isArray(nested.snapshots)) {
+            nested.snapshots.forEach(snapshot => pushCandidate(snapshot?.url));
+        }
+    }
+
+    return [...candidates];
+}
+
+function extractNavigateUrlsFromExecuteExplorationArgs(toolArgs = {}) {
+    const urls = new Set();
+    const templateUrl = toolArgs?.templateArgs?.url;
+    if (typeof templateUrl === 'string') {
+        const normalized = normalizePageKey(templateUrl);
+        if (normalized) {
+            urls.add(normalized);
+        }
+    }
+
+    const script = String(toolArgs.script || '');
+    if (!script) {
+        return [...urls];
+    }
+
+    const navigateRegex = /(?:tools\.)?navigate\s*\(\s*(?:\{[^}]*\burl\s*:\s*["'`]([^"'`]+)["'`][^}]*\}|["'`]([^"'`]+)["'`])/g;
+    let match;
+    while ((match = navigateRegex.exec(script)) !== null) {
+        const candidate = match[1] || match[2];
+        const normalized = normalizePageKey(candidate);
+        if (normalized) {
+            urls.add(normalized);
+        }
+    }
+
+    return [...urls];
+}
+
+function replayExecuteExplorationCallLog(state, payload) {
+    const callLog = Array.isArray(payload?.stats?.callLog) ? payload.stats.callLog : [];
+    if (callLog.length === 0) {
+        return;
+    }
+
+    let activePageKey = state.currentPageKey;
+
+    for (const entry of callLog) {
+        if (!entry || entry.success === false) {
+            continue;
+        }
+
+        const toolName = String(entry.tool || entry.shortName || '');
+        const args = entry.args || {};
+
+        if (toolName.includes('unified_navigate')) {
+            state.mcpNavigateCalled = true;
+            const pageKey = registerVisitedPage(state, args.url || args.href, 'execute_exploration:callLog');
+            if (pageKey) {
+                activePageKey = pageKey;
+            }
+        }
+
+        if (toolName.includes('unified_snapshot')) {
+            state.mcpSnapshotCalled = true;
+        }
+
+        if (matchesToolPattern(toolName, SELECTOR_VALIDATION_TOOL_PATTERNS)) {
+            state.mcpSelectorValidated = true;
+            if (activePageKey) {
+                markPageEvidence(state, 'selector', toolName, activePageKey);
+            }
+        }
+
+        if (matchesToolPattern(toolName, CONTENT_EXTRACTION_TOOL_PATTERNS)) {
+            state.mcpContentExtracted = true;
+            if (activePageKey) {
+                markPageEvidence(state, 'content', toolName, activePageKey);
+            }
+        }
+
+        if (matchesToolPattern(toolName, URL_VERIFICATION_TOOL_PATTERNS)) {
+            state.mcpUrlVerified = true;
+            const explicitUrl = typeof args.url === 'string' && /^https?:\/\//i.test(args.url) ? args.url : null;
+            if (explicitUrl || activePageKey) {
+                markPageEvidence(state, 'url', toolName, explicitUrl || activePageKey);
+            }
+        }
+    }
+}
+
+function getMissingPerPageEvidence(state) {
+    const missing = [];
+
+    for (const pageKey of state.visitedPages) {
+        const record = state.pageEvidenceByUrl.get(pageKey);
+        if (!record) {
+            continue;
+        }
+
+        const gaps = [];
+        if (!record.selectorValidated) {
+            gaps.push('selector');
+        }
+        if (!record.contentExtracted) {
+            gaps.push('content');
+        }
+        if (!record.urlVerified) {
+            gaps.push('url');
+        }
+
+        if (gaps.length > 0) {
+            missing.push({ page: pageKey, missing: gaps });
+        }
+    }
+
+    return missing;
 }
 
 function formatRuntimeObservationContext(observation) {
@@ -224,6 +528,31 @@ function createEnforcementHooks(agentName, options = {}) {
                         'Do NOT run npx playwright test — test execution is handled by a later pipeline stage.',
                 };
             }
+
+            const explorationEnabled = process.env.MCP_EXPLORATION_ENABLED !== 'false';
+            if (explorationEnabled && state.toolCallCount === 1) {
+                const isFirstMcpNavigationAction = toolName.includes('unified_navigate') ||
+                    (toolName.includes('unified_execute_exploration') && executeExplorationIncludesNavigate(toolArgs));
+
+                if (!isFirstMcpNavigationAction) {
+                    log(`🚫 DENIED: First tool call must perform MCP navigation, received "${toolName}"`);
+                    state.deniedCalls.push({
+                        tool: toolName,
+                        reason: 'First tool call must perform MCP navigation',
+                        timestamp: new Date().toISOString(),
+                    });
+
+                    return {
+                        permissionDecision: 'deny',
+                        additionalContext:
+                            '⛔ BLOCKED: First tool call must perform MCP navigation.\n\n' +
+                            'Allowed first calls:\n' +
+                            '1. unified_navigate\n' +
+                            '2. unified_execute_exploration with a script/template that includes navigate\n\n' +
+                            `Received: ${toolName}`,
+                    };
+                }
+            }
         }
 
         // ── RULE 1: MCP-First for scriptgenerator ──────────────────
@@ -239,6 +568,7 @@ function createEnforcementHooks(agentName, options = {}) {
             // Track MCP navigation
             if (toolName.includes('unified_navigate')) {
                 state.mcpNavigateCalled = true;
+                registerVisitedPage(state, toolArgs.url || toolArgs.href, `pre:${toolName}`);
                 log('✅ MCP navigate called — exploration started');
             }
 
@@ -253,31 +583,50 @@ function createEnforcementHooks(agentName, options = {}) {
             // script implicitly performs. The executor logs every tool call it makes, so the
             // agent still performs real MCP exploration, just more efficiently.
             if (toolName.includes('unified_execute_exploration')) {
-                // A batch exploration script inherently navigates and snapshots
-                state.mcpNavigateCalled = true;
-                state.mcpSnapshotCalled = true;
-                log('✅ MCP batch exploration executed — navigate + snapshot credited');
+                const hasNavigate = executeExplorationIncludesNavigate(toolArgs);
+                const hasSnapshot = executeExplorationIncludesSnapshot(toolArgs);
+                const scriptedNavigateUrls = extractNavigateUrlsFromExecuteExplorationArgs(toolArgs);
+
+                if (hasNavigate) {
+                    state.mcpNavigateCalled = true;
+                }
+                if (hasSnapshot) {
+                    state.mcpSnapshotCalled = true;
+                }
+                if (scriptedNavigateUrls.length > 0) {
+                    scriptedNavigateUrls.forEach(url =>
+                        registerVisitedPage(state, url, 'pre:execute_exploration:script')
+                    );
+                }
+
+                if (hasNavigate || hasSnapshot) {
+                    log(`✅ MCP batch exploration executed — credits: navigate=${hasNavigate}, snapshot=${hasSnapshot}`);
+                } else {
+                    log('⚠️ MCP batch exploration executed without explicit navigate/snapshot steps in script/template');
+                }
             }
 
             // Track semantic selector validation (get_by_role, get_by_test_id, get_by_label, get_by_text, get_by_placeholder, get_by_alt_text, get_by_title)
-            if (toolName.includes('unified_get_by_role') || toolName.includes('unified_get_by_test_id') ||
-                toolName.includes('unified_get_by_label') || toolName.includes('unified_get_by_text') ||
-                toolName.includes('unified_get_by_placeholder') || toolName.includes('unified_get_by_alt_text') ||
-                toolName.includes('unified_get_by_title')) {
+            if (matchesToolPattern(toolName, SELECTOR_VALIDATION_TOOL_PATTERNS)) {
                 state.mcpSelectorValidated = true;
+                markPageEvidence(state, 'selector', toolName);
                 log('✅ MCP semantic selector validated — element confirmed');
             }
 
             // Track content extraction (get_text_content, get_attribute, get_inner_text, get_input_value)
-            if (toolName.includes('unified_get_text_content') || toolName.includes('unified_get_attribute') ||
-                toolName.includes('unified_get_inner_text') || toolName.includes('unified_get_input_value')) {
+            if (matchesToolPattern(toolName, CONTENT_EXTRACTION_TOOL_PATTERNS)) {
                 state.mcpContentExtracted = true;
+                markPageEvidence(state, 'content', toolName);
                 log('✅ MCP content extracted — assertion data captured');
             }
 
             // Track URL verification (get_page_url, expect_url)
-            if (toolName.includes('unified_get_page_url') || toolName.includes('unified_expect_url')) {
+            if (matchesToolPattern(toolName, URL_VERIFICATION_TOOL_PATTERNS)) {
                 state.mcpUrlVerified = true;
+                const explicitUrl = typeof toolArgs.url === 'string' && /^https?:\/\//i.test(toolArgs.url)
+                    ? toolArgs.url
+                    : null;
+                markPageEvidence(state, 'url', toolName, explicitUrl);
                 log('✅ MCP URL verified — navigation state confirmed');
             }
 
@@ -405,6 +754,57 @@ function createEnforcementHooks(agentName, options = {}) {
                         };
                     }
 
+                    // DENY script creation without URL state verification
+                    if (isSpecFile && !state.mcpUrlVerified) {
+                        log('🚫 DENIED: No URL verification before .spec.js creation');
+                        state.deniedCalls.push({
+                            tool: toolName,
+                            reason: 'URL verification required before script creation',
+                            timestamp: new Date().toISOString(),
+                        });
+                        return {
+                            permissionDecision: 'deny',
+                            additionalContext:
+                                '⛔ BLOCKED: You must verify page URL state before creating the spec file.\n\n' +
+                                'Call at least ONE of these on each explored page:\n' +
+                                '- unified_get_page_url (capture the current URL)\n' +
+                                '- unified_expect_url (assert URL pattern or exact URL)\n\n' +
+                                'URL evidence is mandatory for reliable multi-page flow generation.',
+                        };
+                    }
+
+                    // DENY script creation if ANY visited page lacks selector/content/url evidence
+                    if (isSpecFile) {
+                        const missingCoverage = getMissingPerPageEvidence(state);
+                        if (missingCoverage.length > 0) {
+                            const missingLines = missingCoverage.slice(0, 8)
+                                .map(item => `- ${item.page}: missing ${item.missing.join(', ')} evidence`)
+                                .join('\n');
+                            const overflowLine = missingCoverage.length > 8
+                                ? `\n- ...${missingCoverage.length - 8} additional page(s) missing evidence`
+                                : '';
+
+                            log(`🚫 DENIED: Per-page coverage incomplete for ${missingCoverage.length} visited page(s)`);
+                            state.deniedCalls.push({
+                                tool: toolName,
+                                reason: `Per-page evidence incomplete (${missingCoverage.length} page(s))`,
+                                timestamp: new Date().toISOString(),
+                            });
+
+                            return {
+                                permissionDecision: 'deny',
+                                additionalContext:
+                                    '⛔ BLOCKED: Per-page exploration coverage is incomplete.\n\n' +
+                                    'Before writing a .spec.js file, EVERY visited page must have:\n' +
+                                    '1. Selector evidence (unified_get_by_role/test_id/label/text...)\n' +
+                                    '2. Content evidence (unified_get_text_content/get_attribute/get_inner_text/get_input_value)\n' +
+                                    '3. URL evidence (unified_get_page_url or unified_expect_url)\n\n' +
+                                    'Pages still missing evidence:\n' +
+                                    `${missingLines}${overflowLine}`,
+                            };
+                        }
+                    }
+
                     // DENY script creation without framework inventory scan (Phase 1.5)
                     if (isSpecFile && !state.frameworkInventoryScanned) {
                         log('🚫 DENIED: No framework inventory scan before .spec.js creation');
@@ -520,6 +920,8 @@ function createEnforcementHooks(agentName, options = {}) {
     hooks.onPostToolUse = async (input, invocation) => {
         const state = getState(invocation.sessionId || stableFallbackId);
         const toolName = input.toolName;
+        const toolArgs = input.toolArgs || {};
+        const rawResultPayload = parseToolResultPayload(input.result);
         let runtimeObservationContext = null;
 
         const runtimeObservation = extractRuntimeObservation(toolName, input.result);
@@ -558,6 +960,52 @@ function createEnforcementHooks(agentName, options = {}) {
                         `Runtime blocker recorded for ${toolName}: ${runtimeObservation.blocker?.kind || 'unknown'}`,
                         { observationLogPath: recorded.logPath }
                     );
+                }
+            }
+        }
+
+        if (agentName === 'scriptgenerator') {
+            if (toolName.includes('unified_execute_exploration') && rawResultPayload && typeof rawResultPayload === 'object') {
+                replayExecuteExplorationCallLog(state, rawResultPayload);
+            }
+
+            if (toolName.includes('unified_navigate')) {
+                registerVisitedPage(state, toolArgs.url || toolArgs.href, `post:${toolName}:args`);
+            }
+
+            const payloadUrls = extractUrlCandidatesFromPayload(rawResultPayload);
+            if (payloadUrls.length > 0) {
+                const latestUrl = payloadUrls[payloadUrls.length - 1];
+                registerVisitedPage(state, latestUrl, `post:${toolName}:result`);
+
+                if (matchesToolPattern(toolName, SELECTOR_VALIDATION_TOOL_PATTERNS)) {
+                    state.mcpSelectorValidated = true;
+                    markPageEvidence(state, 'selector', toolName, latestUrl);
+                }
+
+                if (matchesToolPattern(toolName, CONTENT_EXTRACTION_TOOL_PATTERNS)) {
+                    state.mcpContentExtracted = true;
+                    markPageEvidence(state, 'content', toolName, latestUrl);
+                }
+
+                if (matchesToolPattern(toolName, URL_VERIFICATION_TOOL_PATTERNS)) {
+                    state.mcpUrlVerified = true;
+                    markPageEvidence(state, 'url', toolName, latestUrl);
+                }
+            } else {
+                if (matchesToolPattern(toolName, SELECTOR_VALIDATION_TOOL_PATTERNS)) {
+                    state.mcpSelectorValidated = true;
+                    markPageEvidence(state, 'selector', toolName);
+                }
+
+                if (matchesToolPattern(toolName, CONTENT_EXTRACTION_TOOL_PATTERNS)) {
+                    state.mcpContentExtracted = true;
+                    markPageEvidence(state, 'content', toolName);
+                }
+
+                if (matchesToolPattern(toolName, URL_VERIFICATION_TOOL_PATTERNS)) {
+                    state.mcpUrlVerified = true;
+                    markPageEvidence(state, 'url', toolName);
                 }
             }
         }
@@ -993,6 +1441,13 @@ function createCognitiveEnforcementHooks(phaseName, options = {}) {
     }
 
     const stableFallbackId = `${phaseName}-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    const phaseSessionState = new Map();
+    const getPhaseState = (sessionId) => {
+        if (!phaseSessionState.has(sessionId)) {
+            phaseSessionState.set(sessionId, { toolCallCount: 0 });
+        }
+        return phaseSessionState.get(sessionId);
+    };
     const log = (msg) => { if (verbose) console.log(`[CognitiveEnforcement:${phaseName}] ${msg}`); };
 
     const hooks = {};
@@ -1000,6 +1455,23 @@ function createCognitiveEnforcementHooks(phaseName, options = {}) {
     hooks.onPreToolUse = async (input, invocation) => {
         const toolName = input.toolName || '';
         const toolArgs = input.toolArgs || {};
+        const phaseState = getPhaseState(invocation.sessionId || stableFallbackId);
+        phaseState.toolCallCount++;
+
+        if (phaseName === 'cognitive-explorer-nav' && process.env.MCP_EXPLORATION_ENABLED !== 'false' && phaseState.toolCallCount === 1) {
+            const isFirstMcpNavigationAction = toolName.includes('unified_navigate') ||
+                (toolName.includes('unified_execute_exploration') && executeExplorationIncludesNavigate(toolArgs));
+
+            if (!isFirstMcpNavigationAction) {
+                log(`🚫 DENIED: First cognitive explorer tool call must perform navigation, received "${toolName}"`);
+                return {
+                    permissionDecision: 'deny',
+                    additionalContext:
+                        '⛔ BLOCKED: The first tool call in cognitive explorer navigation phase must perform MCP navigation.\n' +
+                        'Call unified_navigate first, or unified_execute_exploration with a navigate step.',
+                };
+            }
+        }
 
         // ── Block MCP tools when not allowed ────────────────────────
         if (!rules.allowMCP && toolName.includes('unified_')) {
@@ -1134,6 +1606,11 @@ function createCognitiveEnforcementHooks(phaseName, options = {}) {
     hooks.onSessionStart = async (input, invocation) => {
         log(`Cognitive phase session started: ${phaseName}`);
         return { additionalContext: '' };
+    };
+
+    hooks.onSessionEnd = async (input, invocation) => {
+        phaseSessionState.delete(invocation.sessionId || stableFallbackId);
+        return {};
     };
 
     return hooks;

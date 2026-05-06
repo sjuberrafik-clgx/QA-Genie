@@ -18,6 +18,7 @@ const { createCustomTools } = require('./custom-tools');
 const { createEnforcementHooks, createCognitiveEnforcementHooks, COGNITIVE_PHASE_RULES } = require('./enforcement-hooks');
 const { getContextEngine } = require('./context-engine');
 const { buildSharedLayers } = require('./prompt-layers');
+const { ToolBroker, createBrokerMetaTools } = require('./tool-broker');
 
 // Grounding system — provides local context to reduce LLM hallucinations
 let _groundingStoreModule;
@@ -286,12 +287,31 @@ class AgentSessionFactory {
         }
 
         // 3. Get role-specific custom tools (with context store and grounding store)
-        const tools = createCustomTools(this.defineTool, effectiveRole, {
+        const toolDeps = {
             learningStore: this.learningStore,
             config: this.config,
             contextStore: context.contextStore || null,
             groundingStore: gStore || null,
-        });
+        };
+        const tools = createCustomTools(this.defineTool, effectiveRole, toolDeps);
+
+        // 3b. Inject tool broker meta-tools for cross-agent delegation
+        const brokerConfig = this.config?.toolBroker;
+        if (brokerConfig?.enabled !== false && !isCognitive) {
+            try {
+                const broker = new ToolBroker({ config: this.config, verbose: this.verbose });
+                const validAgents = ['testgenie', 'scriptgenerator', 'buggenie', 'taskgenie', 'docgenie'];
+                broker.buildRegistry(validAgents);
+                const nativeToolNames = tools.map(t => t.name || t.definition?.name || '').filter(Boolean);
+                const metaTools = createBrokerMetaTools(this.defineTool, broker, effectiveRole, nativeToolNames, toolDeps);
+                tools.push(...metaTools);
+                if (metaTools.length > 0) {
+                    this._log(`🔀 Injected ${metaTools.length} broker meta-tools for ${effectiveRole}`);
+                }
+            } catch (err) {
+                this._log(`⚠️ ToolBroker injection failed for ${effectiveRole}: ${err.message}`);
+            }
+        }
 
         // 4. Get role-specific enforcement hooks
         const hooks = isCognitive
