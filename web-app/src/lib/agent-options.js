@@ -105,16 +105,99 @@ export const AGENT_MODES = [
     },
 ];
 
+function deriveCapabilities(agentMode) {
+    switch (agentMode) {
+        case 'scriptgenerator':
+            return { browser: true, jira: false, filesystem: 'none' };
+        case 'testgenie':
+        case 'buggenie':
+        case 'taskgenie':
+            return { browser: false, jira: true, filesystem: 'none' };
+        case 'filegenie':
+            return { browser: false, jira: false, filesystem: 'write' };
+        case 'docgenie':
+            return { browser: false, jira: false, filesystem: 'none' };
+        default:
+            return { browser: true, jira: true, filesystem: 'read' };
+    }
+}
+
+function deriveShortLabel(label) {
+    const parts = String(label || '').trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return 'AG';
+    if (parts.length === 1) return parts[0].slice(0, 3).toUpperCase();
+    return parts.slice(0, 3).map(part => part[0]).join('').toUpperCase();
+}
+
+export function buildCoreAgentId(agentMode = null) {
+    return `core:${agentMode || 'tpm'}`;
+}
+
+export function getFallbackAgentCatalog() {
+    return AGENT_MODES.map((agent) => ({
+        ...agent,
+        id: buildCoreAgentId(agent.value),
+        source: 'core',
+        workspaceId: null,
+        workspaceName: null,
+        assetId: agent.value || 'tpm',
+        agentMode: agent.value,
+        toolProfile: agent.value || 'full',
+        followupMode: agent.value || 'default',
+        capabilities: deriveCapabilities(agent.value),
+        status: 'published',
+        isActive: true,
+        isPublished: true,
+        surfaces: ['chat'],
+        isCustom: false,
+    }));
+}
+
+export function normalizeAgentCatalogItem(agent) {
+    if (!agent) return getFallbackAgentCatalog()[0];
+
+    const fallbackCatalog = getFallbackAgentCatalog();
+    const fallback = fallbackCatalog.find((item) => (
+        item.id === agent.id
+        || item.agentMode === agent.agentMode
+        || (agent.id === buildCoreAgentId(null) && item.agentMode === null)
+    )) || fallbackCatalog[0];
+
+    return {
+        ...fallback,
+        ...agent,
+        shortLabel: agent.shortLabel || fallback.shortLabel || deriveShortLabel(agent.label || fallback.label),
+        agentMode: Object.prototype.hasOwnProperty.call(agent, 'agentMode') ? agent.agentMode : fallback.agentMode,
+        toolProfile: agent.toolProfile || fallback.toolProfile,
+        followupMode: agent.followupMode || fallback.followupMode,
+        capabilities: agent.capabilities || fallback.capabilities,
+        surfaces: Array.isArray(agent.surfaces) && agent.surfaces.length > 0 ? agent.surfaces : fallback.surfaces,
+        isCustom: agent.isCustom === true,
+    };
+}
+
 /**
  * Get agent config by value (null for default).
  */
-export function getAgentConfig(agentMode) {
-    return AGENT_MODES.find(a => a.value === agentMode) || AGENT_MODES[0];
+export function getAgentConfig(agentRef, agents = getFallbackAgentCatalog()) {
+    if (agentRef && typeof agentRef === 'object' && !Array.isArray(agentRef)) {
+        return normalizeAgentCatalogItem(agentRef);
+    }
+
+    const catalog = Array.isArray(agents) && agents.length > 0
+        ? agents.map(normalizeAgentCatalogItem)
+        : getFallbackAgentCatalog();
+
+    return catalog.find((agent) => (
+        agent.id === agentRef
+        || agent.agentMode === agentRef
+        || (agentRef == null && agent.id === buildCoreAgentId(null))
+    )) || catalog[0];
 }
 
 /**
  * Get display label for an agent mode.
  */
-export function getAgentLabel(agentMode) {
-    return getAgentConfig(agentMode).label;
+export function getAgentLabel(agentRef, agents = getFallbackAgentCatalog()) {
+    return getAgentConfig(agentRef, agents).label;
 }

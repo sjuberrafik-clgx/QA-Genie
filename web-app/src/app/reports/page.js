@@ -69,7 +69,7 @@ export default function ReportsPage() {
     }, [sseStatus]);
 
     return (
-        <div id="report-container" data-theme="dark" className="allure-page-bg min-h-screen">
+        <div id="report-container" data-theme="light" className="allure-page-bg min-h-screen">
             {/* ─── Allure Top Nav Bar ─── */}
             <AllureNavBar
                 timeFilter={timeFilter}
@@ -80,7 +80,7 @@ export default function ReportsPage() {
                 timeFilters={TIME_FILTERS}
             />
 
-            <div className="mx-auto max-w-5xl space-y-0 px-6 py-6">
+            <div className="app-page motion-enter space-y-0">
                 <ErrorBanner error={error} onDismiss={() => setError(null)} />
                 <ConsolidatedReport key={refreshKey} since={getSinceTimestamp(timeFilter)} />
             </div>

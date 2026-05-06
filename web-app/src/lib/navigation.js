@@ -9,6 +9,8 @@ import {
     ChatBubbleIcon,
     ClockIcon,
     DocumentIcon,
+    ExplorerIcon,
+    SparkleIcon,
 } from '@/components/Icons';
 
 /** Primary navigation items shown in sidebar and mobile menu */
@@ -16,6 +18,8 @@ export const NAV_ITEMS = [
     { label: 'Home', to: '/', Icon: HomeIcon },
     { label: 'Dashboard', to: '/dashboard', Icon: DashboardIcon },
     { label: 'AI Chat', to: '/chat', Icon: ChatBubbleIcon },
+    { label: 'My Agents', to: '/my-agents', Icon: SparkleIcon },
+    { label: 'Studio', to: '/studio', Icon: ExplorerIcon },
     { label: 'History', to: '/history', Icon: ClockIcon },
     { label: 'Reports', to: '/reports', Icon: DocumentIcon },
 ];
@@ -28,6 +32,8 @@ export const PAGE_TITLES = {
     '/': { title: 'Home', subtitle: 'Platform overview' },
     '/dashboard': { title: 'Dashboard', subtitle: 'Operations and workflow status' },
     '/chat': { title: 'AI Chat', subtitle: 'Conversation workspace' },
+    '/my-agents': { title: 'My Agents', subtitle: 'Custom agents from your workspaces' },
+    '/studio': { title: 'Agent Studio', subtitle: 'Isolated custom workspaces' },
     '/history': { title: 'Chat History', subtitle: 'Session archive' },
     '/reports': { title: 'Test Reports', subtitle: 'Reporting and quality insights' },
     '/results': { title: 'Test Results', subtitle: 'Detailed run output' },

@@ -65,7 +65,29 @@ class GeneralFunctions {
     } catch (e) {
       // Agent branding popup not displayed, continue
     }
-    await this.homePage.signInButton.click();
+    
+    // Self-healing: Wait for loader to disappear first
+    try {
+      await this.page.waitForSelector('div.loader.large', { state: 'hidden', timeout: 15000 });
+    } catch (e) {
+      // Loader not present or already gone
+    }
+    
+    // Self-healing: Press Escape to dismiss any modals
+    try {
+      await this.page.keyboard.press('Escape');
+      await this.page.waitForTimeout(500);
+    } catch (e) {
+      // Continue if escape fails
+    }
+    
+    // Self-healing: Use reliable text-based selector
+    try {
+      await this.page.getByText('Sign In').click();
+    } catch (e) {
+      // Fallback to original selector
+      await this.homePage.signInButton.click();
+    }
   }
 
   async waitForMapIsLoaded() {

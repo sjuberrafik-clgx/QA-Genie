@@ -25,6 +25,8 @@ const { PipelineRunner } = require('./pipeline-runner');
 const { LearningStore } = require('./learning-store');
 const { SelfHealingEngine } = require('./self-healing');
 const { buildModelCatalog } = require('./model-catalog');
+const { extractJSON } = require('./utils');
+const { runCommand } = require('./terminal-runner');
 
 // ─── Configuration Loader ───────────────────────────────────────────────────
 
@@ -333,6 +335,7 @@ class SDKOrchestrator {
         }
 
         return this.pipelineRunner.run(ticketId, {
+            ...options,
             mode,
             runId: options.runId || undefined,
             contextRunId: options.contextRunId || undefined,
@@ -353,24 +356,50 @@ class SDKOrchestrator {
     async runParallel(ticketIds, options = {}) {
         this._ensureRunning();
 
-        const maxParallel = this.options.parallelTickets;
-        const results = [];
+        const maxParallel = Math.max(1, this.options.parallelTickets || 1);
+        const results = new Array(ticketIds.length);
 
-        // Process in batches of maxParallel
-        for (let i = 0; i < ticketIds.length; i += maxParallel) {
-            const batch = ticketIds.slice(i, i + maxParallel);
-            this._log('info', `\nProcessing batch ${Math.floor(i / maxParallel) + 1}: ${batch.join(', ')}`);
+        // Sliding-window pool: as soon as a slot finishes, it picks up the
+        // next queued ticket. This is strictly faster than batch-and-wait
+        // (batches used to block on the slowest ticket before starting the
+        // next batch). Preserves prior result ordering (by input index).
+        let nextIndex = 0;
+        let activeCount = 0;
 
-            const batchResults = await Promise.all(
-                batch.map(id => this.runPipeline(id, options).catch(err => ({
-                    ticketId: id,
-                    success: false,
-                    error: err.message,
-                })))
-            );
+        this._log('info', `\nRunning ${ticketIds.length} ticket(s) with concurrency=${maxParallel}`);
 
-            results.push(...batchResults);
-        }
+        await new Promise((resolve) => {
+            const launchNext = () => {
+                // When no more work is queued and all slots have drained, we're done.
+                if (nextIndex >= ticketIds.length && activeCount === 0) {
+                    resolve();
+                    return;
+                }
+
+                while (activeCount < maxParallel && nextIndex < ticketIds.length) {
+                    const idx = nextIndex++;
+                    const id = ticketIds[idx];
+                    activeCount++;
+
+                    this._log('info', `  [slot ${activeCount}/${maxParallel}] starting ${id} (${idx + 1}/${ticketIds.length})`);
+
+                    Promise.resolve()
+                        .then(() => this.runPipeline(id, options))
+                        .catch((err) => ({
+                            ticketId: id,
+                            success: false,
+                            error: err && err.message ? err.message : String(err),
+                        }))
+                        .then((result) => {
+                            results[idx] = result;
+                            activeCount--;
+                            launchNext();
+                        });
+                }
+            };
+
+            launchNext();
+        });
 
         return results;
     }
@@ -395,16 +424,26 @@ class SDKOrchestrator {
      */
     async execute(specPath) {
         this._ensureRunning();
-        const { execSync } = require('child_process');
+        const normalizedSpecPath = specPath.replace(/\\/g, '/');
+        const npxCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
         try {
-            const output = execSync(
-                `npx playwright test "${specPath.replace(/\\/g, '/')}" --reporter=json`,
-                { encoding: 'utf-8', stdio: 'pipe', cwd: path.join(__dirname, '..') }
-            );
-            const result = JSON.parse(output);
+            const { stdout, stderr } = await runCommand({
+                command: npxCommand,
+                args: ['playwright', 'test', normalizedSpecPath, '--reporter=json'],
+                cwd: path.join(__dirname, '..'),
+                timeoutMs: this.config?.sdk?.timeouts?.execution || 180000,
+            });
+            const result = extractJSON([stdout, stderr].filter(Boolean).join('\n'));
             return { success: true, result };
         } catch (error) {
-            return { success: false, error: error.stdout || error.message };
+            const output = [error.stdout, error.stderr, error.message].filter(Boolean).join('\n');
+
+            try {
+                const result = extractJSON(output);
+                return { success: false, result, error: null };
+            } catch {
+                return { success: false, error: output };
+            }
         }
     }
 

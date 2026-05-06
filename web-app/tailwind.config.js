@@ -5,6 +5,10 @@ module.exports = {
     ],
     theme: {
         extend: {
+            maxWidth: {
+                page: '72rem',
+                'page-wide': '80rem',
+            },
             colors: {
                 brand: {
                     50: '#effcfc',
@@ -44,6 +48,33 @@ module.exports = {
                     950: '#020617',
                 },
             },
+            fontSize: {
+                'display-1': ['clamp(2rem, 2.4vw + 1rem, 3rem)', {
+                    lineHeight: '1.02',
+                    letterSpacing: '-0.05em',
+                    fontWeight: '700',
+                }],
+                'title-1': ['clamp(1.4rem, 1.1vw + 1rem, 1.95rem)', {
+                    lineHeight: '1.08',
+                    letterSpacing: '-0.04em',
+                    fontWeight: '700',
+                }],
+                'body-1': ['0.95rem', {
+                    lineHeight: '1.7',
+                    letterSpacing: '-0.01em',
+                    fontWeight: '500',
+                }],
+                'meta': ['0.6875rem', {
+                    lineHeight: '1.2',
+                    letterSpacing: '0.14em',
+                    fontWeight: '600',
+                }],
+            },
+            borderRadius: {
+                card: '1.5rem',
+                panel: '1.75rem',
+                hero: '2rem',
+            },
             animation: {
                 'spin-slow': 'spin 3s linear infinite',
                 'shimmer': 'shimmer 2.4s ease-in-out infinite',
@@ -75,6 +106,9 @@ module.exports = {
             },
             backdropBlur: {
                 xs: '2px',
+            },
+            transitionTimingFunction: {
+                emphasized: 'cubic-bezier(0.22, 1, 0.36, 1)',
             },
             boxShadow: {
                 'glass': '0 1px 3px rgba(0, 0, 0, 0.06)',

@@ -62,8 +62,8 @@ function getActiveSkillBadge(session) {
 
 export default function SessionList({ sessions, activeSessionId, onSelect, onCreate, onDelete, isCreating = false, isOpen, onToggle }) {
     return (
-        <div className={`relative z-10 h-full flex-shrink-0 overflow-hidden border-r bg-white transition-[width,border-color,box-shadow] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${isOpen ? 'w-[248px] border-surface-200/80 shadow-[0_18px_40px_rgba(15,23,42,0.04)] sm:w-[256px] 2xl:w-[280px]' : 'w-0 border-transparent shadow-none'}`}>
-            <div className="flex h-full min-w-[248px] flex-col sm:min-w-[256px] 2xl:min-w-[280px]">
+        <div className={`relative z-10 h-full flex-shrink-0 overflow-hidden border-r bg-white transition-[width,border-color,box-shadow] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${isOpen ? 'w-[82vw] max-w-[260px] border-surface-200/80 shadow-[0_18px_40px_rgba(15,23,42,0.04)] sm:w-[256px] sm:max-w-none 2xl:w-[280px]' : 'w-0 border-transparent shadow-none'}`}>
+            <div className="flex h-full min-w-[82vw] max-w-[260px] flex-col sm:min-w-[256px] sm:max-w-none 2xl:min-w-[280px]">
                 {/* Top accent bar */}
                 <div className="h-[2px] bg-gradient-to-r from-brand-500 via-brand-400 to-accent-400 flex-shrink-0" />
 
@@ -137,7 +137,7 @@ export default function SessionList({ sessions, activeSessionId, onSelect, onCre
                                             <div className={`text-[12px] font-medium truncate leading-tight ${isActive ? 'text-brand-700' : 'text-surface-700'}`}>
                                                 {session.title || `Chat ${session.sessionId.substring(0, 8)}`}
                                             </div>
-                                            <AgentBadge agentMode={session.agentMode} size="xs" />
+                                            <AgentBadge agent={session.agent} agentMode={session.agentMode} size="xs" />
                                             {statusBadge && (
                                                 <span className={`rounded-full border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.12em] ${statusBadge.className}`}>
                                                     {statusBadge.label}

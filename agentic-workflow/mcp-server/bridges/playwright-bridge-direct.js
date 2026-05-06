@@ -1138,6 +1138,8 @@ export class PlaywrightDirectBridge extends EventEmitter {
             'browser_select_option': () => this.selectOption(args),
             'browser_fill_form': () => this.fillForm(args),
             'browser_wait_for': () => this.waitFor(args),
+            'browser_wait_for_load_state': () => this.waitForLoadState(args),
+            'browser_wait_for_navigation': () => this.waitForNavigation(args),
             'browser_tabs': () => this.manageTabs(args),
             'browser_create_tab': () => this.createTab(args),
             'browser_evaluate': () => this.evaluate(args),
@@ -1198,6 +1200,8 @@ export class PlaywrightDirectBridge extends EventEmitter {
             // ── Advanced: Visual Testing ──
             'browser_screenshot_baseline': () => this.screenshotBaseline(args),
             'browser_screenshot_compare': () => this.screenshotCompare(args),
+            'browser_collect_virtualized_list': () => this.collectVirtualizedList(args),
+            'browser_snapshot_diff': () => this.snapshotDiff(args),
 
             // ── Advanced: Video Recording ──
             'browser_start_video': () => this.startVideoRecording(args),
@@ -1426,7 +1430,14 @@ export class PlaywrightDirectBridge extends EventEmitter {
      * Click element
      */
     async click(args) {
-        const { element, ref, description } = args;
+        const {
+            element,
+            ref,
+            description,
+            button = 'left',
+            doubleClick = false,
+            modifiers = [],
+        } = args;
 
         let selector;
         if (ref) {
@@ -1443,31 +1454,50 @@ export class PlaywrightDirectBridge extends EventEmitter {
             selector = `text=${description}`;
         }
 
+        if (!selector) {
+            throw new Error('click requires one of: ref, element, or description');
+        }
+
         console.error(`[PlaywrightDirect] Clicking: ${selector}`);
         const blocked = await this._guardInteraction('click', selector, { includeDom: true });
         if (blocked) {
             return blocked;
         }
 
-        await this.page.click(selector);
+        const clickOptions = {
+            button,
+            modifiers,
+            clickCount: doubleClick ? 2 : 1,
+        };
+
+        await this.page.click(selector, clickOptions);
         const postActionBlocker = await this._capturePostActionBlocker('click', selector);
         if (postActionBlocker) {
             return {
                 success: true,
                 clicked: selector,
+                button,
+                doubleClick,
                 blockerDetected: postActionBlocker.blocker,
                 requiresRecovery: true,
             };
         }
 
-        return { success: true, clicked: selector };
+        return { success: true, clicked: selector, button, doubleClick };
     }
 
     /**
      * Type text
      */
     async type(args) {
-        const { element, ref, text, clear = false } = args;
+        const {
+            element,
+            ref,
+            text,
+            clear = false,
+            slowly = false,
+            submit = false,
+        } = args;
 
         let selector;
         if (ref) {
@@ -1481,6 +1511,14 @@ export class PlaywrightDirectBridge extends EventEmitter {
             selector = element;
         }
 
+        if (!selector) {
+            throw new Error('type requires one of: ref or element');
+        }
+
+        if (typeof text !== 'string') {
+            throw new Error('type requires text as a string');
+        }
+
         console.error(`[PlaywrightDirect] Typing into: ${selector}`);
 
         const blocked = await this._guardInteraction('type', selector, { includeDom: true });
@@ -1491,7 +1529,21 @@ export class PlaywrightDirectBridge extends EventEmitter {
         if (clear) {
             await this.page.fill(selector, '');
         }
-        await this.page.type(selector, text);
+
+        if (slowly) {
+            const locator = this.page.locator(selector);
+            if (typeof locator.pressSequentially === 'function') {
+                await locator.pressSequentially(text);
+            } else {
+                await this.page.type(selector, text, { delay: 100 });
+            }
+        } else {
+            await this.page.type(selector, text);
+        }
+
+        if (submit) {
+            await this.page.press(selector, 'Enter');
+        }
 
         const postActionBlocker = await this._capturePostActionBlocker('type', selector);
         if (postActionBlocker) {
@@ -1499,12 +1551,14 @@ export class PlaywrightDirectBridge extends EventEmitter {
                 success: true,
                 typed: text,
                 into: selector,
+                slowly,
+                submitted: submit,
                 blockerDetected: postActionBlocker.blocker,
                 requiresRecovery: true,
             };
         }
 
-        return { success: true, typed: text, into: selector };
+        return { success: true, typed: text, into: selector, slowly, submitted: submit };
     }
 
     /**
@@ -1547,7 +1601,10 @@ export class PlaywrightDirectBridge extends EventEmitter {
      * Drag element
      */
     async drag(args) {
-        const { source, target, sourceRef, targetRef } = args;
+        const source = args.source ?? args.startElement;
+        const target = args.target ?? args.endElement;
+        const sourceRef = args.sourceRef ?? args.startRef;
+        const targetRef = args.targetRef ?? args.endRef;
         let sourceSelector = source;
         let targetSelector = target;
 
@@ -1562,6 +1619,10 @@ export class PlaywrightDirectBridge extends EventEmitter {
             else throw new Error(`Target ref "${targetRef}" not found in snapshot.`);
         }
 
+        if (!sourceSelector || !targetSelector) {
+            throw new Error('Drag requires source/sourceRef and target/targetRef (legacy aliases start*/end* are also supported).');
+        }
+
         await this.page.dragAndDrop(sourceSelector, targetSelector);
         return { success: true, from: sourceSelector, to: targetSelector };
     }
@@ -1570,7 +1631,7 @@ export class PlaywrightDirectBridge extends EventEmitter {
      * Select option
      */
     async selectOption(args) {
-        const { element, ref, value, label } = args;
+        const { element, ref, value, values, label } = args;
         let selector;
         if (ref) {
             const refData = this.snapshotRefs.get(ref);
@@ -1580,7 +1641,21 @@ export class PlaywrightDirectBridge extends EventEmitter {
             selector = element;
         }
 
-        const options = label ? { label } : { value };
+        if (!selector) {
+            throw new Error('select_option requires ref or element selector.');
+        }
+
+        let options;
+        if (label) {
+            options = { label };
+        } else if (Array.isArray(values) && values.length > 0) {
+            options = values;
+        } else if (typeof value === 'string' && value.length > 0) {
+            options = { value };
+        } else {
+            throw new Error('select_option requires label, value, or values[] to choose an option.');
+        }
+
         const blocked = await this._guardInteraction('select_option', selector, { includeDom: true });
         if (blocked) {
             return blocked;
@@ -1591,14 +1666,14 @@ export class PlaywrightDirectBridge extends EventEmitter {
         if (postActionBlocker) {
             return {
                 success: true,
-                selected: value || label,
+                selected: label || value || values,
                 selector,
                 blockerDetected: postActionBlocker.blocker,
                 requiresRecovery: true,
             };
         }
 
-        return { success: true, selected: value || label, selector };
+        return { success: true, selected: label || value || values, selector };
     }
 
     /**
@@ -1645,9 +1720,13 @@ export class PlaywrightDirectBridge extends EventEmitter {
      * Wait for condition
      */
     async waitFor(args) {
-        const { text, selector, state, time } = args;
+        const { text, textGone, selector, state, time } = args;
 
-        const target = text ? `text=${text}` : selector || `time=${time || 0}`;
+        const target = text
+            ? `text=${text}`
+            : textGone
+                ? `textGone=${textGone}`
+                : selector || `time=${time || 0}`;
         const blocked = await this._guardInteraction('wait_for', target, { includeDom: true });
         if (blocked) {
             return blocked;
@@ -1656,6 +1735,22 @@ export class PlaywrightDirectBridge extends EventEmitter {
         if (time) {
             await this.page.waitForTimeout(time * 1000);
             return { success: true, waited: `${time} seconds` };
+        }
+
+        if (textGone) {
+            try {
+                await this.page.waitForSelector(`text=${textGone}`, { state: state || 'hidden' });
+                return { success: true, gone: textGone };
+            } catch (error) {
+                const postWaitBlocker = await this.getBlockingState();
+                if (postWaitBlocker.present) {
+                    return this._buildBlockedResult('wait_for', postWaitBlocker.blocker, {
+                        target: `textGone=${textGone}`,
+                        errorCode: 'RUNTIME_BLOCKER',
+                    });
+                }
+                throw error;
+            }
         }
 
         if (text) {
@@ -1691,6 +1786,73 @@ export class PlaywrightDirectBridge extends EventEmitter {
         }
 
         return { success: false, error: 'No wait condition specified' };
+    }
+
+    /**
+     * Wait for page load state
+     */
+    async waitForLoadState(args = {}) {
+        const { state = 'load', timeout } = args;
+
+        const blocked = await this._guardInteraction('wait_for_load_state', `state=${state}`, { includeDom: true });
+        if (blocked) {
+            return blocked;
+        }
+
+        try {
+            const options = {};
+            if (typeof timeout === 'number') options.timeout = timeout;
+            await this.page.waitForLoadState(state, options);
+            return {
+                success: true,
+                state,
+                url: this.page.url(),
+                title: await this.page.title(),
+            };
+        } catch (error) {
+            const postWaitBlocker = await this.getBlockingState();
+            if (postWaitBlocker.present) {
+                return this._buildBlockedResult('wait_for_load_state', postWaitBlocker.blocker, {
+                    target: `state=${state}`,
+                    errorCode: 'RUNTIME_BLOCKER',
+                });
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * Wait for navigation/URL transition
+     */
+    async waitForNavigation(args = {}) {
+        const { urlPattern, url, waitUntil = 'load', timeout } = args;
+        const targetPattern = urlPattern || url || '**';
+
+        const blocked = await this._guardInteraction('wait_for_navigation', targetPattern, { includeDom: true });
+        if (blocked) {
+            return blocked;
+        }
+
+        try {
+            const options = { waitUntil };
+            if (typeof timeout === 'number') options.timeout = timeout;
+            await this.page.waitForURL(targetPattern, options);
+            return {
+                success: true,
+                url: this.page.url(),
+                urlPattern: targetPattern,
+                waitUntil,
+            };
+        } catch (error) {
+            const postWaitBlocker = await this.getBlockingState();
+            if (postWaitBlocker.present) {
+                return this._buildBlockedResult('wait_for_navigation', postWaitBlocker.blocker, {
+                    target: targetPattern,
+                    errorCode: 'RUNTIME_BLOCKER',
+                });
+            }
+            throw error;
+        }
     }
 
     async createTab(args = {}) {

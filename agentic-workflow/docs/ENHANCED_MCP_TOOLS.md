@@ -183,8 +183,9 @@ In your main tool definitions file, import and merge:
 ```javascript
 import { UNIFIED_TOOLS } from './tool-definitions.js';
 import { ENHANCED_TOOLS } from './enhanced-tool-definitions.js';
+import { ADVANCED_TOOLS } from './advanced-tool-definitions.js';
 
-export const ALL_TOOLS = [...UNIFIED_TOOLS, ...ENHANCED_TOOLS];
+export const ALL_TOOLS = [...UNIFIED_TOOLS, ...ENHANCED_TOOLS, ...ADVANCED_TOOLS];
 ```
 
 ### 2. Apply Enhanced Methods to Bridge

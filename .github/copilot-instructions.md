@@ -426,14 +426,22 @@ Token-based URLs are constructed using `userTokens` from `tests/test-data/testDa
 * Agents may READ from Jira tickets (fetch ticket details)
 * Agents may CREATE new Jira tickets (bugs, testing tasks)
 * Agents may pass `labels` when creating Jira tickets only if the user explicitly asks for labels; otherwise new tickets must omit labels by default
-* Agents may UPDATE existing Jira tickets (edit description, summary, labels, priority, add comments) using the `update_jira_ticket` tool
+* Agents may UPDATE existing Jira tickets (edit description, summary, labels, priority, fix versions, add comments) using the `update_jira_ticket` tool
+* Agents may LIST available Fix Versions for a Jira project using the `get_jira_project_versions` tool before setting fixVersions on a ticket
 * Agents may INSPECT editable Jira fields and available transitions using the `get_jira_ticket_capabilities` tool
 * Agents may CHANGE Jira ticket status using the `transition_jira_ticket` tool
 * Agents may SEARCH Jira assignable users using the `search_jira_users` tool when the user wants assignment to a named person
 * Agents may DELETE Jira tickets using the `delete_jira_ticket` tool only when the user explicitly confirms deletion of the issue itself with `DELETE <ticketId>` or `DELETE <ticketId> WITH SUBTASKS` in the latest message
+* Agents may DELETE individual Jira comments using the `delete_jira_comment` tool. The shared approval component prompts the user for confirmation before the delete executes. Use `get_jira_ticket_comments` first if the commentId is unknown.
+* Agents may EDIT/UPDATE the body of an existing Jira comment using the `edit_jira_comment` tool. The shared approval component previews the before/after text before the write is sent. Use `get_jira_ticket_comments` first if the commentId is unknown.
 * Agents may REMOVE Jira issue links using the `remove_jira_issue_link` tool when the user explicitly asks to unlink tickets or remove an associated link
-* Agents may LOG WORK on Jira tickets using the `log_jira_work` tool; treat generic "Time Tracking" or "add hours" requests as worklog intent
-* Agents may UPDATE Jira original and remaining estimates using the `update_jira_estimates` tool only when the user explicitly asks to change estimate fields
+* Agents may LINK two existing Jira issues using the `link_jira_issues` tool — creates a link (Relates, Blocks, Duplicate, etc.) between two already-existing tickets. Available to BugGenie, TestGenie, and TaskGenie.
+* Agents may LOG WORK on Jira tickets using the `log_jira_work` tool; the shared approval component confirms the worklog entry before it is written. Treat generic "Time Tracking" or "add hours" requests as worklog intent.
+* Agents may UPDATE Jira original and remaining estimates using the `update_jira_estimates` tool only when the user explicitly asks to change estimate fields. The shared approval component previews the new estimates before they are applied.
+* Agents may ATTACH FILES to Jira tickets using the `attach_file_to_jira` tool — supports any file type (.xlsx, .pdf, .json, .csv, etc.) up to 50 MB. Use to upload generated test case Excel files, reports, or other artifacts.
+* Agents may ADD MIXED-MEDIA COMMENTS using the `add_comment_with_media` tool — uploads screenshots, preview frames, and recordings as Jira attachments, renders screenshots and preview frames inline in the comment, and lists recording file names in a Video evidence section. Jira Cloud does NOT support inline playable video in REST-created comments for this workflow, so recordings remain issue attachments rather than inline media. Available to BugGenie, TestGenie, and TaskGenie.
+* Agents may ADD COMMENTS WITH INLINE IMAGES using the `add_comment_with_images` tool — uploads image files as ticket attachments and creates a comment with those images rendered inline. Uses a 3-strategy approach: (A) REST API v2 + wiki markup `!filename.png|thumbnail!` for native inline rendering (primary — Jira's server-side wiki→ADF converter resolves attachments reliably), (B) REST API v3 + ADF mediaSingle with mediaApiFileId UUIDs (fallback), (C) REST API v3 + ADF text-link fallback (last resort). Available to BugGenie, TestGenie, and TaskGenie.
+* Agents may DELETE ATTACHMENTS from Jira tickets using the `delete_jira_attachment` tool — requires the numeric attachment ID (get it from the ticket's attachment list via `get_jira_ticket`). Requires explicit user confirmation before executing.
 * If a Jira request mixes worklog language and estimate language, agents must clarify before changing Jira time tracking data
 * BugGenie can create, read, and update tickets
 * TestGenie can read, update, and create tickets (Testing tasks with linking and auto-assignment)
@@ -444,6 +452,36 @@ Token-based URLs are constructed using `userTokens` from `tests/test-data/testDa
   - Use `parentIssueKey` parameter to create a true Jira subtask under the parent ticket
   - Use `assigneeAccountId` parameter to assign the created task or subtask
 * **Always display Jira URLs as clickable markdown hyperlinks** using `[text](url)` format
+
+## Tool Broker (Cross-Agent Delegation)
+
+Agents have static, role-specific tool sets. The **Tool Broker** enables any agent to invoke tools from another agent's set without switching agents or creating new LLM sessions.
+
+**Meta-tools (injected into all single-agent sessions):**
+* `list_delegatable_tools` — Discover tools available via delegation not in your native set
+* `cross_agent_delegate` — Invoke a specific tool from another agent (with full approval flow)
+
+**How it works:**
+1. Agent calls `list_delegatable_tools` → gets categorized list of available tools
+2. Agent calls `cross_agent_delegate({ toolName: '...', parameters: { ... } })` → broker creates the handler on-demand with current session deps and executes it
+3. Approval flow, progress broadcasts, and session context all work as if the tool were native
+
+**Configuration:** `agentic-workflow/config/workflow-config.json` → `toolBroker` section
+* `enabled` — Master toggle (default: true)
+* `maxDelegationsPerSession` — Rate limit per session (default: 10)
+* `permissions` — Category-based access control per agent
+
+**Permission model:** Each agent can only delegate to allowed tool categories:
+| Agent | Allowed Categories |
+|---|---|
+| BugGenie | jira, evidence, document, framework |
+| TestGenie | jira, document, testcase |
+| TaskGenie | jira |
+| ScriptGenerator | framework, grounding |
+| DocGenie | jira, document |
+| CodeReviewer | framework, grounding |
+
+**Note:** TPM/full profile already merges all agent tools — broker meta-tools are not injected for TPM.
 
 ## Bug Ticket Format (BugGenie)
 When creating defect tickets, use this structure:

@@ -105,12 +105,37 @@ class LoginFunctions {
 
     async signOut() {
         await this.page.waitForLoadState('networkidle');
-        await this.homePage.userProfile.waitFor({ state: 'visible', timeout: 10000 });
-        await this.homePage.userProfile.click({ force: true });
+        
+        // Self-healing: Try multiple selectors for user profile
+        const userProfileSelectors = [
+            'aotf-user-profile-dropdown [data-qa="user-menu-toggle"]',
+            '[data-testid="user-profile"]',
+            'button[aria-label="User menu"]',
+            '.user-profile-button',
+            '[data-qa="user-profile"]'
+        ];
+
+        let userProfileElement = null;
+        for (const selector of userProfileSelectors) {
+            try {
+                userProfileElement = this.page.locator(selector);
+                await userProfileElement.waitFor({ state: 'visible', timeout: 5000 });
+                break;
+            } catch (error) {
+                continue;
+            }
+        }
+
+        // Fallback to original selector if none work
+        if (!userProfileElement) {
+            userProfileElement = this.homePage.userProfile;
+            await userProfileElement.waitFor({ state: 'visible', timeout: 10000 });
+        }
+
+        await userProfileElement.click({ force: true });
         await this.userProfilePopUp.signOutButton.click();
         await this.page.waitForLoadState('load');
         await expect(this.logoutPage.signInButton).toBeVisible();
-
     }
 
     async sendValue(Password) {

@@ -159,11 +159,70 @@ class ApiClient {
         });
     }
 
+    async listChatAgents(options = {}) {
+        const params = new URLSearchParams();
+        if (options.includeInactive) params.set('includeInactive', 'true');
+        if (options.includeDraft) params.set('includeDraft', 'true');
+        const qs = params.toString();
+        const url = qs ? `${EP.chatAgents}?${qs}` : EP.chatAgents;
+        return this._fetch(url, { retries: 0, timeout: TIMEOUTS.HEALTH });
+    }
+
     // ─── Pipeline ───────────────────────────────────────────────
-    async startPipeline(ticketId, mode = 'full', environment = 'UAT', model = 'gpt-4o') {
+    async startPipeline(identifier, mode = 'full', environment = 'UAT', model = 'gpt-4o', options = {}) {
+        const payload = {
+            mode,
+            environment,
+            model,
+            triggeredBy: 'web-app',
+        };
+
+        const normalizedIdentifier = typeof identifier === 'string' ? identifier.trim() : '';
+        const normalizedTicketId = typeof options.ticketId === 'string' ? options.ticketId.trim() : '';
+        const normalizedRunId = typeof options.runId === 'string' ? options.runId.trim() : '';
+
+        if (normalizedTicketId) {
+            payload.ticketId = normalizedTicketId;
+        }
+        if (normalizedRunId) {
+            payload.runId = normalizedRunId;
+        }
+
+        if (!payload.ticketId && !payload.runId) {
+            if (options.identifierType === 'custom') {
+                payload.runId = normalizedIdentifier;
+            } else {
+                payload.ticketId = normalizedIdentifier;
+            }
+        }
+
+        if (typeof options.frameworkMode === 'string' && options.frameworkMode.trim()) {
+            payload.frameworkMode = options.frameworkMode.trim();
+        }
+
+        if (typeof options.appUrl === 'string' && options.appUrl.trim()) {
+            payload.appUrl = options.appUrl.trim();
+        }
+
+        if (typeof options.testCaseSource === 'string' && options.testCaseSource.trim()) {
+            payload.testCaseSource = options.testCaseSource.trim();
+        }
+
+        if (options.testDataOverride !== undefined) {
+            payload.testDataOverride = options.testDataOverride;
+        }
+
+        if (typeof options.executionTarget === 'string' && options.executionTarget.trim()) {
+            payload.executionTarget = options.executionTarget.trim();
+        }
+
+        if (options.mission && typeof options.mission === 'object') {
+            payload.mission = options.mission;
+        }
+
         return this._fetch(EP.pipelineRun, {
             method: 'POST',
-            body: JSON.stringify({ ticketId, mode, environment, model, triggeredBy: 'web-app' }),
+            body: JSON.stringify(payload),
             timeout: TIMEOUTS.PIPELINE_START,
             retries: 0,
         });
@@ -199,6 +258,21 @@ class ApiClient {
         return this._fetch(EP.pipelineStatus(runId), { timeout: TIMEOUTS.RUN_STATUS });
     }
 
+    async getPipelineCommandOutput(runId, limit = 300, options = {}) {
+        const query = new URLSearchParams();
+        if (limit) query.set('limit', String(limit));
+        if (Number.isFinite(options.sinceSeq)) query.set('since', String(options.sinceSeq));
+        if (Array.isArray(options.kinds) && options.kinds.length > 0) {
+            query.set('kinds', options.kinds.join(','));
+        }
+        const qs = query.toString();
+        const { sinceSeq: _sinceSeq, kinds: _kinds, ...fetchOptions } = options;
+        return this._fetch(`${EP.pipelineCommandOutput(runId)}${qs ? `?${qs}` : ''}`, {
+            timeout: TIMEOUTS.RUN_STATUS,
+            ...fetchOptions,
+        });
+    }
+
     async getPipelineEvidenceSummary(runId, limit = 12, options = {}) {
         const query = new URLSearchParams();
         if (limit) query.set('limit', String(limit));
@@ -216,11 +290,81 @@ class ApiClient {
         return `${this.baseUrl}${EP.pipelineArtifact}?${query.toString()}`;
     }
 
+    // ─── Terminal Sessions ─────────────────────────────────────
+    async listTerminalSessions() {
+        return this._fetch(EP.terminalSessions, { retries: 0, timeout: TIMEOUTS.RUN_STATUS });
+    }
+
+    async createTerminalSession(options = {}) {
+        return this._fetch(EP.terminalSessions, {
+            method: 'POST',
+            body: JSON.stringify(options),
+            retries: 0,
+            timeout: TIMEOUTS.PIPELINE_START,
+        });
+    }
+
+    async getTerminalSession(sessionId) {
+        return this._fetch(EP.terminalSession(sessionId), { retries: 0, timeout: TIMEOUTS.RUN_STATUS });
+    }
+
+    async getTerminalSessionOutput(sessionId, limit = 300) {
+        const query = new URLSearchParams();
+        if (limit) query.set('limit', String(limit));
+        const qs = query.toString();
+        return this._fetch(`${EP.terminalSessionOutput(sessionId)}${qs ? `?${qs}` : ''}`, {
+            retries: 0,
+            timeout: TIMEOUTS.RUN_STATUS,
+        });
+    }
+
+    async sendTerminalInput(sessionId, input, options = {}) {
+        return this._fetch(EP.terminalSessionInput(sessionId), {
+            method: 'POST',
+            body: JSON.stringify({
+                input,
+                appendNewline: options.appendNewline === true,
+            }),
+            headers: options.token ? { 'X-Terminal-Token': options.token } : undefined,
+            retries: 0,
+        });
+    }
+
+    async sendTerminalCommand(sessionId, command, options = {}) {
+        return this._fetch(EP.terminalSessionCommand(sessionId), {
+            method: 'POST',
+            body: JSON.stringify({ command }),
+            headers: options.token ? { 'X-Terminal-Token': options.token } : undefined,
+            retries: 0,
+        });
+    }
+
+    async resizeTerminalSession(sessionId, cols, rows, options = {}) {
+        return this._fetch(EP.terminalSessionResize(sessionId), {
+            method: 'POST',
+            body: JSON.stringify({ cols, rows }),
+            headers: options.token ? { 'X-Terminal-Token': options.token } : undefined,
+            retries: 0,
+        });
+    }
+
+    async terminateTerminalSession(sessionId, options = {}) {
+        return this._fetch(EP.terminalSessionTerminate(sessionId), {
+            method: 'POST',
+            body: JSON.stringify({
+                force: options.force !== false,
+                reason: options.reason,
+            }),
+            headers: options.token ? { 'X-Terminal-Token': options.token } : undefined,
+            retries: 0,
+        });
+    }
+
     // ─── Chat ───────────────────────────────────────────────────
-    async createChatSession(model, agentMode = null) {
+    async createChatSession(model, agentId = null, agentMode = null) {
         return this._fetch(EP.chatSessions, {
             method: 'POST',
-            body: JSON.stringify({ model, agentMode }),
+            body: JSON.stringify({ model, agentId, agentMode }),
         });
     }
 
@@ -313,6 +457,244 @@ class ApiClient {
         return this._fetch(EP.chatWorkspaceRoot(sessionId), { retries: 0 });
     }
 
+    // ─── Studio ────────────────────────────────────────────────
+    async listStudioWorkspaces() {
+        return this._fetch(EP.studioWorkspaces, { retries: 0 });
+    }
+
+    async createStudioWorkspace(payload) {
+        return this._fetch(EP.studioWorkspaces, {
+            method: 'POST',
+            body: JSON.stringify(payload),
+            retries: 0,
+        });
+    }
+
+    async getStudioWorkspaceCatalog(workspaceId) {
+        return this._fetch(EP.studioWorkspaceCatalog(workspaceId), { retries: 0 });
+    }
+
+    async getStudioWorkspaceTree(workspaceId, depth = 4) {
+        const query = new URLSearchParams({ depth: String(depth) }).toString();
+        return this._fetch(`${EP.studioWorkspaceTree(workspaceId)}?${query}`, { retries: 0 });
+    }
+
+    async createStudioAsset(workspaceId, payload) {
+        return this._fetch(EP.studioWorkspaceAssets(workspaceId), {
+            method: 'POST',
+            body: JSON.stringify(payload),
+            retries: 0,
+        });
+    }
+
+    async generateStudioDescription(payload) {
+        return this._fetch(EP.studioGenerateDescription, {
+            method: 'POST',
+            body: JSON.stringify(payload),
+            retries: 0,
+        });
+    }
+
+    async publishStudioAgent(workspaceId, agentId, options = {}) {
+        return this._fetch(EP.studioWorkspaceAgentPublish(workspaceId, agentId), {
+            method: 'POST',
+            body: JSON.stringify(options),
+            retries: 0,
+        });
+    }
+
+    async setStudioAgentActivation(workspaceId, agentId, active) {
+        return this._fetch(EP.studioWorkspaceAgentActivation(workspaceId, agentId), {
+            method: 'POST',
+            body: JSON.stringify({ active }),
+            retries: 0,
+        });
+    }
+
+    async getStudioWorkspaceFile(workspaceId, filePath) {
+        const query = new URLSearchParams({ path: filePath }).toString();
+        return this._fetch(`${EP.studioWorkspaceFile(workspaceId)}?${query}`, { retries: 0 });
+    }
+
+    async saveStudioWorkspaceFile(workspaceId, payload) {
+        return this._fetch(EP.studioWorkspaceFile(workspaceId), {
+            method: 'POST',
+            body: JSON.stringify(payload),
+            retries: 0,
+        });
+    }
+
+    async deleteStudioWorkspace(workspaceId, { force = false } = {}) {
+        const query = force ? `?${new URLSearchParams({ force: 'true' }).toString()}` : '';
+        return this._fetch(`${EP.studioWorkspaceDelete(workspaceId)}${query}`, {
+            method: 'DELETE',
+            retries: 0,
+        });
+    }
+
+    async deleteStudioAgent(workspaceId, agentId) {
+        return this._fetch(EP.studioWorkspaceAgentDelete(workspaceId, agentId), {
+            method: 'DELETE',
+            retries: 0,
+        });
+    }
+
+    async deleteStudioSkill(workspaceId, skillId) {
+        return this._fetch(EP.studioWorkspaceSkillDelete(workspaceId, skillId), {
+            method: 'DELETE',
+            retries: 0,
+        });
+    }
+
+    async getStudioSkill(workspaceId, skillId) {
+        return this._fetch(EP.studioWorkspaceSkill(workspaceId, skillId), { retries: 0 });
+    }
+
+    async updateStudioSkill(workspaceId, skillId, payload) {
+        return this._fetch(EP.studioWorkspaceSkill(workspaceId, skillId), {
+            method: 'PUT',
+            body: JSON.stringify(payload),
+            retries: 0,
+        });
+    }
+
+    async validateStudioSkill(workspaceId, skillId) {
+        return this._fetch(EP.studioWorkspaceSkillValidate(workspaceId, skillId), {
+            method: 'POST',
+            retries: 0,
+        });
+    }
+
+    async autoFixSkillFormat(workspaceId, skillId) {
+        return this._fetch(EP.studioWorkspaceSkillAutoFix(workspaceId, skillId), {
+            method: 'POST',
+            retries: 0,
+        });
+    }
+
+    async testSkillMatch(message, activeAgent = null) {
+        return this._fetch(EP.studioSkillTestMatch, {
+            method: 'POST',
+            body: JSON.stringify({ message, activeAgent }),
+            retries: 0,
+        });
+    }
+
+    async deleteStudioMcpServer(workspaceId, mcpId) {
+        return this._fetch(EP.studioWorkspaceMcpDelete(workspaceId, mcpId), {
+            method: 'DELETE',
+            retries: 0,
+        });
+    }
+
+    async deleteStudioWorkspaceFile(workspaceId, filePath) {
+        const query = new URLSearchParams({ path: filePath }).toString();
+        return this._fetch(`${EP.studioWorkspaceFileDelete(workspaceId)}?${query}`, {
+            method: 'DELETE',
+            retries: 0,
+        });
+    }
+
+    // ─── Studio — Templates ────────────────────────────────────
+    async listStudioTemplates(options = {}) {
+        const query = new URLSearchParams();
+        if (options.category) query.set('category', options.category);
+        if (options.search) query.set('search', options.search);
+        if (options.source) query.set('source', options.source);
+        const qs = query.toString();
+        return this._fetch(`${EP.studioTemplates}${qs ? '?' + qs : ''}`, { retries: 0 });
+    }
+
+    async getStudioTemplate(templateId) {
+        return this._fetch(EP.studioTemplate(templateId), { retries: 0 });
+    }
+
+    async createStudioTemplate(payload) {
+        return this._fetch(EP.studioTemplates, {
+            method: 'POST',
+            body: JSON.stringify(payload),
+            retries: 0,
+        });
+    }
+
+    async forkStudioTemplate(templateId, overrides = {}) {
+        return this._fetch(EP.studioTemplateFork(templateId), {
+            method: 'POST',
+            body: JSON.stringify(overrides),
+            retries: 0,
+        });
+    }
+
+    async deleteStudioTemplate(templateId) {
+        return this._fetch(EP.studioTemplate(templateId), {
+            method: 'DELETE',
+            retries: 0,
+        });
+    }
+
+    // ─── Studio — Export / Import ──────────────────────────────
+    async exportStudioAgent(workspaceId, agentId, format = 'json') {
+        const query = new URLSearchParams({ format }).toString();
+        return this._fetch(`${EP.studioAgentExport(workspaceId, agentId)}?${query}`, { retries: 0 });
+    }
+
+    async importStudioAgent(payload) {
+        return this._fetch(EP.studioImportAgent, {
+            method: 'POST',
+            body: JSON.stringify(payload),
+            retries: 0,
+        });
+    }
+
+    async getStudioExportFormats() {
+        return this._fetch(EP.studioExportFormats, { retries: 0 });
+    }
+
+    // ─── Studio — MCP Registry ─────────────────────────────────
+    async listMcpRegistry(options = {}) {
+        const query = new URLSearchParams();
+        if (options.category) query.set('category', options.category);
+        const qs = query.toString();
+        return this._fetch(`${EP.studioMcpRegistry}${qs ? '?' + qs : ''}`, { retries: 0 });
+    }
+
+    async getMcpRegistryServer(serverId) {
+        return this._fetch(EP.studioMcpRegistryServer(serverId), { retries: 0 });
+    }
+
+    async testMcpConnection(payload) {
+        return this._fetch(EP.studioMcpRegistryTest, {
+            method: 'POST',
+            body: JSON.stringify(payload),
+            retries: 0,
+        });
+    }
+
+    // ─── Studio — Agent Validation ─────────────────────────────
+    async validateStudioAgent(workspaceId, agentId) {
+        return this._fetch(EP.studioAgentValidate(workspaceId, agentId), {
+            method: 'POST',
+            retries: 0,
+        });
+    }
+
+    // ─── Studio — Analytics ────────────────────────────────────
+    async getStudioAnalytics() {
+        return this._fetch(EP.studioAnalytics, { retries: 0 });
+    }
+
+    async getStudioAgentAnalytics(agentId) {
+        return this._fetch(EP.studioAnalyticsAgent(agentId), { retries: 0 });
+    }
+
+    async recordStudioAnalyticsEvent(event) {
+        return this._fetch(EP.studioAnalyticsRecord, {
+            method: 'POST',
+            body: JSON.stringify(event),
+            retries: 0,
+        });
+    }
+
     // ─── Reports ────────────────────────────────────────────────
     async listReports() { return this._fetch(EP.reports); }
     async getReport(fileName) { return this._fetch(EP.report(encodeURIComponent(fileName))); }
@@ -335,6 +717,18 @@ class ApiClient {
 
     getChatStreamUrl(sessionId) {
         return `${this.baseUrl}${EP.chatStream(sessionId)}`;
+    }
+
+    getTerminalWebSocketUrl(sessionId, options = {}) {
+        const base = new URL(this.baseUrl);
+        base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
+        base.pathname = EP.terminalWs;
+        const params = new URLSearchParams({ sessionId });
+        if (typeof options.token === 'string' && options.token) {
+            params.set('token', options.token);
+        }
+        base.search = params.toString();
+        return base.toString();
     }
 }
 

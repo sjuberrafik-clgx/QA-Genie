@@ -538,6 +538,28 @@
         "headless": false,
         "workers": 1
     },
+    "universalRunner": {
+        "enabled": true,
+        "maxTimeoutSeconds": 600,
+        "defaultTimeoutSeconds": 300,
+        "blockedPatterns": [
+            "rm -rf /",
+            "format C:",
+            "mkfs",
+            "dd if=",
+            "shutdown",
+            "reboot"
+        ],
+        "supportedFrameworks": [
+            "playwright",
+            "webdriverio",
+            "cypress",
+            "jest",
+            "mocha",
+            "vitest",
+            "selenium"
+        ]
+    },
     "bugGenie": {
         "autoTrigger": true,
         "triggerAfterFailures": 2,
@@ -707,7 +729,12 @@
         "deduplicationThreshold": 0.05,
         "_deduplicationNote": "Minimum perceptual difference (0-1) between consecutive frames to keep. 0.05 = 5% pixel diff. Set 0 to disable dedup.",
         "frameSelectionStrategy": "hybrid",
-        "allowedProviders": ["loom", "gdrive", "sharepoint", "direct"],
+        "allowedProviders": [
+            "loom",
+            "gdrive",
+            "sharepoint",
+            "direct"
+        ],
         "attachKeyFramesToJira": true,
         "maxJiraFrames": 8
     },
@@ -727,6 +754,43 @@
             "minRoleDiversity": 3,
             "retryThreshold": 30,
             "warnThreshold": 60
+        }
+    },
+    "toolBroker": {
+        "_comment": "Cross-agent tool delegation layer. Enables agents to invoke tools owned by other agents without creating new LLM sessions. Zero LLM overhead — handlers are created on-demand with the current session's deps.",
+        "enabled": true,
+        "maxDelegationsPerSession": 10,
+        "delegationTimeoutMs": 30000,
+        "logDelegations": true,
+        "permissions": {
+            "_comment": "Which tool categories each agent can delegate to. Categories: jira, evidence, document, framework, grounding, pipeline, docparse, testcase.",
+            "buggenie": [
+                "jira",
+                "evidence",
+                "document",
+                "framework"
+            ],
+            "testgenie": [
+                "jira",
+                "document",
+                "testcase"
+            ],
+            "taskgenie": [
+                "jira"
+            ],
+            "scriptgenerator": [
+                "framework",
+                "grounding"
+            ],
+            "docgenie": [
+                "jira",
+                "document"
+            ],
+            "codereviewer": [
+                "framework",
+                "grounding"
+            ],
+            "filegenie": []
         }
     },
     "cognitiveLoop": {

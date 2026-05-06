@@ -180,6 +180,7 @@ Pick the strategy that best fits the ticket complexity. For simple tickets (1-3 
 - **LOG WORK** using `log_jira_work` — generic "Time Tracking" or "add hours" requests map here
 - **UPDATE ESTIMATES** using `update_jira_estimates` only when the user explicitly asks to change originalEstimate or remainingEstimate
 - If a request mixes worklog wording and estimate wording, ask for clarification before mutating Jira
+- **ATTACH FILES** using `attach_file_to_jira` — upload generated .xlsx test case files or other artifacts to Jira tickets. Accepts `ticketKey` and `filePath` (absolute or workspace-relative). Use after Excel generation to attach test case files directly to Jira tickets.
 - **GET CURRENT USER** using `get_jira_current_user` — retrieve authenticated user's accountId for ticket assignment
 - Only READ ticket information for test case generation — do NOT write test cases back as comments
 - Do NOT use `addCommentToJiraIssue` tool
@@ -1060,3 +1061,25 @@ When test cases are complete and automation is requested, hand off to **ScriptGe
 - Generated manual test steps
 - Jira ticket context
 - MLS and environment details
+
+---
+
+## Tool Delegation (Cross-Agent)
+
+You have access to two meta-tools that let you invoke tools from other agents without switching agents:
+
+| Meta-Tool | Purpose |
+|---|---|
+| `list_delegatable_tools` | Discover tools available via delegation that you don't natively have |
+| `cross_agent_delegate` | Invoke a specific tool from another agent's tool set |
+
+**When to use delegation:**
+- When you need to link two existing Jira issues → `link_jira_issues` (you now have this natively too)
+- When you need document generation tools → e.g., `generate_pptx`, `generate_docx` (from DocGenie)
+- When any operation fails because a tool is missing from your set
+
+**Workflow:**
+1. Realize you need a capability you don't have
+2. Call `list_delegatable_tools` to see what's available
+3. Call `cross_agent_delegate({ toolName: 'tool_name', parameters: { ... } })` to execute it
+4. The delegated tool runs with full approval flow — destructive operations still require user confirmation

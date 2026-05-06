@@ -38,10 +38,10 @@ export default function AllureNavBar({
                     <AllureLogo size={24} />
                     <button
                         onClick={() => setReportMenuOpen(!reportMenuOpen)}
-                        className="flex items-center gap-1.5 text-[13px] font-semibold text-white/90 hover:text-white transition-colors"
+                        className="font-display motion-fast-colors flex items-center gap-1.5 text-[13px] font-semibold tracking-[-0.015em] text-white/90 hover:text-white"
                     >
                         Report
-                        <svg className={`w-3 h-3 text-white/50 transition-transform ${reportMenuOpen ? 'rotate-180' : ''}`} viewBox="0 0 20 20" fill="currentColor">
+                        <svg className={`w-3 h-3 motion-rotate text-white/50 ${reportMenuOpen ? 'rotate-180' : ''}`} viewBox="0 0 20 20" fill="currentColor">
                             <path fillRule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" />
                         </svg>
                     </button>
@@ -56,7 +56,7 @@ export default function AllureNavBar({
                                         onTimeFilterChange(f.value);
                                         setReportMenuOpen(false);
                                     }}
-                                    className={`w-full text-left px-4 py-2 text-[12px] font-medium transition-colors
+                                    className={`motion-fast-colors w-full text-left px-4 py-2 text-[12px] font-medium
                                         ${timeFilter === f.value
                                             ? 'text-[#66bb6a] bg-white/[0.04]'
                                             : 'text-white/70 hover:text-white hover:bg-white/[0.06]'

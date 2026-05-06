@@ -18,35 +18,39 @@ This document provides a comprehensive reference for all MCP (Model Context Prot
 | | `unified_create_tab` | Create a tab with optional URL and activation |
 | | `unified_tabs` | List/create/close/select tabs |
 | **Snapshots** | `unified_snapshot` | Get accessibility tree with refs (PREFERRED) |
+| | `unified_snapshot_diff` | Set/diff snapshot baselines to detect UI changes |
 | **Interactions** | `unified_click` | Click element by ref/description |
 | | `unified_type` | Type text into element |
 | | `unified_hover` | Hover over element |
 | | `unified_drag` | Drag from one element to another |
 | | `unified_select_option` | Select option from dropdown |
+| **Exploration** | `unified_collect_virtualized_list` | Collect unique items from virtualized/infinite-scroll lists |
 | **Forms** | `unified_fill_form` | Fill multiple form fields |
 | **Wait** | `unified_wait_for` | Wait for text/condition/time |
+| | `unified_wait_for_load_state` | Wait for page load state |
+| | `unified_wait_for_navigation` | Wait for URL/navigation transition |
 | **Advanced** | `unified_evaluate` | Evaluate JavaScript |
-| | `unified_run_code` | Run Playwright code snippet |
+| | `unified_run_playwright_code` | Run Playwright code snippet |
 | **Debug** | `unified_console_messages` | Get console messages |
 | | `unified_network_requests` | Get network requests |
-| **Setup** | `unified_install` | Install browser binaries |
+| **Setup** | `unified_browser_install` | Install browser binaries |
 
 ### Chrome DevTools Features (Integrated)
 **Advanced features routed automatically via intelligent routing.**
 
 | Category | Tool Name | Description |
 |----------|-----------|-------------|
-| **JavaScript** | `unified_evaluate_script` | Execute JS in page context |
-| **Forms** | `unified_fill` | Fill single input |
+| **JavaScript** | `unified_evaluate_cdp` | Execute JS in page context |
+| **Forms** | `unified_type` | Fill single input |
 | | `unified_fill_form` | Fill multiple form elements |
-| **Network** | `unified_list_network_requests` | List all network requests |
+| **Network** | `unified_network_requests_cdp` | List all network requests |
 | | `unified_get_network_request` | Get specific request details |
 | **Performance** | `unified_performance_start_trace` | Start perf trace |
 | | `unified_performance_stop_trace` | Stop trace, get CWV scores |
-| | `unified_performance_analyze_insight` | Analyze perf insight |
-| **Page Control** | `unified_resize_page` | Resize browser window |
+| | `unified_performance_analyze` | Analyze perf insight |
+| **Page Control** | `unified_resize` | Resize browser window |
 | | `unified_emulate` | Emulate network/device |
-| **Files/Dialogs** | `unified_upload_file` | Upload file via input |
+| **Files/Dialogs** | `unified_file_upload` | Upload file via input |
 | | `unified_handle_dialog` | Accept/dismiss dialogs |
 | **Wait** | `unified_wait_for` | Wait for text to appear |
 
@@ -67,6 +71,8 @@ The unified MCP server automatically routes calls to the appropriate backend:
 - ✅ Managing browser tabs → `unified_tabs`
 - ✅ Opening a new working tab directly → `unified_create_tab`
 - ✅ Basic wait operations → `unified_wait_for`
+- ✅ Enumerating virtualized/infinite list content → `unified_collect_virtualized_list`
+- ✅ Detecting UI deltas after interactions → `unified_snapshot_diff`
 
 ### Stable Tab IDs
 - `unified_tabs({ action: 'list' })` now returns `tabId` for each tab.
@@ -77,7 +83,7 @@ The unified MCP server automatically routes calls to the appropriate backend:
 - ✅ Measuring performance (Core Web Vitals) → `unified_performance_*`
 - ✅ Analyzing network requests → `unified_network_*`
 - ✅ Handling browser dialogs → `unified_handle_dialog`
-- ✅ Uploading files → `unified_upload_file`
+- ✅ Uploading files → `unified_file_upload`
 
 ---
 
@@ -111,9 +117,21 @@ The unified MCP server automatically routes calls to the appropriate backend:
 1. unified_handle_dialog (action: "accept" or "dismiss")
 ```
 
+### Snapshot Delta Validation
+```
+1. unified_snapshot_diff (mode: "set-baseline")
+2. [perform interaction]
+3. unified_snapshot_diff (mode: "diff")
+4. Review addedCount / removedCount / changedCount
+```
+
 ---
 
 ## Important Notes
+
+### Compatibility Aliases
+- Legacy alias names such as `unified_run_code`, `unified_install`, `unified_upload_file`, and `unified_resize_page` remain callable for backward compatibility.
+- Prefer canonical names listed above for new prompts and scripts.
 
 ### Snapshot vs Screenshot
 - **`browser_snapshot`** (Playwright): Returns accessibility tree with `ref=` attributes for element interaction. **PREFERRED** for automation.

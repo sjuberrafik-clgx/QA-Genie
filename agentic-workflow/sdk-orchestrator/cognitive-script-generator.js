@@ -571,64 +571,86 @@ class CognitiveScriptGenerator {
      */
     async _runExplorerPhase(context, store, plan) {
         const phaseStart = Date.now();
-        let session = null;
-        let sessionId = null;
-
         try {
-            const appUrl = this._getAppUrl(context);
-            const selectorRecommendations = this._getSelectorRecommendations(context.ticketId);
-
-            // Create session with explorer-specific MCP profile
-            const sessionInfo = await this.sessionFactory.createAgentSession('cognitive-explorer-nav', {
-                ticketId: context.ticketId,
-                runId: context.runId,
-                scenarioId: context.scenarioId || null,
-                authState: context.authState || null,
-                taskDescription: 'Explore application following the analysis plan',
-                systemPromptOverride: phases.explorer.buildExplorerSystemPrompt(),
+            const navPass = await this._runExplorerPass(context, store, plan, {
+                passName: 'nav',
+                agentName: 'cognitive-explorer-nav',
                 toolProfile: 'explorer-nav',
-                contextStore: store,
-            });
-            session = sessionInfo.session;
-            sessionId = sessionInfo.sessionId;
-
-            const prompt = phases.explorer.buildExplorerUserPrompt({
-                ticketId: context.ticketId,
-                explorationPlan: plan,
-                appUrl,
-                selectorRecommendations,
-                knownPopups: ['welcome-modal', 'agent-branding', 'tour-overlay', 'compare-popup'],
+                minimumScore: 30,
             });
 
-            const response = await this.sessionFactory.sendAndWait(session, prompt, {
-                timeout: phases.getPhase('explorer').timeout,
-                onDelta: (delta) => {
-                    if (delta && this._eventBridge) {
-                        this._eventBridge.push('ai_delta', context.ticketId, {
-                            agent: 'cognitive-explorer',
-                            stage: 'explorer',
-                            delta,
-                        });
-                    }
-                },
+            if (!navPass.success) {
+                return {
+                    success: false,
+                    exploration: null,
+                    score: navPass.score || 0,
+                    errors: navPass.errors || ['Explorer nav pass failed'],
+                    metrics: {
+                        duration: Date.now() - phaseStart,
+                        navDuration: navPass.metrics?.duration || 0,
+                        navScore: navPass.score || 0,
+                        navValid: navPass.valid || false,
+                    },
+                };
+            }
+
+            // Explicit second pass for state-changing interactions.
+            const interactPass = await this._runExplorerPass(context, store, plan, {
+                passName: 'interact',
+                agentName: 'cognitive-explorer-interact',
+                toolProfile: 'explorer-interact',
+                minimumScore: 20,
+                priorExploration: navPass.exploration,
             });
 
-            // Parse and validate
-            const { valid, exploration, errors } = phases.explorer.parseExplorerOutput(response);
+            const errors = [...(navPass.errors || [])];
+            if (interactPass.errors?.length) {
+                errors.push(...interactPass.errors);
+            }
+
+            let exploration = navPass.exploration;
+            if (interactPass.success && interactPass.exploration) {
+                exploration = this._mergeExplorationReports(navPass.exploration, interactPass.exploration);
+            } else {
+                this._log('  ⚠️ Explorer interact pass incomplete — continuing with nav-pass exploration data');
+            }
+
             const { score } = phases.explorer.scoreExploration(exploration, plan);
-
-            // Convert to standard format for quality gates
             const standardData = phases.explorer.toStandardExplorationData(exploration, context.ticketId);
+            const success = navPass.success && score >= 30;
 
-            this._log(`  Exploration score: ${score}/100 | Valid: ${valid} | Elements: ${exploration?.statistics?.totalElementsFound || 0}`);
+            this._log(
+                `  Exploration score: ${score}/100 | Nav: ${navPass.score}/100 | ` +
+                `Interact: ${interactPass.score || 0}/100 | Elements: ${exploration?.statistics?.totalElementsFound || 0}`
+            );
 
             return {
-                success: valid && score >= 30,
+                success,
                 exploration,
                 standardExploration: standardData,
                 score,
                 errors,
-                metrics: { duration: Date.now() - phaseStart, score, valid },
+                passes: {
+                    nav: {
+                        success: navPass.success,
+                        score: navPass.score,
+                        valid: navPass.valid,
+                    },
+                    interact: {
+                        success: interactPass.success,
+                        score: interactPass.score,
+                        valid: interactPass.valid,
+                    },
+                },
+                metrics: {
+                    duration: Date.now() - phaseStart,
+                    navDuration: navPass.metrics?.duration || 0,
+                    interactDuration: interactPass.metrics?.duration || 0,
+                    navScore: navPass.score || 0,
+                    interactScore: interactPass.score || 0,
+                    score,
+                    valid: success,
+                },
             };
         } catch (error) {
             this._log(`  ❌ Explorer error: ${error.message}`);
@@ -639,11 +661,418 @@ class CognitiveScriptGenerator {
                 errors: [error.message],
                 metrics: { duration: Date.now() - phaseStart, error: error.message },
             };
+        }
+    }
+
+    async _runExplorerPass(context, store, plan, options = {}) {
+        const passStart = Date.now();
+        const {
+            passName = 'nav',
+            agentName = 'cognitive-explorer-nav',
+            toolProfile = 'explorer-nav',
+            minimumScore = 30,
+            priorExploration = null,
+        } = options;
+
+        let session = null;
+        let sessionId = null;
+
+        try {
+            const appUrl = this._getAppUrl(context);
+            const selectorRecommendations = this._getSelectorRecommendations(context.ticketId);
+
+            const sessionInfo = await this.sessionFactory.createAgentSession(agentName, {
+                ticketId: context.ticketId,
+                runId: context.runId,
+                scenarioId: context.scenarioId || null,
+                authState: context.authState || null,
+                taskDescription: passName === 'interact'
+                    ? 'Perform interaction-focused exploration using prior discovery'
+                    : 'Explore application following the analysis plan',
+                systemPromptOverride: phases.explorer.buildExplorerSystemPrompt(),
+                toolProfile,
+                contextStore: store,
+            });
+            session = sessionInfo.session;
+            sessionId = sessionInfo.sessionId;
+
+            const basePrompt = phases.explorer.buildExplorerUserPrompt({
+                ticketId: context.ticketId,
+                explorationPlan: plan,
+                appUrl,
+                selectorRecommendations,
+                knownPopups: ['welcome-modal', 'agent-branding', 'tour-overlay', 'compare-popup'],
+            });
+
+            const passDirective = this._buildExplorerPassDirective(passName, priorExploration, plan);
+            const prompt = `${basePrompt}\n\n${passDirective}`;
+
+            const response = await this.sessionFactory.sendAndWait(session, prompt, {
+                timeout: phases.getPhase('explorer').timeout,
+                onDelta: (delta) => {
+                    if (delta && this._eventBridge) {
+                        this._eventBridge.push('ai_delta', context.ticketId, {
+                            agent: 'cognitive-explorer',
+                            stage: `explorer-${passName}`,
+                            delta,
+                        });
+                    }
+                },
+            });
+
+            const { valid, exploration, errors } = phases.explorer.parseExplorerOutput(response);
+            const { score } = phases.explorer.scoreExploration(exploration, plan);
+            const standardData = phases.explorer.toStandardExplorationData(exploration, context.ticketId);
+            const success = valid && score >= minimumScore;
+
+            this._log(
+                `  Explorer ${passName} pass: score=${score}/100 | valid=${valid} | ` +
+                `elements=${exploration?.statistics?.totalElementsFound || 0}`
+            );
+
+            return {
+                success,
+                valid,
+                exploration,
+                standardExploration: standardData,
+                score,
+                errors,
+                metrics: {
+                    duration: Date.now() - passStart,
+                    score,
+                    valid,
+                    passName,
+                },
+            };
+        } catch (error) {
+            this._log(`  ❌ Explorer ${passName} pass error: ${error.message}`);
+            return {
+                success: false,
+                valid: false,
+                exploration: null,
+                score: 0,
+                errors: [error.message],
+                metrics: {
+                    duration: Date.now() - passStart,
+                    error: error.message,
+                    passName,
+                },
+            };
         } finally {
             if (sessionId) {
                 await this.sessionFactory.destroySession(sessionId).catch(() => { });
             }
         }
+    }
+
+    _buildExplorerPassDirective(passName, priorExploration, explorationPlan = null) {
+        if (passName === 'interact') {
+            const summary = this._summarizeExplorationForPrompt(priorExploration);
+            return [
+                '## Explorer Pass Mode: INTERACTION VALIDATION',
+                'You are running the SECOND exploration pass.',
+                'Focus on state-changing interactions (click/type/select/upload/dialog/frame/shadow/network waits),',
+                'capture post-interaction snapshots, and validate asynchronous behavior with wait tools.',
+                'Use prior discovery as guidance, but still verify everything with live MCP calls.',
+                'Output a COMPLETE exploration JSON report (not delta-only) so it can be merged reliably.',
+                '',
+                '### Prior Pass Summary',
+                summary,
+            ].join('\n');
+        }
+
+        const virtualizationSignals = this._detectListVirtualizationSignals(explorationPlan, priorExploration);
+
+        const virtualizationDirective = [
+            '',
+            '### Virtualized List Detection Directive (Explorer Nav)',
+            'Check for list virtualization signals on every discovery page:',
+            '- explicit mentions such as "virtualized", "windowed", "infinite scroll", or "load more"',
+            '- repeated result cards/rows where only a subset is rendered at once',
+            '- scrollable list containers (`overflow: auto|scroll`) with dynamic item replacement',
+            '- lazy-load sentinels, skeleton loaders, or content appended after scroll',
+            '',
+        ];
+
+        if (virtualizationSignals.detected) {
+            virtualizationDirective.push(
+                'Detected virtualization signals from plan/context:',
+                ...virtualizationSignals.signals.map((signal) => `- ${signal}`),
+                '',
+                'MANDATORY ACTION: invoke `unified_collect_virtualized_list` before concluding nav pass.',
+                'Use container selector + item selector inferred from live snapshot evidence.',
+                'Record output summary (`totalUniqueItems`, sampled items, and termination reason) in risk observations or selector map notes.',
+                ''
+            );
+        } else {
+            virtualizationDirective.push(
+                'Conditional action: if any virtualization signal is observed during nav pass,',
+                'immediately invoke `unified_collect_virtualized_list` before finishing discovery.',
+                ''
+            );
+        }
+
+        return [
+            '## Explorer Pass Mode: NAVIGATION DISCOVERY',
+            'You are running the FIRST exploration pass.',
+            'Prioritize deterministic navigation, baseline snapshots, semantic selector discovery, and assertion-value extraction.',
+            'Minimize risky interactions unless required by the plan.',
+            'Output a COMPLETE exploration JSON report.',
+            ...virtualizationDirective,
+        ].join('\n');
+    }
+
+    _detectListVirtualizationSignals(explorationPlan, priorExploration) {
+        const textSegments = [];
+
+        if (explorationPlan) {
+            try {
+                textSegments.push(JSON.stringify(explorationPlan));
+            } catch (_) {
+                textSegments.push(String(explorationPlan));
+            }
+        }
+
+        if (priorExploration) {
+            const riskNotes = (priorExploration.riskObservations || [])
+                .map((entry) => `${entry?.observation || ''} ${entry?.recommendation || ''}`)
+                .join(' ');
+            const popupNotes = (priorExploration.popupsEncountered || [])
+                .map((popup) => `${popup?.type || ''} ${popup?.selector || ''}`)
+                .join(' ');
+            if (riskNotes) textSegments.push(riskNotes);
+            if (popupNotes) textSegments.push(popupNotes);
+        }
+
+        const planStepTools = ((explorationPlan?.testCaseMapping || [])
+            .flatMap((entry) => entry?.explorationSteps || [])
+            .map((step) => String(step?.tool || '').toLowerCase())
+            .filter(Boolean));
+
+        const haystack = textSegments.join(' ').toLowerCase();
+
+        const signalChecks = [
+            {
+                label: 'Explicit virtualized/windowed list mention',
+                regex: /\bvirtuali[sz]ed\b|\bwindow(?:ed|ing)\b/,
+            },
+            {
+                label: 'Infinite scroll cue',
+                regex: /\binfinite\s*scroll\b|\bendless\s*scroll\b/,
+            },
+            {
+                label: 'Load more / show more pagination cue',
+                regex: /\b(load|show|see)\s+more\b|\bnext\s+page\b/,
+            },
+            {
+                label: 'Lazy loading / sentinel cue',
+                regex: /\blazy[\s-]?load(?:ed|ing)?\b|\bsentinel\b|\bintersection\s+observer\b|\bskeleton\b/,
+            },
+            {
+                label: 'Scrollable list/feed context',
+                regex: /(results?|listings?|feed|catalog|cards?|grid|rows?|table).{0,80}(scroll|scrollable|overflow|paginate|pagination)|(scroll|scrollable|overflow).{0,80}(results?|listings?|feed|catalog|cards?|grid|rows?|table)/,
+            },
+        ];
+
+        const detected = signalChecks
+            .filter(({ regex }) => regex.test(haystack))
+            .map(({ label }) => label);
+
+        if (planStepTools.some((tool) => tool === 'scroll_into_view' || tool === 'mouse_wheel')) {
+            detected.push('Analyst plan includes explicit scroll interaction steps');
+        }
+
+        const uniqueSignals = [...new Set(detected)];
+
+        return {
+            detected: uniqueSignals.length > 0,
+            signals: uniqueSignals,
+        };
+    }
+
+    _summarizeExplorationForPrompt(exploration) {
+        if (!exploration) {
+            return 'No prior exploration summary available.';
+        }
+
+        const pages = (exploration.pagesVisited || [])
+            .map(p => p?.url)
+            .filter(Boolean);
+        const selectorMap = exploration.selectorMap || [];
+        const statistics = exploration.statistics || {};
+
+        const summary = {
+            totalPagesVisited: pages.length,
+            pagesVisited: pages.slice(0, 10),
+            mappedSteps: selectorMap.length,
+            elementsFound: statistics.totalElementsFound || 0,
+            elementsMissing: statistics.totalElementsMissing || 0,
+            coveragePercent: statistics.coveragePercent || 0,
+            popupsEncountered: (exploration.popupsEncountered || [])
+                .map(p => p?.type)
+                .filter(Boolean)
+                .slice(0, 10),
+        };
+
+        return JSON.stringify(summary, null, 2);
+    }
+
+    _mergeExplorationReports(navExploration, interactExploration) {
+        const clone = (obj) => JSON.parse(JSON.stringify(obj || {}));
+        const merged = clone(navExploration);
+        const interact = clone(interactExploration);
+
+        if (!interact || Object.keys(interact).length === 0) {
+            return merged;
+        }
+
+        const dedupeBy = (items, keyFn) => {
+            const seen = new Map();
+            for (const item of items || []) {
+                const key = keyFn(item);
+                if (!seen.has(key)) {
+                    seen.set(key, item);
+                }
+            }
+            return Array.from(seen.values());
+        };
+
+        merged.pagesVisited = dedupeBy(
+            [...(merged.pagesVisited || []), ...(interact.pagesVisited || [])],
+            p => `${p?.url || ''}::${p?.title || ''}`
+        );
+
+        const completenessRank = { blocked: 0, partial: 1, complete: 2 };
+        const selectorMapByStep = new Map();
+
+        const mergeElement = (existing, incoming) => {
+            const base = existing ? { ...existing } : { ...incoming };
+            if (!existing) {
+                base.selectorCandidates = dedupeBy(
+                    incoming?.selectorCandidates || [],
+                    c => `${c?.selector || ''}::${c?.type || ''}`
+                );
+                base.singleSelector = (base.selectorCandidates || []).length <= 1;
+                return base;
+            }
+
+            base.found = !!(existing.found || incoming.found);
+            base.verified = !!(existing.verified || incoming.verified);
+            base.selector = existing.selector || incoming.selector;
+            base.selectorType = existing.selectorType || incoming.selectorType;
+            base.stabilityScore = Math.max(
+                Number(existing.stabilityScore || 0),
+                Number(incoming.stabilityScore || 0)
+            ) || existing.stabilityScore || incoming.stabilityScore;
+            base.state = { ...(existing.state || {}), ...(incoming.state || {}) };
+            base.attributes = { ...(existing.attributes || {}), ...(incoming.attributes || {}) };
+            if (base.textContent == null && incoming.textContent != null) {
+                base.textContent = incoming.textContent;
+            }
+
+            base.selectorCandidates = dedupeBy(
+                [...(existing.selectorCandidates || []), ...(incoming.selectorCandidates || [])],
+                c => `${c?.selector || ''}::${c?.type || ''}`
+            );
+            base.singleSelector = (base.selectorCandidates || []).length <= 1;
+
+            return base;
+        };
+
+        const ingestSelectorMapEntry = (entry) => {
+            const stepId = entry?.testStepId || `step-${selectorMapByStep.size + 1}`;
+            const current = selectorMapByStep.get(stepId) || {
+                testStepId: stepId,
+                elements: [],
+                assertionValues: [],
+                planCompleteness: 'partial',
+                blockedReason: null,
+            };
+
+            const elementByKey = new Map();
+            for (const el of current.elements || []) {
+                const key = `${el?.description || ''}::${el?.selector || ''}::${el?.name || ''}::${el?.role || ''}`;
+                elementByKey.set(key, el);
+            }
+
+            for (const el of entry?.elements || []) {
+                const key = `${el?.description || ''}::${el?.selector || ''}::${el?.name || ''}::${el?.role || ''}`;
+                elementByKey.set(key, mergeElement(elementByKey.get(key), el));
+            }
+
+            current.elements = Array.from(elementByKey.values());
+            current.assertionValues = dedupeBy(
+                [...(current.assertionValues || []), ...(entry?.assertionValues || [])],
+                a => `${a?.target || ''}::${a?.actualValue || ''}::${a?.extractionMethod || ''}`
+            );
+
+            const currentRank = completenessRank[current.planCompleteness] ?? 0;
+            const incomingRank = completenessRank[entry?.planCompleteness] ?? 0;
+            if (incomingRank > currentRank) {
+                current.planCompleteness = entry.planCompleteness;
+            }
+
+            if (current.planCompleteness === 'complete') {
+                current.blockedReason = null;
+            } else {
+                current.blockedReason = current.blockedReason || entry?.blockedReason || null;
+            }
+
+            selectorMapByStep.set(stepId, current);
+        };
+
+        for (const entry of merged.selectorMap || []) ingestSelectorMapEntry(entry);
+        for (const entry of interact.selectorMap || []) ingestSelectorMapEntry(entry);
+        merged.selectorMap = Array.from(selectorMapByStep.values());
+
+        merged.pageTransitions = dedupeBy(
+            [...(merged.pageTransitions || []), ...(interact.pageTransitions || [])],
+            t => `${t?.from || ''}::${t?.to || ''}::${t?.trigger || ''}`
+        );
+
+        merged.popupsEncountered = dedupeBy(
+            [...(merged.popupsEncountered || []), ...(interact.popupsEncountered || [])],
+            p => `${p?.type || ''}::${p?.selector || ''}::${p?.handling || ''}`
+        );
+
+        merged.riskObservations = dedupeBy(
+            [...(merged.riskObservations || []), ...(interact.riskObservations || [])],
+            r => `${r?.observation || ''}::${r?.severity || ''}`
+        );
+
+        const mergedElements = (merged.selectorMap || []).flatMap(m => m.elements || []);
+        const plannedFromStats = Math.max(
+            Number(navExploration?.statistics?.totalElementsPlanned || 0),
+            Number(interactExploration?.statistics?.totalElementsPlanned || 0),
+            mergedElements.length
+        );
+
+        const totalElementsFound = mergedElements.filter(e => e?.found).length;
+        const explicitMissing = mergedElements.filter(e => e && e.found === false).length;
+        const totalElementsMissing = Math.max(explicitMissing, Math.max(0, plannedFromStats - totalElementsFound));
+        const totalInteractions =
+            Number(navExploration?.statistics?.totalInteractions || 0) +
+            Number(interactExploration?.statistics?.totalInteractions || 0);
+        const totalSnapshots =
+            Number(navExploration?.statistics?.totalSnapshots || 0) +
+            Number(interactExploration?.statistics?.totalSnapshots || 0);
+        const coveragePercent = plannedFromStats > 0
+            ? Number(((totalElementsFound / plannedFromStats) * 100).toFixed(1))
+            : 0;
+
+        merged.statistics = {
+            totalElementsPlanned: plannedFromStats,
+            totalElementsFound,
+            totalElementsMissing,
+            totalInteractions,
+            totalSnapshots,
+            coveragePercent,
+        };
+
+        merged.explorationComplete = Boolean(navExploration?.explorationComplete || interactExploration?.explorationComplete);
+        merged.timestamp = new Date().toISOString();
+
+        return merged;
     }
 
     /**

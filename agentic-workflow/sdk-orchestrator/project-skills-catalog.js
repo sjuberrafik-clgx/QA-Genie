@@ -3,6 +3,17 @@ const path = require('path');
 
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const SKILLS_ROOT = path.join(PROJECT_ROOT, '.github', 'skills');
+const STUDIO_WORKSPACES_ROOT = path.join(PROJECT_ROOT, 'studio-workspaces');
+
+// Confidence tiers for skill routing
+const CONFIDENCE = {
+    HIGH: 'HIGH',     // score >= 15 — auto-activate, agent should read SKILL.md
+    MEDIUM: 'MEDIUM', // score 7–14 — likely relevant, mention in hint
+    LOW: 'LOW',       // score < 7  — suppress from injection
+};
+const HIGH_THRESHOLD = 15;
+const MEDIUM_THRESHOLD = 7;
+const MAX_SKILLS_PER_MESSAGE = 3;
 
 const STOP_WORDS = new Set([
     'a', 'an', 'and', 'are', 'as', 'at', 'be', 'before', 'but', 'by', 'for', 'from', 'how', 'if',
@@ -22,19 +33,39 @@ function normalizeText(value) {
 }
 
 function getCatalogSignature() {
-    if (!fs.existsSync(SKILLS_ROOT)) return 'missing';
-
-    const entries = fs.readdirSync(SKILLS_ROOT, { withFileTypes: true });
     const parts = [];
-    for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        const skillFilePath = path.join(SKILLS_ROOT, entry.name, 'SKILL.md');
-        if (!fs.existsSync(skillFilePath)) continue;
-        const stat = fs.statSync(skillFilePath);
-        parts.push(`${entry.name}:${stat.mtimeMs}`);
+
+    // Scan .github/skills/
+    if (fs.existsSync(SKILLS_ROOT)) {
+        const entries = fs.readdirSync(SKILLS_ROOT, { withFileTypes: true });
+        for (const entry of entries) {
+            if (!entry.isDirectory()) continue;
+            const skillFilePath = path.join(SKILLS_ROOT, entry.name, 'SKILL.md');
+            if (!fs.existsSync(skillFilePath)) continue;
+            const stat = fs.statSync(skillFilePath);
+            parts.push(`gh:${entry.name}:${stat.mtimeMs}`);
+        }
     }
 
-    return parts.sort().join('|');
+    // Scan studio-workspaces/*/skills/*/
+    if (fs.existsSync(STUDIO_WORKSPACES_ROOT)) {
+        const wsEntries = fs.readdirSync(STUDIO_WORKSPACES_ROOT, { withFileTypes: true });
+        for (const wsEntry of wsEntries) {
+            if (!wsEntry.isDirectory()) continue;
+            const skillsDir = path.join(STUDIO_WORKSPACES_ROOT, wsEntry.name, 'skills');
+            if (!fs.existsSync(skillsDir)) continue;
+            const skillEntries = fs.readdirSync(skillsDir, { withFileTypes: true });
+            for (const skillEntry of skillEntries) {
+                if (!skillEntry.isDirectory()) continue;
+                const skillFilePath = path.join(skillsDir, skillEntry.name, 'SKILL.md');
+                if (!fs.existsSync(skillFilePath)) continue;
+                const stat = fs.statSync(skillFilePath);
+                parts.push(`ws:${wsEntry.name}/${skillEntry.name}:${stat.mtimeMs}`);
+            }
+        }
+    }
+
+    return parts.sort().join('|') || 'empty';
 }
 
 function parseFrontmatter(raw) {
@@ -185,54 +216,115 @@ function loadProjectSkillsCatalog() {
     }
 
     const skills = [];
+
+    // Helper to build a skill entry from a SKILL.md path
+    function scanSkillDir(dirPath, folderName, source, sourceLabel) {
+        const skillFilePath = path.join(dirPath, 'SKILL.md');
+        if (!fs.existsSync(skillFilePath)) return;
+
+        // For studio skills, check manifest status — skip drafts (they're work-in-progress)
+        const manifestPath = path.join(dirPath, 'skill.json');
+        if (source === 'studio' && fs.existsSync(manifestPath)) {
+            try {
+                const statusCheck = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+                if (statusCheck.status && statusCheck.status !== 'published') return;
+            } catch { /* proceed if manifest unreadable */ }
+        }
+
+        const raw = fs.readFileSync(skillFilePath, 'utf-8');
+        const { attributes, body } = parseFrontmatter(raw);
+        const name = String(attributes.name || folderName).trim();
+        const description = String(attributes.description || '').trim();
+        const keywords = extractKeywords(body, description);
+        const useCasePhrases = extractUseCasePhrases(body);
+        const aliasPhrases = buildAliasPhrases(name, folderName);
+        const explicitKeywordEntries = buildPhraseEntries(keywords);
+        const useCaseEntries = buildPhraseEntries(useCasePhrases);
+        const aliasEntries = buildPhraseEntries(aliasPhrases);
+        const triggerTokens = collectTriggerTokens(
+            name,
+            folderName,
+            description,
+            keywords.join(' '),
+            useCasePhrases.join(' '),
+        );
+
+        // Load skill.json manifest for studio skills (agent bindings, allowed tools)
+        let agentBindings = [];
+        let manifestKeywords = [];
+        let alwaysActiveForBoundAgents = false;
+        if (fs.existsSync(manifestPath)) {
+            try {
+                const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+                agentBindings = Array.isArray(manifest.agentBindings) ? manifest.agentBindings : [];
+                manifestKeywords = Array.isArray(manifest.keywords) ? manifest.keywords : [];
+                alwaysActiveForBoundAgents = !!manifest.alwaysActiveForBoundAgents;
+            } catch { /* ignore malformed manifests */ }
+        }
+
+        // Merge manifest keywords into the keyword set
+        if (manifestKeywords.length > 0) {
+            for (const kw of manifestKeywords) {
+                const cleaned = String(kw).trim();
+                if (cleaned && !keywords.includes(cleaned)) keywords.push(cleaned);
+            }
+        }
+
+        skills.push({
+            id: folderName,
+            folderName,
+            name,
+            description,
+            source,
+            sourceLabel,
+            skillFilePath,
+            relativeSkillFilePath: path.relative(PROJECT_ROOT, skillFilePath).replace(/\\/g, '/'),
+            keywords,
+            normalizedKeywords: keywords.map(normalizeText).filter(Boolean),
+            explicitKeywordEntries: buildPhraseEntries(keywords),
+            useCasePhrases,
+            useCaseEntries,
+            aliasPhrases,
+            aliasEntries,
+            triggerTokens,
+            agentBindings,
+            alwaysActiveForBoundAgents,
+            body,
+        });
+    }
+
+    // Scan .github/skills/
     if (fs.existsSync(SKILLS_ROOT)) {
         const entries = fs.readdirSync(SKILLS_ROOT, { withFileTypes: true });
         for (const entry of entries) {
             if (!entry.isDirectory()) continue;
+            scanSkillDir(path.join(SKILLS_ROOT, entry.name), entry.name, 'project', '.github/skills');
+        }
+    }
 
-            const skillFilePath = path.join(SKILLS_ROOT, entry.name, 'SKILL.md');
-            if (!fs.existsSync(skillFilePath)) continue;
-
-            const raw = fs.readFileSync(skillFilePath, 'utf-8');
-            const { attributes, body } = parseFrontmatter(raw);
-            const name = String(attributes.name || entry.name).trim();
-            const description = String(attributes.description || '').trim();
-            const keywords = extractKeywords(body, description);
-            const useCasePhrases = extractUseCasePhrases(body);
-            const aliasPhrases = buildAliasPhrases(name, entry.name);
-            const explicitKeywordEntries = buildPhraseEntries(keywords);
-            const useCaseEntries = buildPhraseEntries(useCasePhrases);
-            const aliasEntries = buildPhraseEntries(aliasPhrases);
-            const triggerTokens = collectTriggerTokens(
-                name,
-                entry.name,
-                description,
-                keywords.join(' '),
-                useCasePhrases.join(' '),
-            );
-
-            skills.push({
-                id: entry.name,
-                folderName: entry.name,
-                name,
-                description,
-                skillFilePath,
-                relativeSkillFilePath: path.relative(PROJECT_ROOT, skillFilePath).replace(/\\/g, '/'),
-                keywords,
-                normalizedKeywords: keywords.map(normalizeText).filter(Boolean),
-                explicitKeywordEntries,
-                useCasePhrases,
-                useCaseEntries,
-                aliasPhrases,
-                aliasEntries,
-                triggerTokens,
-                body,
-            });
+    // Scan studio-workspaces/*/skills/*/
+    if (fs.existsSync(STUDIO_WORKSPACES_ROOT)) {
+        const wsEntries = fs.readdirSync(STUDIO_WORKSPACES_ROOT, { withFileTypes: true });
+        for (const wsEntry of wsEntries) {
+            if (!wsEntry.isDirectory()) continue;
+            const skillsDir = path.join(STUDIO_WORKSPACES_ROOT, wsEntry.name, 'skills');
+            if (!fs.existsSync(skillsDir)) continue;
+            const skillEntries = fs.readdirSync(skillsDir, { withFileTypes: true });
+            for (const skillEntry of skillEntries) {
+                if (!skillEntry.isDirectory()) continue;
+                scanSkillDir(
+                    path.join(skillsDir, skillEntry.name),
+                    skillEntry.name,
+                    'studio',
+                    `studio-workspaces/${wsEntry.name}`,
+                );
+            }
         }
     }
 
     cachedCatalog = {
         skillsRoot: SKILLS_ROOT,
+        studioWorkspacesRoot: STUDIO_WORKSPACES_ROOT,
         skills: skills.sort((left, right) => left.folderName.localeCompare(right.folderName)),
     };
     cachedSignature = signature;
@@ -256,7 +348,26 @@ function buildProjectSkillActivationGuide(catalog = loadProjectSkillsCatalog()) 
     return lines.join('\n');
 }
 
-function detectProjectSkillsForMessage(message, catalog = loadProjectSkillsCatalog()) {
+/**
+ * Detect which project skills are relevant for a user message.
+ *
+ * @param {string} message - The user's raw message
+ * @param {Object} [options]
+ * @param {string} [options.activeAgent] - Current agent name (for agent-binding boost)
+ * @param {Object} [options.catalog] - Pre-loaded catalog (default: load fresh)
+ * @returns {Array<Object>} Matched skills with score, confidence, and match details
+ */
+function detectProjectSkillsForMessage(message, options = {}) {
+    // Support legacy signature: detectProjectSkillsForMessage(message, catalog)
+    let catalog, activeAgent;
+    if (options && options.skills && Array.isArray(options.skills)) {
+        catalog = options;
+        activeAgent = null;
+    } else {
+        catalog = options.catalog || loadProjectSkillsCatalog();
+        activeAgent = options.activeAgent || null;
+    }
+
     const normalizedMessage = normalizeText(message);
     if (!normalizedMessage) return [];
 
@@ -267,6 +378,25 @@ function detectProjectSkillsForMessage(message, catalog = loadProjectSkillsCatal
 
     return catalog.skills
         .map(skill => {
+            // Always-active binding: if skill is flagged and active agent matches, force HIGH confidence
+            // This bypasses keyword matching entirely — the skill activates on every message for its bound agent
+            const isAgentBound = activeAgent
+                && Array.isArray(skill.agentBindings) && skill.agentBindings.length > 0
+                && skill.agentBindings.some(binding => binding.toLowerCase() === activeAgent.toLowerCase());
+
+            if (skill.alwaysActiveForBoundAgents && isAgentBound) {
+                return {
+                    ...skill,
+                    matchedKeywords: [],
+                    matchedPhrases: [],
+                    matchedAliases: [],
+                    matchedTokens: [],
+                    score: HIGH_THRESHOLD,
+                    confidence: CONFIDENCE.HIGH,
+                    alwaysActive: true,
+                };
+            }
+
             const matchedKeywords = skill.explicitKeywordEntries
                 .filter(hasPhraseMatch)
                 .map(entry => entry.original);
@@ -293,9 +423,19 @@ function detectProjectSkillsForMessage(message, catalog = loadProjectSkillsCatal
             }
             score += Math.min(matchedTokens.length, 6);
 
+            // Agent-binding boost: if this skill is bound to the active agent, add +10
+            if (isAgentBound) {
+                score += 10;
+            }
+
             const hasStrongPhraseMatch = matchedKeywords.length > 0 || matchedPhrases.length > 0 || matchedAliases.length > 0;
-            const meetsThreshold = hasStrongPhraseMatch || matchedTokens.length >= 2 || score >= 7;
+            const meetsThreshold = hasStrongPhraseMatch || matchedTokens.length >= 2 || score >= MEDIUM_THRESHOLD;
             if (!meetsThreshold) return null;
+
+            // Assign confidence tier
+            const confidence = score >= HIGH_THRESHOLD ? CONFIDENCE.HIGH
+                : score >= MEDIUM_THRESHOLD ? CONFIDENCE.MEDIUM
+                    : CONFIDENCE.LOW;
 
             return {
                 ...skill,
@@ -304,40 +444,65 @@ function detectProjectSkillsForMessage(message, catalog = loadProjectSkillsCatal
                 matchedAliases,
                 matchedTokens,
                 score,
+                confidence,
             };
         })
         .filter(Boolean)
+        .filter(match => match.confidence !== CONFIDENCE.LOW) // Suppress LOW confidence
         .sort((left, right) => {
             if (right.score !== left.score) return right.score - left.score;
             if (right.matchedKeywords.length !== left.matchedKeywords.length) return right.matchedKeywords.length - left.matchedKeywords.length;
             return right.matchedTokens.length - left.matchedTokens.length;
-        });
+        })
+        .slice(0, MAX_SKILLS_PER_MESSAGE); // Cap to prevent context bloat
 }
 
-function buildProjectSkillRoutingHint(message, catalog = loadProjectSkillsCatalog()) {
-    const matches = detectProjectSkillsForMessage(message, catalog);
-    if (!matches.length) return '';
+/**
+ * Build a routing hint block for injection into agent context.
+ * Only HIGH and MEDIUM confidence skills are included.
+ *
+ * @param {string} message - User message
+ * @param {Object} [options]
+ * @param {string} [options.activeAgent]
+ * @param {Object} [options.catalog]
+ * @returns {{ hint: string, matches: Array, activatedSkills: Array<string> }}
+ */
+function buildProjectSkillRoutingHint(message, options = {}) {
+    const matches = detectProjectSkillsForMessage(message, options);
+    if (!matches.length) return { hint: '', matches: [], activatedSkills: [] };
+
+    const activatedSkills = matches
+        .filter(m => m.confidence === CONFIDENCE.HIGH)
+        .map(m => m.name);
 
     const lines = [
         '[INTERNAL PROJECT SKILLS HINT]',
-        'The user message matches folder-based project skills under `.github/skills/<skill>/SKILL.md`.',
+        'The user message matches project skills. Read the matched SKILL.md files for guidance before responding.',
+        '',
     ];
 
     for (const match of matches) {
-        const reasons = [
-            match.matchedKeywords.length > 0 ? `keywords: ${match.matchedKeywords.join(', ')}` : '',
-            match.matchedPhrases.length > 0 ? `use-cases: ${match.matchedPhrases.join(', ')}` : '',
-            match.matchedTokens.length > 0 ? `tokens: ${match.matchedTokens.join(', ')}` : '',
-        ].filter(Boolean).join(' | ');
-        lines.push(`- Skill match: ${match.name} (folder: ${match.folderName}, score: ${match.score}${reasons ? `, ${reasons}` : ''})`);
+        const confidenceTag = match.confidence === CONFIDENCE.HIGH ? '🔴 AUTO-ACTIVATE' : '🟡 RELEVANT';
+        const reasons = match.alwaysActive
+            ? 'agent-bound (always active for this agent)'
+            : [
+                match.matchedKeywords.length > 0 ? `keywords: ${match.matchedKeywords.join(', ')}` : '',
+                match.matchedPhrases.length > 0 ? `use-cases: ${match.matchedPhrases.join(', ')}` : '',
+                match.matchedTokens.length > 0 ? `tokens: ${match.matchedTokens.slice(0, 5).join(', ')}` : '',
+            ].filter(Boolean).join(' | ');
+        lines.push(`- [${confidenceTag}] **${match.name}** (score: ${match.score}, file: ${match.relativeSkillFilePath})`);
+        if (reasons) lines.push(`  Matched: ${reasons}`);
+        if (match.confidence === CONFIDENCE.HIGH) {
+            lines.push(`  → Read \`${match.relativeSkillFilePath}\` NOW and follow its instructions.`);
+        }
     }
 
-    const pptSkill = matches.find(match => match.folderName === 'ppt');
-    if (pptSkill) {
-        lines.push('- Use the PPT skill guidance from `.github/skills/ppt/SKILL.md` and its local references before generating the deck.');
+    if (matches.length > 1) {
+        lines.push('');
+        lines.push('Multiple skills matched. Apply all HIGH-confidence skills. For MEDIUM, mention availability to the user.');
     }
 
-    return lines.join('\n');
+    return { hint: lines.join('\n'), matches, activatedSkills };
 }
 
 module.exports = {
@@ -345,4 +510,8 @@ module.exports = {
     buildProjectSkillRoutingHint,
     detectProjectSkillsForMessage,
     loadProjectSkillsCatalog,
+    CONFIDENCE,
+    HIGH_THRESHOLD,
+    MEDIUM_THRESHOLD,
+    MAX_SKILLS_PER_MESSAGE,
 };

@@ -54,6 +54,8 @@ When you need to READ existing Jira ticket details:
 - **INSPECT** editable fields and workflow options using `get_jira_ticket_capabilities`
 - **SEARCH ASSIGNABLE USERS** using `search_jira_users` before assigning work to a named user like Monica or Khushboo
 - **REMOVE ISSUE LINKS** using `remove_jira_issue_link` when the user explicitly asks to unlink tickets or remove an associated link
+- **DELETE A COMMENT** using `delete_jira_comment` — the shared Jira approval component prompts the user before the delete is sent. Use `get_jira_ticket_comments` first if the commentId is unknown.
+- **EDIT A COMMENT** using `edit_jira_comment` — the approval component previews old and new text before writing. Use `get_jira_ticket_comments` first if the commentId is unknown.
 - **TRANSITION** Jira ticket status using `transition_jira_ticket`
 - **LOG WORK** using `log_jira_work` — generic "Time Tracking" or "add hours" requests map here
 - **UPDATE ESTIMATES** using `update_jira_estimates` only when the user explicitly asks to change originalEstimate or remainingEstimate
@@ -258,6 +260,28 @@ When BugGenie creates a bug ticket, it may suggest using TaskGenie to create a l
 
 **From TestGenie:**
 TestGenie can suggest using TaskGenie after generating test cases, to create a linked Testing task in Jira.
+
+---
+
+## Tool Delegation (Cross-Agent)
+
+You have access to two meta-tools that let you invoke tools from other agents without switching agents:
+
+| Meta-Tool | Purpose |
+|---|---|
+| `list_delegatable_tools` | Discover tools available via delegation that you don't natively have |
+| `cross_agent_delegate` | Invoke a specific tool from another agent's tool set |
+
+**When to use delegation:**
+- When you need evidence/video tools → `attach_session_evidence_to_jira` (from BugGenie)
+- When you need test result analysis → `get_test_results`, `analyze_test_failure` (from BugGenie/ScriptGenerator)
+- When any operation fails because a tool is missing from your set
+
+**Workflow:**
+1. Realize you need a capability you don't have
+2. Call `list_delegatable_tools` to see what's available
+3. Call `cross_agent_delegate({ toolName: 'tool_name', parameters: { ... } })` to execute it
+4. The delegated tool runs with full approval flow — destructive operations still require user confirmation
 
 ---
 

@@ -1,4 +1,5 @@
 import './globals.css';
+import '@xterm/xterm/css/xterm.css';
 import { Suspense } from 'react';
 import { Plus_Jakarta_Sans, Space_Grotesk } from 'next/font/google';
 import Sidebar from '@/components/Sidebar';
@@ -32,7 +33,7 @@ export const metadata = {
             {
                 rel: 'mask-icon',
                 url: '/icon.svg',
-                color: '#7c3aed',
+                color: '#1c8090',
             },
         ],
     },
@@ -44,7 +45,7 @@ export default function RootLayout({ children }) {
             <body className="min-h-screen bg-surface-50">
                 <div className="flex min-h-screen">
                     <Sidebar />
-                    <div className="min-h-screen flex-1 overflow-x-hidden transition-[margin] duration-300 ml-[84px] sm:ml-[92px] 2xl:ml-[260px]">
+                    <div className="min-h-screen flex-1 overflow-x-hidden transition-[margin] duration-300 ml-[var(--shell-sidebar-mobile)] sm:ml-[var(--shell-sidebar-tablet)] 2xl:ml-[var(--shell-sidebar-desktop)]">
                         <Suspense fallback={null}>
                             <RouteLoadingBar />
                         </Suspense>

@@ -7,8 +7,11 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import CodeBlock from '@/components/CodeBlock';
+import ChatTable from '@/components/ChatTable';
+import { tryRenderAlert } from '@/components/ChatAlert';
 import { FileAttachmentCard } from '@/components/FilePreview';
 import { SparkleIcon, UserIcon, ClipboardIcon, CheckIcon, XIcon } from '@/components/Icons';
+import { normalizeSemanticCallouts } from '@/lib/semantic-highlighting';
 
 // Lazy-load MermaidBlock (only imported when a mermaid code fence is encountered)
 const MermaidBlock = lazy(() => import('@/components/MermaidBlock'));
@@ -18,6 +21,7 @@ export default memo(ChatMessage);
 function ChatMessage({ message, isStreaming = false }) {
     const { role, content, timestamp, attachments } = message;
     const isUser = role === 'user';
+    const renderedContent = isUser ? (content || '') : normalizeSemanticCallouts(content || '');
     const [copied, setCopied] = useState(false);
     const [expandedImage, setExpandedImage] = useState(null);
     const imageAttachments = Array.isArray(attachments)
@@ -137,6 +141,16 @@ function ChatMessage({ message, isStreaming = false }) {
                                         // Inline code
                                         return <code className={className} {...props}>{children}</code>;
                                     },
+                                    // Wrap tables in a horizontally-scrollable container with toolbar + CSV copy
+                                    table({ children, ...props }) {
+                                        return <ChatTable {...props}>{children}</ChatTable>;
+                                    },
+                                    // GitHub-style alerts via `> [!NOTE|TIP|IMPORTANT|WARNING|CAUTION|SUCCESS]`
+                                    blockquote({ children, ...props }) {
+                                        const alert = tryRenderAlert(children);
+                                        if (alert) return alert;
+                                        return <blockquote {...props}>{children}</blockquote>;
+                                    },
                                     // Render AI-generated markdown images
                                     img({ src, alt, ...props }) {
                                         return (
@@ -150,7 +164,7 @@ function ChatMessage({ message, isStreaming = false }) {
                                         );
                                     },
                                 }}
-                            >{content || ''}</ReactMarkdown>
+                            >{renderedContent}</ReactMarkdown>
                         </div>
                     )}
 
@@ -187,7 +201,7 @@ function ChatMessage({ message, isStreaming = false }) {
                     {timestamp && (
                         <span className="text-[10px] text-surface-400">{formatTime(timestamp)}</span>
                     )}
-                    {!isUser && content && !isStreaming && (
+                    {!isUser && renderedContent && !isStreaming && (
                         <button
                             onClick={handleCopy}
                             className="opacity-0 group-hover:opacity-100 text-surface-400 hover:text-brand-500 transition-all p-0.5"

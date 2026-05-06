@@ -44,7 +44,7 @@ export default function Sidebar() {
     const pathname = usePathname();
 
     return (
-        <aside className="fixed left-0 top-0 z-40 flex h-full w-[84px] flex-col glass-sidebar sm:w-[92px] 2xl:w-[260px]">
+        <aside className="fixed left-0 top-0 z-40 flex h-full w-[var(--shell-sidebar-mobile)] flex-col glass-sidebar sm:w-[var(--shell-sidebar-tablet)] 2xl:w-[var(--shell-sidebar-desktop)]">
             {/* Logo */}
             <div className="border-b border-surface-200 px-3 py-4 sm:px-4 2xl:px-5 2xl:py-5">
                 <Link href="/" className="block rounded-[22px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/40">

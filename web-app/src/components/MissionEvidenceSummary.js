@@ -43,6 +43,63 @@ function shortPath(value) {
     return parts.slice(-2).join('/');
 }
 
+function getObservationTone(observation) {
+    const type = String(observation?.type || '').toLowerCase();
+    const severity = String(observation?.severity || '').toLowerCase();
+
+    if (/(observation|issue|blocker|error|failure)/.test(type) || ['critical', 'error', 'danger', 'high', 'failed'].includes(severity)) {
+        return 'danger';
+    }
+
+    if (/(risk|warning|concern)/.test(type) || ['warning', 'warn', 'medium'].includes(severity)) {
+        return 'warning';
+    }
+
+    if (['success', 'pass', 'ok'].includes(severity)) {
+        return 'success';
+    }
+
+    return 'neutral';
+}
+
+function getObservationToneClasses(observation) {
+    const tone = getObservationTone(observation);
+
+    if (tone === 'danger') {
+        return {
+            chip: 'state-chip-danger',
+            panel: 'border-red-200 bg-red-50/40',
+            text: 'text-red-900',
+            meta: 'text-red-500',
+        };
+    }
+
+    if (tone === 'warning') {
+        return {
+            chip: 'state-chip-warning',
+            panel: 'border-amber-200 bg-amber-50/40',
+            text: 'text-amber-900',
+            meta: 'text-amber-500',
+        };
+    }
+
+    if (tone === 'success') {
+        return {
+            chip: 'state-chip-success',
+            panel: 'border-accent-200 bg-accent-50/40',
+            text: 'text-accent-900',
+            meta: 'text-accent-500',
+        };
+    }
+
+    return {
+        chip: 'state-chip-neutral',
+        panel: '',
+        text: 'text-surface-700',
+        meta: 'text-surface-400',
+    };
+}
+
 function getScenario(summary, authState) {
     return (summary?.scenarios || []).find((scenario) => scenario.authState === authState) || null;
 }
@@ -53,7 +110,7 @@ function getArtifactKey(artifact) {
 
 function StatCard({ label, value, detail, Icon, accent }) {
     return (
-        <div className="rounded-2xl border border-surface-200/80 bg-white/90 px-4 py-4 shadow-sm">
+        <div className="surface-stat-card px-4 py-4">
             <div className="flex items-start justify-between gap-3">
                 <div>
                     <p className="type-meta-label">{label}</p>
@@ -75,7 +132,7 @@ function ActionButton({ children, onClick, disabled = false, title }) {
             onClick={onClick}
             disabled={disabled}
             title={title}
-            className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] transition-colors ${disabled
+            className={`motion-fast-colors inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] ${disabled
                 ? 'cursor-not-allowed border-surface-200 bg-surface-100 text-surface-400'
                 : 'border-surface-200 bg-white text-surface-600 hover:border-brand-200 hover:bg-brand-50 hover:text-brand-700'
                 }`}
@@ -90,10 +147,10 @@ function ArtifactCard({ artifact, copiedArtifactKey, onCopyPath, onOpenArtifact,
     const artifactKey = getArtifactKey(artifact);
 
     return (
-        <div className="rounded-xl border border-surface-200/70 bg-surface-50 px-3 py-2.5">
+        <div className="surface-subpanel px-3 py-2.5">
             <div className="flex items-center justify-between gap-3">
-                <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-surface-500">{formatLabel(artifact.kind)}</span>
-                <span className="text-[10px] text-surface-400">{available ? 'available' : 'missing'}</span>
+                <span className="type-meta-label text-surface-500">{formatLabel(artifact.kind)}</span>
+                <span className={`state-chip text-[9px] ${available ? 'state-chip-success' : 'state-chip-neutral'}`}>{available ? 'available' : 'missing'}</span>
             </div>
             <p className="mt-1.5 break-all text-sm font-medium text-surface-700">{shortPath(artifact.path)}</p>
             <div className="mt-3 flex flex-wrap gap-2">
@@ -125,7 +182,7 @@ function ArtifactCard({ artifact, copiedArtifactKey, onCopyPath, onOpenArtifact,
                     <a
                         href={apiClient.getPipelineArtifactUrl(artifact.path, { download: true })}
                         download
-                        className="inline-flex items-center gap-1 rounded-full border border-surface-200 bg-white px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-surface-600 transition-colors hover:border-brand-200 hover:bg-brand-50 hover:text-brand-700"
+                        className="motion-fast-colors inline-flex items-center gap-1 rounded-full border border-surface-200 bg-white px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-surface-600 hover:border-brand-200 hover:bg-brand-50 hover:text-brand-700"
                         title="Download artifact"
                     >
                         <DocumentIcon className="h-3.5 w-3.5" />
@@ -142,7 +199,7 @@ function ScenarioPanel({ title, Icon, scenario }) {
 
     if (!scenario) {
         return (
-            <div className="rounded-[26px] border border-dashed border-surface-300 bg-white/70 p-5">
+            <div className="surface-panel border-dashed border-surface-300 bg-white/70 p-5">
                 <div className="flex items-center gap-2 text-surface-700">
                     <Icon className="h-4 w-4" />
                     <h3 className="text-sm font-semibold tracking-[-0.015em]">{title}</h3>
@@ -153,10 +210,10 @@ function ScenarioPanel({ title, Icon, scenario }) {
     }
 
     const statusTone = scenario.success === true
-        ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
+        ? 'state-chip state-chip-success'
         : scenario.success === false
-            ? 'bg-red-50 text-red-700 ring-1 ring-red-200'
-            : 'bg-surface-100 text-surface-600 ring-1 ring-surface-200';
+            ? 'state-chip state-chip-danger'
+            : 'state-chip state-chip-neutral';
 
     const handleCopyPath = async (artifactPath, artifactKey) => {
         if (!artifactPath) return;
@@ -185,7 +242,7 @@ function ScenarioPanel({ title, Icon, scenario }) {
     };
 
     return (
-        <div className="rounded-[26px] border border-surface-200/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.94))] p-5 shadow-sm">
+        <div className="surface-panel bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.94))] p-5">
             <div className="flex items-start justify-between gap-4">
                 <div>
                     <div className="flex items-center gap-2 text-surface-800">
@@ -195,25 +252,25 @@ function ScenarioPanel({ title, Icon, scenario }) {
                     <p className="mt-1 text-lg font-semibold tracking-[-0.03em] text-surface-900">{scenario.name || formatLabel(scenario.authState)}</p>
                     <p className="mt-1 text-xs text-surface-500">{formatLabel(scenario.authState)} branch</p>
                 </div>
-                <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.14em] ${statusTone}`}>
+                <span className={statusTone}>
                     {scenario.status || 'unknown'}
                 </span>
             </div>
 
             <div className="mt-5 grid grid-cols-2 gap-3">
-                <div className="rounded-2xl border border-surface-200/70 bg-white px-3 py-3">
+                <div className="surface-subpanel px-3 py-3">
                     <p className="type-meta-label">Artifacts</p>
                     <p className="mt-1 text-lg font-semibold text-surface-900">{formatCount(scenario.summary?.totalArtifacts)}</p>
                 </div>
-                <div className="rounded-2xl border border-surface-200/70 bg-white px-3 py-3">
+                <div className="surface-subpanel px-3 py-3">
                     <p className="type-meta-label">Screenshots</p>
                     <p className="mt-1 text-lg font-semibold text-surface-900">{formatCount(scenario.summary?.screenshots)}</p>
                 </div>
-                <div className="rounded-2xl border border-surface-200/70 bg-white px-3 py-3">
+                <div className="surface-subpanel px-3 py-3">
                     <p className="type-meta-label">Failed Tests</p>
                     <p className="mt-1 text-lg font-semibold text-surface-900">{formatCount(scenario.summary?.failedTests)}</p>
                 </div>
-                <div className="rounded-2xl border border-surface-200/70 bg-white px-3 py-3">
+                <div className="surface-subpanel px-3 py-3">
                     <p className="type-meta-label">Observations</p>
                     <p className="mt-1 text-lg font-semibold text-surface-900">{formatCount(scenario.summary?.observations)}</p>
                 </div>
@@ -238,26 +295,32 @@ function ScenarioPanel({ title, Icon, scenario }) {
                 </div>
             </div>
 
-            <div className="mt-5 rounded-2xl border border-surface-200/70 bg-white px-4 py-4">
+            <div className="surface-subpanel mt-5 px-4 py-4">
                 <p className="type-meta-label">Latest Observations</p>
                 {(scenario.observations || []).length === 0 ? (
                     <p className="mt-2 text-sm text-surface-500">No observations recorded for this branch.</p>
                 ) : (
                     <div className="mt-3 space-y-2">
-                        {scenario.observations.slice(0, 3).map((observation) => (
-                            <div key={observation.id || `${observation.timestamp}-${observation.message}`} className="rounded-xl border border-surface-200/70 bg-surface-50 px-3 py-2.5">
-                                <div className="flex items-center justify-between gap-3">
-                                    <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-surface-500">{formatLabel(observation.type)}</span>
-                                    <span className="text-[10px] text-surface-400">{formatDate(observation.timestamp)}</span>
+                        {scenario.observations.slice(0, 3).map((observation) => {
+                            const tone = getObservationToneClasses(observation);
+                            return (
+                                <div key={observation.id || `${observation.timestamp}-${observation.message}`} className={`surface-subpanel px-3 py-2.5 ${tone.panel}`}>
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <span className={`state-chip text-[9px] ${tone.chip}`}>{formatLabel(observation.type)}</span>
+                                            {observation.severity ? <span className={`state-chip text-[9px] ${tone.chip}`}>{formatLabel(observation.severity)}</span> : null}
+                                        </div>
+                                        <span className={`text-[10px] ${tone.meta}`}>{formatDate(observation.timestamp)}</span>
+                                    </div>
+                                    <p className={`mt-1.5 text-sm font-medium ${tone.text}`}>{observation.message || 'Observation recorded'}</p>
                                 </div>
-                                <p className="mt-1.5 text-sm font-medium text-surface-700">{observation.message || 'Observation recorded'}</p>
-                            </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 )}
             </div>
 
-            <div className="mt-5 rounded-2xl border border-surface-200/70 bg-white px-4 py-4">
+            <div className="surface-subpanel mt-5 px-4 py-4">
                 <p className="type-meta-label">Key Evidence Files</p>
                 {(scenario.downloads || []).length === 0 ? (
                     <p className="mt-2 text-sm text-surface-500">No downloadable artifacts recorded for this branch.</p>
@@ -319,7 +382,7 @@ export default function MissionEvidenceSummary({
     };
 
     return (
-        <div className="glass-card rounded-2xl p-6">
+        <div className="surface-panel p-6">
             <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                 <div>
                     <div className="flex items-center gap-2.5">
@@ -341,9 +404,9 @@ export default function MissionEvidenceSummary({
                                 key={run.runId}
                                 type="button"
                                 onClick={() => onSelectRun?.(run.runId)}
-                                className={`rounded-xl px-3 py-2 text-left transition-all duration-150 ${active
-                                    ? 'bg-brand-600 text-white shadow-sm'
-                                    : 'border border-surface-200 bg-white text-surface-700 hover:border-brand-200 hover:bg-brand-50'
+                                className={`motion-lift motion-fast-colors rounded-xl border px-3 py-2 text-left ${active
+                                    ? 'border-brand-600 bg-brand-600 text-white shadow-sm'
+                                    : 'border-surface-200 bg-white text-surface-700 hover:border-brand-200 hover:bg-brand-50'
                                     }`}
                             >
                                 <p className="text-[11px] font-bold uppercase tracking-[0.14em]">{run.ticketId}</p>
@@ -403,7 +466,7 @@ export default function MissionEvidenceSummary({
                         />
                     </div>
 
-                    <div className="rounded-[26px] border border-surface-200/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.94))] p-5 shadow-sm">
+                    <div className="surface-panel bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.94))] p-5">
                         <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
                             <div>
                                 <p className="type-meta-label">Mission Overview</p>
@@ -436,28 +499,31 @@ export default function MissionEvidenceSummary({
                     </div>
 
                     <div className="grid grid-cols-1 gap-5 xl:grid-cols-[1.1fr_0.9fr]">
-                        <div className="rounded-[26px] border border-surface-200/80 bg-white/92 p-5 shadow-sm">
+                        <div className="surface-panel bg-white/92 p-5">
                             <p className="type-meta-label">Latest Mission Observations</p>
                             {(summary.latestObservations || []).length === 0 ? (
                                 <p className="mt-3 text-sm text-surface-500">No mission-level observations were recorded.</p>
                             ) : (
                                 <div className="mt-4 space-y-3">
-                                    {summary.latestObservations.slice(0, 6).map((observation) => (
-                                        <div key={observation.id || `${observation.timestamp}-${observation.message}`} className="rounded-2xl border border-surface-200/70 bg-surface-50 px-4 py-3">
-                                            <div className="flex flex-wrap items-center gap-2 text-[10px] font-bold uppercase tracking-[0.12em] text-surface-500">
-                                                <span>{formatLabel(observation.severity)}</span>
-                                                <span>{formatLabel(observation.type)}</span>
-                                                {observation.scenarioId ? <span>{formatLabel(observation.scenarioId)}</span> : null}
+                                    {summary.latestObservations.slice(0, 6).map((observation) => {
+                                        const tone = getObservationToneClasses(observation);
+                                        return (
+                                            <div key={observation.id || `${observation.timestamp}-${observation.message}`} className={`surface-subpanel px-4 py-3 ${tone.panel}`}>
+                                                <div className="flex flex-wrap items-center gap-2">
+                                                    {observation.severity ? <span className={`state-chip text-[9px] ${tone.chip}`}>{formatLabel(observation.severity)}</span> : null}
+                                                    <span className={`state-chip text-[9px] ${tone.chip}`}>{formatLabel(observation.type)}</span>
+                                                    {observation.scenarioId ? <span className="state-chip state-chip-neutral text-[9px]">{formatLabel(observation.scenarioId)}</span> : null}
+                                                </div>
+                                                <p className={`mt-2 text-sm font-medium ${tone.text}`}>{observation.message || 'Observation recorded'}</p>
+                                                <p className={`mt-1 text-xs ${tone.meta}`}>{formatDate(observation.timestamp)}</p>
                                             </div>
-                                            <p className="mt-2 text-sm font-medium text-surface-700">{observation.message || 'Observation recorded'}</p>
-                                            <p className="mt-1 text-xs text-surface-400">{formatDate(observation.timestamp)}</p>
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             )}
                         </div>
 
-                        <div className="rounded-[26px] border border-surface-200/80 bg-white/92 p-5 shadow-sm">
+                        <div className="surface-panel bg-white/92 p-5">
                             <p className="type-meta-label">Evidence Files</p>
                             {(summary.downloads || []).length === 0 ? (
                                 <p className="mt-3 text-sm text-surface-500">No mission evidence files are available yet.</p>

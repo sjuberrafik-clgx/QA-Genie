@@ -345,7 +345,7 @@ describe('KBConnector — Orchestration', () => {
             intentDetection: { enabled: false },
         });
         await connector.initialize();
-        const context = await connector.buildKBContext('some query');
+        const context = await connector.buildKBContext('testgenie', 'some query');
         assertEqual(context, '');
     });
 
@@ -367,9 +367,22 @@ describe('KBConnector — Orchestration', () => {
             }]);
         }
 
-        const context = await connector.buildKBContext('test', { maxChars: 100 });
+        const context = await connector.buildKBContext('testgenie', 'test', { maxChars: 100 });
         // Context should be truncated to budget
         assert(context.length <= 200, `Context too long: ${context.length}`); // some overhead for headers
+    });
+
+    it('should support legacy single-query buildKBContext calls', async () => {
+        const connector = new KnowledgeBaseConnector({
+            enabled: true,
+            providers: [],
+            cache: { enabled: true, ttlMinutes: 5, maxEntries: 10 },
+            intentDetection: { enabled: false },
+        });
+        await connector.initialize();
+
+        const context = await connector.buildKBContext('legacy query', { maxChars: 100 });
+        assertEqual(context, '');
     });
 });
 

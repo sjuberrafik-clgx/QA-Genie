@@ -8,12 +8,41 @@ import BouncingLoader from '@/components/BouncingLoader';
 import PageHeader from '@/components/PageHeader';
 import RobotMascotLogo from '@/components/RobotMascotLogo';
 import { formatDate } from '@/lib/report-utils';
-import { ClockIcon, SearchIcon, ConversationIcon, TrashIcon, XIcon, LockIcon } from '@/components/Icons';
+import { ClockIcon, SearchIcon, ConversationIcon, TrashIcon, XIcon, LockIcon, ChevronDownIcon } from '@/components/Icons';
 import useResetScrollOnRouteChange from '@/hooks/useResetScrollOnRouteChange';
 
 function getSessionDisplayLabel(session) {
     if (session?.title?.trim()) return session.title.trim();
     return session?.sessionId ? `Chat ${session.sessionId.substring(0, 8)}` : 'Chat session';
+}
+
+function getDateBucket(dateString) {
+    if (!dateString) return 'Earlier';
+    const d = new Date(dateString);
+    if (Number.isNaN(d.getTime())) return 'Earlier';
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const ts = d.getTime();
+    const dayMs = 86_400_000;
+    if (ts >= startOfToday) return 'Today';
+    if (ts >= startOfToday - dayMs) return 'Yesterday';
+    if (ts >= startOfToday - 7 * dayMs) return 'This week';
+    if (ts >= startOfToday - 30 * dayMs) return 'This month';
+    return 'Earlier';
+}
+
+const BUCKET_ORDER = ['Today', 'Yesterday', 'This week', 'This month', 'Earlier'];
+
+function groupSessionsByBucket(sessions) {
+    const buckets = new Map();
+    for (const session of sessions) {
+        const bucket = getDateBucket(session.createdAt);
+        if (!buckets.has(bucket)) buckets.set(bucket, []);
+        buckets.get(bucket).push(session);
+    }
+    return BUCKET_ORDER
+        .filter((key) => buckets.has(key))
+        .map((key) => [key, buckets.get(key)]);
 }
 
 export default function HistoryPage() {
@@ -25,6 +54,14 @@ export default function HistoryPage() {
     const [error, setError] = useState(null);
     const [searchQuery, setSearchQuery] = useState('');
     const [confirmDelete, setConfirmDelete] = useState(null);
+    const [collapsedBuckets, setCollapsedBuckets] = useState(() => new Set(['This month', 'Earlier']));
+    const toggleBucket = (bucket) => {
+        setCollapsedBuckets((prev) => {
+            const next = new Set(prev);
+            if (next.has(bucket)) next.delete(bucket); else next.add(bucket);
+            return next;
+        });
+    };
     const messagesEndRef = useRef(null);
     const sessionListRef = useRef(null);
     const messagePaneRef = useRef(null);
@@ -114,7 +151,7 @@ export default function HistoryPage() {
     const activeCount = sessions.length - archivedCount;
 
     return (
-        <div className="mx-auto max-w-6xl space-y-6 px-6 py-6">
+        <div className="motion-page-calm app-page space-y-6">
             <PageHeader
                 title="Chat History"
                 subtitle="Review archived and active sessions from one archive workspace."
@@ -137,10 +174,10 @@ export default function HistoryPage() {
                 )}
             />
 
-            <div className="grid min-h-[calc(100vh-13rem)] gap-6 xl:grid-cols-[340px_minmax(0,1fr)]">
-                <aside className="relative overflow-hidden rounded-[30px] border border-surface-200/80 bg-white/90 shadow-[0_20px_56px_rgba(15,23,42,0.08)]">
+            <div className="grid h-[calc(100vh-13rem)] min-h-[560px] gap-4 lg:gap-6 lg:grid-cols-[300px_minmax(0,1fr)] xl:grid-cols-[340px_minmax(0,1fr)]">
+                <aside className="surface-panel motion-enter relative overflow-hidden">
                     <div className="absolute inset-0 bg-[radial-gradient(circle_at_16%_16%,rgba(15,118,110,0.09),transparent_26%),radial-gradient(circle_at_84%_14%,rgba(37,99,235,0.08),transparent_22%),linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.94))]" />
-                    <div className="relative flex h-full min-h-[620px] flex-col">
+                    <div className="relative flex h-full min-h-0 flex-col">
                         <div className="border-b border-surface-200/80 px-5 py-5">
                             <div className="flex items-center gap-3">
                                 <div className="flex h-11 w-11 items-center justify-center rounded-2xl gradient-brand shadow-sm">
@@ -153,11 +190,11 @@ export default function HistoryPage() {
                             </div>
 
                             <div className="mt-4 grid grid-cols-2 gap-2">
-                                <div className="rounded-2xl border border-surface-200/80 bg-white/80 px-3 py-3 shadow-sm">
+                                <div className="surface-stat-card px-3 py-3">
                                     <p className="type-meta-label">Visible now</p>
                                     <p className="type-metric-value mt-1">{filteredSessions.length}</p>
                                 </div>
-                                <div className="rounded-2xl border border-surface-200/80 bg-white/80 px-3 py-3 shadow-sm">
+                                <div className="surface-stat-card px-3 py-3">
                                     <p className="type-meta-label">Selected</p>
                                     <p className="type-metric-value mt-1">{selectedSessionId ? '1 session' : 'None'}</p>
                                 </div>
@@ -171,7 +208,8 @@ export default function HistoryPage() {
                                     onChange={(e) => setSearchQuery(e.target.value)}
                                     placeholder="Search by title, session, or model"
                                     aria-label="Search chat sessions"
-                                    className="w-full rounded-xl border border-surface-200 bg-surface-50/80 py-2.5 pl-9 pr-3 text-xs focus:border-brand-400 focus:outline-none focus:ring-2 focus:ring-brand-500/20 transition-colors"
+                                    suppressHydrationWarning
+                                    className="field-input py-2.5 pl-9 pr-3 text-xs"
                                 />
                             </div>
                         </div>
@@ -196,53 +234,85 @@ export default function HistoryPage() {
                                     </p>
                                 </div>
                             ) : (
-                                filteredSessions.map((session) => {
-                                    const isSelected = session.sessionId === selectedSessionId;
-                                    const sessionLabel = getSessionDisplayLabel(session);
-
+                                groupSessionsByBucket(filteredSessions).map(([bucket, items]) => {
+                                    const isCollapsed = collapsedBuckets.has(bucket) && !searchQuery.trim();
                                     return (
-                                        <div
-                                            key={session.sessionId}
-                                            className={`group mb-2 cursor-pointer rounded-2xl border p-3.5 transition-all duration-150 ${isSelected
-                                                ? 'border-brand-200 bg-brand-50/80 shadow-sm'
-                                                : 'border-surface-200/70 bg-white/80 hover:border-brand-200 hover:bg-white hover:shadow-sm'
-                                                }`}
-                                            onClick={() => viewSession(session.sessionId)}
-                                            role="button"
-                                            tabIndex={0}
-                                            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') viewSession(session.sessionId); }}
-                                        >
-                                            <div className="flex items-start justify-between gap-3">
-                                                <div className="min-w-0 flex-1">
-                                                    <div className="mb-1.5 flex items-center gap-2">
-                                                        <span className={`h-2 w-2 rounded-full ${session.archived ? 'bg-surface-300' : 'bg-accent-400'}`} />
-                                                        <span className={`truncate text-[13px] font-semibold ${isSelected ? 'text-brand-700' : 'text-surface-800'}`}>
-                                                            {sessionLabel}
-                                                        </span>
-                                                        <span className={`rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] ${session.archived
-                                                            ? 'bg-surface-100 text-surface-500'
-                                                            : 'bg-accent-50 text-accent-700 ring-1 ring-accent-200'
-                                                            }`}>
-                                                            {session.archived ? 'Archived' : 'Active'}
-                                                        </span>
+                                        <div key={bucket} className="mb-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => toggleBucket(bucket)}
+                                                className="sticky top-0 z-[1] mb-1 flex w-full items-center gap-2 rounded-lg bg-gradient-to-b from-white/95 via-white/92 to-white/75 px-1.5 py-1.5 text-left backdrop-blur-sm transition-colors hover:bg-white/95"
+                                                aria-expanded={!isCollapsed}
+                                            >
+                                                <ChevronDownIcon
+                                                    className={`h-3 w-3 text-surface-500 transition-transform duration-200 ${isCollapsed ? '-rotate-90' : ''}`}
+                                                    strokeWidth={2.5}
+                                                />
+                                                <span className="h-[2px] w-2 rounded-full bg-gradient-to-r from-brand-500 to-accent-400" />
+                                                <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-surface-500">{bucket}</span>
+                                                <span className="ml-auto rounded-full bg-surface-100 px-1.5 py-0.5 text-[9px] font-semibold text-surface-500">{items.length}</span>
+                                            </button>
+                                            {!isCollapsed && items.map((session) => {
+                                                const isSelected = session.sessionId === selectedSessionId;
+                                                const sessionLabel = getSessionDisplayLabel(session);
+
+                                                return (
+                                                    <div
+                                                        key={session.sessionId}
+                                                        className={`motion-fast-colors group relative mb-1.5 cursor-pointer overflow-hidden rounded-xl border pl-2.5 pr-2 py-2 transition-all duration-200 ${isSelected
+                                                            ? 'border-brand-200 bg-gradient-to-br from-brand-50/90 via-white to-accent-50/60 shadow-[0_6px_18px_rgba(37,99,235,0.1)]'
+                                                            : 'border-surface-200/70 bg-white/85 hover:border-brand-200 hover:bg-white hover:shadow-[0_6px_16px_rgba(15,23,42,0.05)]'
+                                                            }`}
+                                                        onClick={() => viewSession(session.sessionId)}
+                                                        role="button"
+                                                        tabIndex={0}
+                                                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') viewSession(session.sessionId); }}
+                                                    >
+                                                        <span
+                                                            aria-hidden="true"
+                                                            className={`absolute inset-y-1.5 left-0 w-[2.5px] rounded-full transition-all duration-200 ${isSelected
+                                                                ? 'bg-gradient-to-b from-brand-500 via-brand-400 to-accent-400 opacity-100'
+                                                                : 'bg-surface-200 opacity-0 group-hover:opacity-80'
+                                                                }`}
+                                                        />
+                                                        <div className="flex items-start justify-between gap-2">
+                                                            <div className="min-w-0 flex-1">
+                                                                <div className="flex items-center gap-1.5">
+                                                                    <span className="relative flex h-1.5 w-1.5 items-center justify-center">
+                                                                        <span className={`absolute h-1.5 w-1.5 rounded-full ${session.archived ? 'bg-surface-300' : 'bg-accent-400'}`} />
+                                                                        {!session.archived && (
+                                                                            <span className="absolute h-1.5 w-1.5 animate-ping rounded-full bg-accent-400 opacity-60" />
+                                                                        )}
+                                                                    </span>
+                                                                    <span className={`truncate text-[12px] font-semibold leading-tight ${isSelected ? 'text-brand-700' : 'text-surface-800'}`}>
+                                                                        {sessionLabel}
+                                                                    </span>
+                                                                </div>
+                                                                <div className="mt-1 flex flex-wrap items-center gap-1 text-[9.5px] text-surface-500">
+                                                                    <span className="inline-flex items-center gap-0.5 rounded-full bg-surface-100/80 px-1.5 py-[1px] font-semibold text-surface-600">
+                                                                        <ConversationIcon className="h-2 w-2" />
+                                                                        {session.messageCount || 0}
+                                                                    </span>
+                                                                    <span className="inline-flex items-center rounded-full bg-brand-50/80 px-1.5 py-[1px] font-semibold text-brand-700">
+                                                                        {session.model || 'gpt-4o'}
+                                                                    </span>
+                                                                    <span className="truncate text-surface-400">{formatDate(session.createdAt)}</span>
+                                                                </div>
+                                                            </div>
+                                                            <button
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    setConfirmDelete(session.sessionId);
+                                                                }}
+                                                                className="motion-fast-colors shrink-0 rounded-md p-1 text-red-400 opacity-0 group-hover:opacity-100 hover:bg-red-50 hover:text-red-600"
+                                                                title="Delete session"
+                                                            >
+                                                                <TrashIcon className="h-3 w-3" />
+                                                            </button>
+                                                        </div>
                                                     </div>
-                                                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-surface-500">
-                                                        <span>{session.messageCount || 0} messages</span>
-                                                        <span>{session.model || 'gpt-4o'}</span>
-                                                        <span>{formatDate(session.createdAt)}</span>
-                                                    </div>
-                                                </div>
-                                                <button
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        setConfirmDelete(session.sessionId);
-                                                    }}
-                                                    className="rounded-lg p-1.5 text-red-400 opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-600"
-                                                    title="Delete session"
-                                                >
-                                                    <TrashIcon className="h-3.5 w-3.5" />
-                                                </button>
-                                            </div>
+                                                );
+                                            })}
                                         </div>
                                     );
                                 })
@@ -251,9 +321,9 @@ export default function HistoryPage() {
                     </div>
                 </aside>
 
-                <section className="relative overflow-hidden rounded-[30px] border border-surface-200/80 bg-white/92 shadow-[0_20px_56px_rgba(15,23,42,0.08)]">
+                <section className="surface-panel motion-enter motion-enter-delay-1 relative overflow-hidden">
                     <div className="absolute inset-0 bg-[radial-gradient(circle_at_18%_12%,rgba(15,118,110,0.08),transparent_24%),radial-gradient(circle_at_82%_14%,rgba(37,99,235,0.08),transparent_24%),linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.95))]" />
-                    <div className="relative flex h-full min-h-[620px] flex-col">
+                    <div className="relative flex h-full min-h-0 flex-col">
                         <div className="flex items-center justify-between gap-3 border-b border-surface-200/80 px-6 py-5">
                             <div className="flex items-center gap-3">
                                 <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-surface-100 shadow-sm">
@@ -273,7 +343,7 @@ export default function HistoryPage() {
                             {selectedSession && (
                                 <button
                                     onClick={() => { setSelectedSessionId(null); setMessages([]); }}
-                                    className="inline-flex items-center gap-1.5 rounded-xl border border-surface-200 bg-white/80 px-3 py-2 text-xs font-medium text-surface-600 transition-colors hover:border-surface-300 hover:bg-surface-50 hover:text-surface-800"
+                                    className="motion-fast-colors inline-flex items-center gap-1.5 rounded-xl border border-surface-200 bg-white/80 px-3 py-2 text-xs font-medium text-surface-600 hover:border-surface-300 hover:bg-surface-50 hover:text-surface-800"
                                 >
                                     <XIcon className="h-3.5 w-3.5" />
                                     Close
@@ -291,8 +361,12 @@ export default function HistoryPage() {
                             {!selectedSessionId && (
                                 <div className="flex h-full items-center justify-center">
                                     <div className="max-w-xl text-center">
-                                        <div className="mx-auto mb-5 flex h-20 w-20 items-center justify-center rounded-[28px] border border-surface-100 bg-[radial-gradient(circle_at_30%_20%,rgba(180,92,255,0.14),transparent_42%),radial-gradient(circle_at_70%_70%,rgba(31,158,171,0.16),transparent_46%),linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.94))] shadow-sm">
-                                            <RobotMascotLogo size={48} mood="minimal" />
+                                        <div className="history-empty-orbit mx-auto mb-5">
+                                            <span className="history-empty-orbit__ring" aria-hidden="true" />
+                                            <span className="history-empty-orbit__ring history-empty-orbit__ring--inner" aria-hidden="true" />
+                                            <div className="history-empty-orbit__core">
+                                                <RobotMascotLogo size={52} mood="minimal" />
+                                            </div>
                                         </div>
                                         <div className="inline-flex items-center gap-2 rounded-full border border-brand-200/70 bg-brand-50/80 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-brand-600">
                                             <ConversationIcon className="h-3.5 w-3.5" />
@@ -351,7 +425,7 @@ export default function HistoryPage() {
             {/* Delete Confirmation Modal */}
             {confirmDelete && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-                    <div className="bg-white rounded-2xl shadow-xl border border-surface-200 p-6 max-w-sm mx-4" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
+                    <div className="surface-panel max-w-sm mx-4 p-6" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
                         <div className="flex items-center gap-3 mb-3">
                             <div className="w-10 h-10 rounded-xl bg-red-50 flex items-center justify-center">
                                 <TrashIcon className="w-5 h-5 text-red-500" />
@@ -367,13 +441,13 @@ export default function HistoryPage() {
                         <div className="flex items-center gap-2 justify-end">
                             <button
                                 onClick={() => setConfirmDelete(null)}
-                                className="px-4 py-2 text-xs font-medium text-surface-600 bg-surface-100 rounded-lg hover:bg-surface-200 transition-colors"
+                                className="motion-fast-colors inline-flex items-center rounded-lg border border-surface-200 bg-surface-100 px-4 py-2 text-xs font-medium text-surface-600 hover:bg-surface-200"
                             >
                                 Cancel
                             </button>
                             <button
                                 onClick={() => deleteSession(confirmDelete)}
-                                className="px-4 py-2 text-xs font-semibold text-white bg-red-500 rounded-lg hover:bg-red-600 transition-colors"
+                                className="motion-fast-colors inline-flex items-center rounded-lg border border-red-600 bg-red-500 px-4 py-2 text-xs font-semibold text-white hover:bg-red-600"
                             >
                                 Delete
                             </button>

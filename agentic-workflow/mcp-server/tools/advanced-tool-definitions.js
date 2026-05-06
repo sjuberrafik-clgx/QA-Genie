@@ -363,6 +363,68 @@ export const ADVANCED_TOOLS = [
     },
 
     // ═══════════════════════════════════════════════════
+    // EXPLORATION HELPERS (Virtualized Lists + Snapshot Diffs)
+    // ═══════════════════════════════════════════════════
+
+    {
+        name: 'unified_collect_virtualized_list',
+        description: 'Collect unique items from virtualized or infinite-scroll lists by repeatedly sampling and scrolling a container.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                containerSelector: { type: 'string', description: 'Scrollable container selector. Use "body" for page-level scrolling.', default: 'body' },
+                itemSelector: { type: 'string', description: 'Selector that matches list items within the container.' },
+                maxScrolls: { type: 'number', description: 'Maximum scroll iterations to perform.', default: 20 },
+                scrollStepPx: { type: 'number', description: 'Pixels to scroll each iteration. Defaults to ~90% viewport/container height.' },
+                waitBetweenMs: { type: 'number', description: 'Delay between scroll iterations in milliseconds.', default: 200 },
+                stopWhenNoNewItems: { type: 'number', description: 'Stop after this many consecutive iterations with no new items.', default: 2 },
+                maxItems: { type: 'number', description: 'Maximum unique items to collect before stopping.', default: 500 },
+                maxReturnedItems: { type: 'number', description: 'Maximum number of collected items included in response payload.', default: 100 },
+                includeText: { type: 'boolean', description: 'Include item text snippets in output.', default: true },
+                textLimit: { type: 'number', description: 'Max characters captured for each item text.', default: 160 },
+                captureAttributes: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Attribute names to capture for each item fingerprint.',
+                    default: ['data-id', 'data-testid', 'data-qa', 'href', 'aria-label'],
+                },
+            },
+            required: ['itemSelector'],
+        },
+        _meta: { source: 'playwright', category: 'scroll' },
+    },
+    {
+        name: 'unified_snapshot_diff',
+        description: 'Set a baseline snapshot and diff current snapshot against it to detect added, removed, and changed elements.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                mode: {
+                    type: 'string',
+                    enum: ['set-baseline', 'diff', 'capture-and-diff'],
+                    description: 'set-baseline: capture baseline only. diff: compare current snapshot to stored baseline. capture-and-diff: set baseline if missing, otherwise diff + update baseline.',
+                    default: 'diff',
+                },
+                filter: {
+                    type: 'object',
+                    description: 'Optional snapshot filter (same shape as unified_snapshot.filter).',
+                    properties: {
+                        roles: { type: 'array', items: { type: 'string' } },
+                        interactiveOnly: { type: 'boolean' },
+                        visibleOnly: { type: 'boolean' },
+                        excludeRoles: { type: 'array', items: { type: 'string' } },
+                        namePattern: { type: 'string' },
+                        maxElements: { type: 'number' },
+                    },
+                },
+                maxChanges: { type: 'number', description: 'Maximum number of entries to return for each change list.', default: 50 },
+                includeUnchanged: { type: 'boolean', description: 'Include unchanged count in response details.', default: false },
+            },
+        },
+        _meta: { source: 'playwright', category: 'snapshot' },
+    },
+
+    // ═══════════════════════════════════════════════════
     // VIDEO RECORDING
     // ═══════════════════════════════════════════════════
 
@@ -616,6 +678,8 @@ export const ADVANCED_TOOL_MAPPING = {
     // Visual Testing
     unified_screenshot_baseline: 'browser_screenshot_baseline',
     unified_screenshot_compare: 'browser_screenshot_compare',
+    unified_collect_virtualized_list: 'browser_collect_virtualized_list',
+    unified_snapshot_diff: 'browser_snapshot_diff',
 
     // Video Recording
     unified_start_video: 'browser_start_video',
@@ -658,6 +722,8 @@ export const ADVANCED_CATEGORIES = {
     'storage': 'Access localStorage, sessionStorage, and IndexedDB',
     'multi-context': 'Create and manage isolated browser contexts',
     'visual-testing': 'Screenshot comparison and visual regression testing',
+    'snapshot': 'Snapshot capture and differential comparison helpers',
+    'scroll': 'Scrolling and virtualized list exploration helpers',
     'video-recording': 'Record browser interactions as video',
     'auth-persistence': 'Save and restore authentication state',
     'accessibility': 'Accessibility auditing and analysis',

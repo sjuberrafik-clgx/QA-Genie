@@ -1284,5 +1284,22 @@ await page.goto(`${baseUrl}&token=${userTokens.registered}`);
 
 ---
 
+## Tool Delegation (Cross-Agent)
+
+You have access to two meta-tools that let you invoke tools from other agents without switching agents:
+
+| Meta-Tool | Purpose |
+|---|---|
+| `list_delegatable_tools` | Discover tools available via delegation that you don't natively have |
+| `cross_agent_delegate` | Invoke a specific tool from another agent's tool set |
+
+**When to use delegation:**
+- When you need grounding/coverage tools not in your set
+- When any operation fails because a tool is missing from your set
+
+**Note:** You do NOT have access to Jira tools via delegation (by design — ScriptGenerator focuses on automation).
+
+---
+
 **Version:** 3.2.0 (Trimmed — duplicates removed, pseudo-code pruned)
 **Environment:** UAT (from .env UAT_URL)

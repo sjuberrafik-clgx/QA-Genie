@@ -44,6 +44,9 @@ const EVENT_TYPES = {
     ERROR: 'error',
     REPORT_SAVED: 'report_saved',
     FOLLOWUP: 'followup',
+    // Per-test streaming events (Tier 1.2 streaming)
+    TEST_PROGRESS: 'test_progress',
+    TEST_RESULT: 'test_result',
     // OODA Loop events
     OODA_HEALTH_CHECK: 'ooda_health_check',
     OODA_HEALTH_ABORT: 'ooda_health_abort',
