@@ -6,7 +6,7 @@ A Next.js web application powered by the GitHub Copilot SDK and the existing SDK
 
 ```
 ┌──────────────────────┐       ┌──────────────────────────┐
-│  Next.js (port 3000) │ HTTP  │  SDK Server (port 3100)  │
+│  Next.js (port 3001) │ HTTP  │  SDK Server (port 3100)  │
 │  React 19 / App Rtr  │ ───►  │  Node.js + Copilot SDK   │
 │  Tailwind CSS 3      │ SSE◄  │  Pipeline + Chat routes   │
 └──────────────────────┘       └──────────────────────────┘
@@ -14,6 +14,8 @@ A Next.js web application powered by the GitHub Copilot SDK and the existing SDK
 
 - **Dashboard** — Launch & monitor QA pipelines (test-only, script-only, full)
 - **Chat** — AI assistant powered by Copilot SDK with QA-domain tools
+- **My Agents** — User-created agents published from isolated Studio workspaces
+- **Studio** — Workspace-based agent, skill, file, and MCP authoring surface
 - **Results** — Pipeline run history with filters and stage drill-down
 - **Analytics** — Pass rates, failure trends, selector stability
 
@@ -38,21 +40,49 @@ npm install
 npm run dev:full
 
 # Or start individually:
-npm run dev           # Next.js only (port 3000)
+npm run dev           # Next.js only (port 3001)
 npm run dev:backend   # SDK server only (port 3100)
 ```
 
-Open **http://localhost:3000** in your browser.
+Open **http://localhost:3001** in your browser.
 
 ## npm Scripts
 
 | Script | Description |
 |--------|-------------|
-| `npm run dev` | Start Next.js dev server (port 3000) |
+| `npm run dev` | Start Next.js dev server (port 3001) |
+| `npm run verify:nav-routes` | Verify that every sidebar route has a matching `src/app/**/page.*` file |
 | `npm run build` | Production build |
 | `npm run start` | Start production server |
 | `npm run dev:backend` | Start SDK orchestrator server (port 3100) |
 | `npm run dev:full` | Start both servers concurrently |
+
+## Troubleshooting
+
+### `/my-agents` or `/studio` shows the app 404 page
+
+This is usually a **missing route file / stale branch** problem, not a backend outage. The sidebar links are defined in `src/lib/navigation.js`, so those links can still appear even when the corresponding route files are missing from a clone.
+
+Check that these files exist in your branch:
+
+- `src/app/my-agents/page.js`
+- `src/app/studio/page.js`
+
+Then run:
+
+```bash
+npm run verify:nav-routes
+```
+
+If that command fails, pull the branch that contains the route implementation or restore the missing page files before testing again.
+
+### Page loads but shows backend/API errors
+
+That is a different failure mode. The Studio and My Agents pages depend on the SDK orchestrator backend, so start the frontend and backend together with `npm run dev:full`. If the backend is down, the UI should surface fetch/API errors rather than a Next.js 404 page.
+
+### Hydration warning mentioning `cz-shortcut-listen`
+
+That usually comes from a browser extension or local environment tool mutating the page before React hydrates. Re-test in a clean browser profile or disable extensions before treating it as an app defect.
 
 ## Project Structure
 
