@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev --port 3001",
+    "verify:nav-routes": "node ./scripts/verify-nav-routes.js",
+    "prebuild": "npm run verify:nav-routes",
     "build": "next build",
     "start": "next start --port 3001",
     "lint": "next lint",
@@ -13,6 +15,7 @@
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "dompurify": "^3.4.2",
     "mermaid": "^11.12.3",
     "next": "^15.1.0",
     "react": "^19.0.0",
