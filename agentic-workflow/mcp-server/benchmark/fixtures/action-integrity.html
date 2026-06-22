@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CBR Fixture — Action Integrity</title>
+    <style>
+        body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+        .btn { padding: 8px 12px; margin: 6px; cursor: pointer; }
+        /* A plain button that the OLD blocker detector would mis-flag: positioned + high z-index
+           + a class containing "notice". The tightened detector must NOT treat it as a modal. */
+        .notice-button { position: fixed; top: 8px; right: 8px; z-index: 999; }
+        .icon-search { width: 36px; height: 36px; border: 1px solid #ccc; background: #fff; }
+        .icon-search::before { content: "🔍"; }
+        .panel { border: 1px solid #0a64c2; padding: 10px; margin-top: 10px; }
+        .modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); }
+        .modal { position: fixed; top: 25%; left: 30%; width: 320px; background: #fff; padding: 18px; }
+        .hidden { display: none; }
+    </style>
+</head>
+
+<body>
+    <h1>Action Integrity</h1>
+
+    <!-- (Fix #2) A no-op button: clicking it produces NO observable effect → silent-success guard. -->
+    <button id="noop" class="btn">Dead Button</button>
+
+    <!-- (Fix #2) A real button: clicking it appends a panel (DOM mutation) → verified effect. -->
+    <button id="opens" class="btn btn-primary" onclick="window.__fixture.openPanel()">Open Panel</button>
+
+    <!-- (Fix #3) Plain positioned button with a "notice" class — must NOT be a blocker. -->
+    <button id="notice" class="btn notice-button">Sticky Notice</button>
+
+    <!-- (Fix #4) Icon-only button: DOM-blind (no text/label) — resolvable only via vision. -->
+    <button id="search" class="btn icon-search"></button>
+
+    <div id="panel-host"></div>
+
+    <!-- (Fix #3) A genuine modal — hidden until opened — must still be detected as a blocker. -->
+    <div id="dlg-backdrop" class="modal-backdrop hidden"></div>
+    <div id="dlg" class="modal hidden" role="dialog" aria-modal="true" aria-label="Confirm action">
+        <h2>Confirm action</h2>
+        <button id="dlg-ok" class="btn">OK</button>
+    </div>
+
+    <script>
+        (function () {
+            let panels = 0;
+            window.__fixture = {
+                openPanel: function () {
+                    panels += 1;
+                    const d = document.createElement('div');
+                    d.className = 'panel';
+                    d.textContent = 'Panel ' + panels + ' opened';
+                    document.getElementById('panel-host').appendChild(d);
+                },
+                openDialog: function () { document.getElementById('dlg-backdrop').classList.remove('hidden'); document.getElementById('dlg').classList.remove('hidden'); },
+                closeDialog: function () { document.getElementById('dlg-backdrop').classList.add('hidden'); document.getElementById('dlg').classList.add('hidden'); },
+            };
+        })();
+    </script>
+</body>
+
+</html>

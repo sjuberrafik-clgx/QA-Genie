@@ -38,17 +38,21 @@ import { fileURLToPath } from 'node:url';
 // agentic-workflow/.env regardless of how the server was launched.
 import { config as dotenvConfig } from 'dotenv';
 const __envDir = path.dirname(fileURLToPath(import.meta.url));
-dotenvConfig({ path: path.resolve(__envDir, '..', '.env') });
+// quiet: true suppresses dotenv's startup banner. On the stdio transport, stdout IS the
+// JSON-RPC channel — any stray line there ("[dotenv] injecting env …") corrupts a protocol
+// frame and the client logs "Failed to parse message". Keep stdout clean for the protocol.
+dotenvConfig({ path: path.resolve(__envDir, '..', '.env'), quiet: true });
 
 import { PlaywrightBridge } from './bridges/playwright-bridge-direct.js';
 import { ChromeDevToolsBridge } from './bridges/chromedevtools-bridge-direct.js';
 import { IntelligentRouter } from './router/intelligent-router.js';
 import { ALL_TOOLS, UNIFIED_TOOLS, getToolStats, isToolDeferred, getAlwaysLoadedTools } from './tools/tool-definitions.js';
-import { getProfileCategories } from './config/tool-profiles.js';
+import { getProfileCategories, INTELLIGENT_SURFACE } from './config/tool-profiles.js';
 import { getToolExamples } from './tools/tool-examples.js';
 import { TOOL_SEARCH_DEFINITION, handleToolSearch, getToolSearchIndex } from './tools/tool-search.js';
 import { EXECUTE_EXPLORATION_DEFINITION, executeExploration } from './tools/programmatic-executor.js';
 import { getTemplates } from './tools/exploration-templates.js';
+import { crawlSite, CRAWL_TOOL_DEFINITION } from './crawler/crawl-engine.js';
 import { ServerConfig } from './config/server-config.js';
 import { EventManager } from './utils/event-manager.js';
 
@@ -120,6 +124,37 @@ function classifyToolFailure(error) {
         code: 'INTERNAL_TOOL_ERROR',
         message,
     };
+}
+
+// ── Output budgeting (anti-bloat guardrail) ──────────────────────────────────
+// Any tool result larger than the inline budget is written to disk and replaced
+// with a small preview + file handle, so a single verbose result can never
+// flood the agent context. Compact results (the common case) pass through
+// untouched.
+const MAX_INLINE_RESULT_BYTES = parseInt(process.env.MCP_MAX_RESULT_BYTES) || 24000;
+const OUTPUT_CACHE_DIR = path.resolve(__envDir, 'output-cache');
+
+async function budgetResultText(toolName, text) {
+    const str = typeof text === 'string' ? text : String(text);
+    const bytes = Buffer.byteLength(str, 'utf8');
+    if (bytes <= MAX_INLINE_RESULT_BYTES) return str;
+
+    const safeName = String(toolName).replace(/[^a-z0-9_-]/gi, '_');
+    try {
+        await fs.mkdir(OUTPUT_CACHE_DIR, { recursive: true });
+        const file = path.join(OUTPUT_CACHE_DIR, `${safeName}-${Date.now()}.json`);
+        await fs.writeFile(file, str, 'utf8');
+        return JSON.stringify({
+            _budgeted: true,
+            note: `Result was ${bytes} bytes (> ${MAX_INLINE_RESULT_BYTES} inline budget). Full result saved to disk; preview below. Narrow your args (filter / target / maxElements) for a smaller inline result.`,
+            bytes,
+            savedTo: file,
+            preview: str.slice(0, 2000),
+        }, null, 2);
+    } catch {
+        // If disk write fails, hard-truncate to protect the context window.
+        return str.slice(0, MAX_INLINE_RESULT_BYTES) + `\n...[truncated ${bytes - MAX_INLINE_RESULT_BYTES} bytes]`;
+    }
 }
 
 /**
@@ -215,7 +250,11 @@ class UnifiedAutomationServer {
 
         let toolsToExpose = ALL_TOOLS;
 
-        if (allowedCategories) {
+        if (toolProfile === 'intelligent') {
+            // Curated, primitives-first surface (name allowlist). Everything else
+            // remains callable and discoverable via unified_tool_search.
+            toolsToExpose = toolsToExpose.filter(tool => INTELLIGENT_SURFACE.has(tool.name));
+        } else if (allowedCategories) {
             toolsToExpose = toolsToExpose.filter(tool => {
                 const category = tool._meta?.category || 'unknown';
                 return allowedCategories.includes(category);
@@ -228,9 +267,11 @@ class UnifiedAutomationServer {
 
         const statsInfo = deferredLoading
             ? `${toolsToExpose.length + 1}/${ALL_TOOLS.length} tools (profile: ${toolProfile}, deferred: ON)`
-            : allowedCategories
-                ? `${toolsToExpose.length}/${ALL_TOOLS.length} tools (profile: ${toolProfile})`
-                : `${toolsToExpose.length} tools (profile: full)`;
+            : toolProfile === 'intelligent'
+                ? `${toolsToExpose.length}+3/${ALL_TOOLS.length} tools (profile: intelligent, primitives-first; rest via unified_tool_search)`
+                : allowedCategories
+                    ? `${toolsToExpose.length}/${ALL_TOOLS.length} tools (profile: ${toolProfile})`
+                    : `${toolsToExpose.length} tools (profile: full)`;
         console.error(`[UnifiedMCP] Handling tools/list request - Exposing ${statsInfo}`);
 
         const sanitizedTools = toolsToExpose.map(tool => {
@@ -260,6 +301,12 @@ class UnifiedAutomationServer {
                 cleanExec.examples = examples;
             }
             sanitizedTools.push(cleanExec);
+        }
+
+        if (!sanitizedTools.some(t => t.name === 'unified_crawl')) {
+            const { _meta, ...cleanCrawl } = CRAWL_TOOL_DEFINITION;
+            cleanCrawl.inputSchema = sanitizeInputSchemaForCapi(cleanCrawl.inputSchema, cleanCrawl.name);
+            sanitizedTools.push(cleanCrawl);
         }
 
         return {
@@ -310,7 +357,19 @@ class UnifiedAutomationServer {
                     content: [
                         {
                             type: 'text',
-                            text: JSON.stringify(execResult, null, 2),
+                            text: await budgetResultText(name, JSON.stringify(execResult, null, 2)),
+                        },
+                    ],
+                };
+            }
+
+            if (name === 'unified_crawl') {
+                const crawlResult = await crawlSite(this.router.playwrightBridge, args || {});
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: await budgetResultText(name, JSON.stringify(crawlResult, null, 2)),
                         },
                     ],
                 };
@@ -326,11 +385,12 @@ class UnifiedAutomationServer {
                 ),
             ]);
 
+            const resultText = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
             return {
                 content: [
                     {
                         type: 'text',
-                        text: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+                        text: await budgetResultText(name, resultText),
                     },
                 ],
             };

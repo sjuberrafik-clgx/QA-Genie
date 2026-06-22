@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CBR Fixture — SPA Re-render (selector brittleness)</title>
+    <style>
+        body { font-family: system-ui, sans-serif; margin: 0; padding: 12px; }
+        header { display: flex; gap: 12px; align-items: center; }
+        .grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+        .card { border: 1px solid #ddd; padding: 8px; width: 180px; }
+        .btn { padding: 6px 10px; cursor: pointer; }
+        .btn-primary { background: #0a64c2; color: #fff; border: none; }
+        form { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+        label { display: flex; flex-direction: column; font-size: 12px; }
+    </style>
+</head>
+
+<body>
+    <!--
+      Purpose: simulate a React-style reconciliation where the DOM subtree is
+      torn down and rebuilt. On every re-render the *dynamic* ids change, but
+      stable anchors (data-testid, role+accessible-name) are preserved on a
+      subset of nodes. This produces a realistic selector-survival spread:
+        - elements whose winning selector was a dynamic id / nth-index → BREAK
+        - elements with data-testid or unique role+name                → SURVIVE
+      The resident agent + self-healing resolver should lift survival toward 100%.
+    -->
+    <header>
+        <nav aria-label="Primary">
+            <a href="#search" role="link">Search</a>
+            <a href="#saved" role="link">Saved</a>
+            <a href="#tours" role="link">Tours</a>
+        </nav>
+        <button id="rerender-btn" class="btn btn-primary" onclick="window.__fixture.rerender()">Re-render</button>
+        <span id="render-count" aria-label="Render count">renders: 0</span>
+    </header>
+
+    <main>
+        <form aria-label="Property search">
+            <label>City<input id="city" name="city" type="text" placeholder="City" /></label>
+            <label>Min price<input id="price-min" name="priceMin" type="number" placeholder="Min" /></label>
+            <label>Beds<input id="beds" name="beds" type="number" placeholder="Beds" /></label>
+            <label>Baths<input id="baths" name="baths" type="number" placeholder="Baths" /></label>
+            <button type="button" class="btn btn-primary" id="apply-filters">Apply filters</button>
+            <button type="button" class="btn" id="reset-filters">Reset</button>
+        </form>
+
+        <section aria-label="Property results">
+            <div class="grid" id="results"></div>
+        </section>
+    </main>
+
+    <script>
+        (function () {
+            const PROPERTIES = [
+                { id: 1, addr: '101 Oak St', price: '$420,000' },
+                { id: 2, addr: '202 Maple Ave', price: '$535,000' },
+                { id: 3, addr: '303 Pine Rd', price: '$610,000' },
+                { id: 4, addr: '404 Cedar Ln', price: '$389,000' },
+                { id: 5, addr: '505 Birch Ct', price: '$725,000' },
+                { id: 6, addr: '606 Elm Dr', price: '$455,000' },
+            ];
+
+            let renderCount = 0;
+            const rand = () => Math.random().toString(36).slice(2, 10);
+
+            function buildCard(p) {
+                const card = document.createElement('div');
+                card.className = 'card';
+                // Dynamic id changes on every render — a brittle anchor on purpose.
+                card.id = 'card-' + rand();
+
+                const title = document.createElement('h3');
+                title.textContent = p.addr;
+                card.appendChild(title);
+
+                const price = document.createElement('p');
+                price.textContent = p.price;
+                card.appendChild(price);
+
+                // Save button — stability tier depends on the property id so the
+                // benchmark sees a mix of stable and brittle winning selectors.
+                const save = document.createElement('button');
+                save.className = 'btn';
+                save.textContent = 'Save property ' + p.id;
+                if (p.id % 3 === 0) {
+                    // Tier A (stable): durable test id, survives re-render.
+                    save.setAttribute('data-testid', 'save-prop-' + p.id);
+                } else if (p.id % 3 === 1) {
+                    // Tier B (semi): only a dynamic id — winning selector will break.
+                    save.id = 'save-' + rand();
+                }
+                // Tier C (p.id % 3 === 2): no id, no testid — relies on role+name only.
+                card.appendChild(save);
+
+                // Details link — stable role+name anchor.
+                const details = document.createElement('a');
+                details.href = '#prop-' + p.id;
+                details.setAttribute('role', 'link');
+                details.textContent = 'View details ' + p.id;
+                card.appendChild(details);
+
+                return card;
+            }
+
+            function render() {
+                const root = document.getElementById('results');
+                root.innerHTML = '';
+                for (const p of PROPERTIES) root.appendChild(buildCard(p));
+                renderCount += 1;
+                document.getElementById('render-count').textContent = 'renders: ' + renderCount;
+            }
+
+            window.__fixture = {
+                rerender: render,
+                reset: function () { renderCount = 0; render(); },
+                renderCount: function () { return renderCount; },
+                propertyCount: function () { return PROPERTIES.length; },
+            };
+
+            render();
+        })();
+    </script>
+</body>
+
+</html>
