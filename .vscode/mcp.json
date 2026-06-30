@@ -7,7 +7,19 @@
 			"args": [
 				"${workspaceFolder}/agentic-workflow/mcp-server/server.js"
 			],
-			"env": {}
+			"env": {
+				"MCP_TOOL_PROFILE": "intelligent"
+			}
+		},
+		"glass": {
+			"type": "stdio",
+			"command": "node",
+			"args": [
+				"${workspaceFolder}/glass-mcp/src/server.js"
+			],
+			"env": {
+				"GLASS_HEADLESS": "false"
+			}
 		},
 		"atlassian/atlassian-mcp-server": {
 			"type": "http",

@@ -19,6 +19,7 @@ const { createEnforcementHooks, createCognitiveEnforcementHooks, COGNITIVE_PHASE
 const { getContextEngine } = require('./context-engine');
 const { buildSharedLayers } = require('./prompt-layers');
 const { ToolBroker, createBrokerMetaTools } = require('./tool-broker');
+const { approveAllPermissions } = require('./permission-response');
 
 // Grounding system — provides local context to reduce LLM hallucinations
 let _groundingStoreModule;
@@ -293,11 +294,24 @@ class AgentSessionFactory {
             contextStore: context.contextStore || null,
             groundingStore: gStore || null,
         };
-        const tools = createCustomTools(this.defineTool, effectiveRole, toolDeps);
+        // Approval routing: when a chatManager + sessionContext are supplied (e.g. a
+        // delegated sub-session launched from chat), thread them into toolDeps so
+        // gated Jira/file writes PROMPT THE CHAT USER instead of failing closed or
+        // silently auto-approving.
+        if (context.chatManager) {
+            toolDeps.chatManager = context.chatManager;
+            toolDeps.sessionContext = context.sessionContext || null;
+            toolDeps.getSessionId = () => context.sessionContext?.sessionId || null;
+        }
+        // Tool set: a caller may inject a prebuilt set (e.g. a workspace/custom agent
+        // bundle built with direct-session parity); otherwise build by role.
+        const tools = Array.isArray(context.toolsOverride)
+            ? [...context.toolsOverride]
+            : createCustomTools(this.defineTool, effectiveRole, toolDeps);
 
         // 3b. Inject tool broker meta-tools for cross-agent delegation
         const brokerConfig = this.config?.toolBroker;
-        if (brokerConfig?.enabled !== false && !isCognitive) {
+        if (brokerConfig?.enabled !== false && !isCognitive && !context.disableBroker && !Array.isArray(context.toolsOverride)) {
             try {
                 const broker = new ToolBroker({ config: this.config, verbose: this.verbose });
                 const validAgents = ['testgenie', 'scriptgenerator', 'buggenie', 'taskgenie', 'docgenie'];
@@ -353,9 +367,12 @@ class AgentSessionFactory {
             // Default to 'true' (headless) as safe server-side fallback; .env overrides this.
             const mcpHeadless = process.env.MCP_HEADLESS || 'true';
             // Dynamic Tool Scoping: pass the agent's tool profile to the MCP server.
-            // ScriptGenerator gets 'core' (~65 tools instead of 141), saving ~25K tokens.
-            const AGENT_PROFILES = { scriptgenerator: 'core', testgenie: 'core', buggenie: 'core', codereviewer: 'core', docgenie: 'core' };
-            const toolProfile = context.toolProfile || AGENT_PROFILES[effectiveRole] || 'full';
+            // Default to the lean primitives-first 'intelligent' surface (~13 listed
+            // tools: act / observe / extract / crawl + essentials). All other tools
+            // remain callable and discoverable via unified_tool_search, saving ~30K
+            // tokens vs the full 141-tool list while keeping full capability.
+            const AGENT_PROFILES = { scriptgenerator: 'intelligent', testgenie: 'intelligent', buggenie: 'intelligent', codereviewer: 'intelligent', docgenie: 'intelligent' };
+            const toolProfile = context.toolProfile || AGENT_PROFILES[effectiveRole] || 'intelligent';
             this._log(`🖥️  Unified MCP: headless=${mcpHeadless}, browser=${process.env.MCP_BROWSER || 'chromium'}, toolProfile=${toolProfile}`);
             mcpServers['unified-automation'] = {
                 type: 'local',
@@ -376,6 +393,13 @@ class AgentSessionFactory {
         // TestGenie/BugGenie: Atlassian MCP for Jira integration.
         // Uses JIRA_EMAIL + JIRA_API_TOKEN (Basic auth). When not set, agents fall
         // back to the fetch_jira_ticket / create_jira_ticket custom tools (REST API).
+        //
+        // ⚠️ APPROVAL GUARDRAIL: We expose only READ-ONLY Atlassian MCP tools here.
+        // All write operations (create/edit/delete issues, add/edit/delete comments,
+        // transitions, Confluence writes) MUST go through gated SDK custom tools that
+        // call requireJiraMutationApproval(). Allowing the Atlassian MCP write tools
+        // would bypass the global approval prompt. See ATLASSIAN_MCP_READONLY_TOOLS
+        // in chat-session-manager.js for the canonical allowlist.
         const jiraEmail = process.env.JIRA_EMAIL || '';
         const jiraApiToken = process.env.JIRA_API_TOKEN || '';
         if (['testgenie', 'buggenie'].includes(agentName) && jiraEmail && jiraApiToken) {
@@ -384,9 +408,22 @@ class AgentSessionFactory {
                 type: 'http',
                 url: 'https://mcp.atlassian.com/v1/sse',
                 headers: { authorization: `Basic ${basicAuth}` },
-                tools: ['*'],
+                // Read-only allowlist — writes must go through gated SDK tools.
+                tools: [
+                    'getJiraIssue',
+                    'searchJiraIssuesUsingJql',
+                    'getTransitionsForJiraIssue',
+                    'lookupJiraAccountId',
+                    'getVisibleJiraProjects',
+                    'atlassianUserInfo',
+                    'atl_search',
+                    'atl_fetch',
+                    'getConfluencePage',
+                    'searchConfluenceUsingCql',
+                    'getConfluenceSpaces',
+                ],
             };
-            this._log(`🔗 Atlassian MCP enabled for ${agentName} (JIRA_EMAIL + JIRA_API_TOKEN)`);
+            this._log(`🔗 Atlassian MCP enabled for ${agentName} (read-only allowlist; writes route through gated SDK tools)`);
         }
 
         // 6. Build session config
@@ -401,7 +438,14 @@ class AgentSessionFactory {
 
         let assembledPrompt;
 
-        if (contextEngineEnabled) {
+        if (context.rawSystemPrompt && context.systemPromptOverride) {
+            // Direct-session parity: use the supplied prompt AS-IS (+ dynamic ticket
+            // context) and SKIP context-engine enrichment so a focused delegated
+            // prompt is not re-diluted with shared layers. This is the hard-won
+            // lesson: a delegated agent must reuse the SAME prompt as its direct
+            // chat session, or its skills/voice get stripped.
+            assembledPrompt = basePrompt + (dynamicCtx || '') + (sharedCtx || '');
+        } else if (contextEngineEnabled) {
             // Inject shared prompt layers (deduplication)
             const sharedLayers = buildSharedLayers(effectiveRole);
             const enrichedBasePrompt = basePrompt + '\n\n---\n\n' + sharedLayers;
@@ -469,7 +513,7 @@ class AgentSessionFactory {
             // The agent loops forever waiting for results → session.idle never fires → timeout.
             onPermissionRequest: async (request, invocation) => {
                 this._log(`🔑 Permission requested: ${request?.tool || request?.type || 'unknown'}`);
-                return { kind: 'approved' };
+                return approveAllPermissions();
             },
 
             // ── CRITICAL: User-input handler ──
@@ -477,6 +521,28 @@ class AgentSessionFactory {
             // a user-input request. Without a handler the agent stalls indefinitely.
             onUserInputRequest: async (request, invocation) => {
                 this._log(`💬 User input requested: ${JSON.stringify(request?.question || request).slice(0, 120)}`);
+                if (context.chatManager?.requestUserInput && context.sessionContext?.sessionId) {
+                    const question = request?.question || request?.options?.question || request?.message || 'The delegated agent needs your input.';
+                    const options = Array.isArray(request?.options)
+                        ? request.options
+                        : (Array.isArray(request?.options?.options) ? request.options.options : []);
+                    try {
+                        const answer = await context.chatManager.requestUserInput(question, options, {
+                            sessionId: context.sessionContext.sessionId,
+                            type: request?.type || request?.options?.type || 'delegated_agent_input',
+                            source: agentName,
+                        });
+                        if (typeof answer === 'string') return { answer, wasFreeform: true };
+                        if (answer && typeof answer === 'object') {
+                            return {
+                                answer: answer.answer || answer.value || String(answer),
+                                wasFreeform: answer.wasFreeform !== false,
+                            };
+                        }
+                    } catch (err) {
+                        this._log(`⚠️ Delegated user input routing failed: ${err.message}`);
+                    }
+                }
                 return {
                     answer: 'Continue autonomously. Make the best decision based on available context.',
                     wasFreeform: true,
@@ -547,7 +613,7 @@ class AgentSessionFactory {
             tools: [],
             systemMessage: { content: systemPrompt },
             streaming: false,
-            onPermissionRequest: async () => ({ kind: 'approved' }),
+            onPermissionRequest: async () => approveAllPermissions(),
             onUserInputRequest: async () => ({ answer: 'Continue autonomously.', wasFreeform: true }),
             workingDirectory: path.join(__dirname, '..', '..'),
         };
@@ -691,14 +757,23 @@ class AgentSessionFactory {
             }));
         } catch { /* event may not exist in all SDK versions */ }
 
-        try {
-            unsubs.push(session.on('tool.execution_end', (event) => {
-                const toolName = event?.data?.toolName || event?.data?.name || 'unknown';
-                const success = event?.data?.success !== false;
-                this._log(`🔧 Tool end: ${toolName} (${success ? 'ok' : 'failed'})`);
-                if (options.onToolEnd) options.onToolEnd(toolName, success, event?.data);
-            }));
-        } catch { /* event may not exist in all SDK versions */ }
+        // The SDK emits BOTH 'tool.execution_complete' and 'tool.execution_end'
+        // across versions (the chat manager subscribes to both). Listening to only
+        // one leaves streamed tool rows stuck "running" for delegated sub-agents.
+        // Fire onToolEnd for whichever arrives first, deduped by tool call id.
+        const _endedToolCalls = new Set();
+        const _fireToolEnd = (event) => {
+            const data = event?.data || {};
+            const toolCallId = data.toolCallId || data.id || data.callId || '';
+            if (toolCallId && _endedToolCalls.has(toolCallId)) return; // already reported
+            if (toolCallId) _endedToolCalls.add(toolCallId);
+            const toolName = data.toolName || data.name || 'unknown';
+            const success = data.success !== false;
+            this._log(`🔧 Tool end: ${toolName} (${success ? 'ok' : 'failed'})`);
+            if (options.onToolEnd) options.onToolEnd(toolName, success, data);
+        };
+        try { unsubs.push(session.on('tool.execution_end', _fireToolEnd)); } catch { /* version-dependent */ }
+        try { unsubs.push(session.on('tool.execution_complete', _fireToolEnd)); } catch { /* version-dependent */ }
 
         try {
             unsubs.push(session.on('session.error', (event) => {

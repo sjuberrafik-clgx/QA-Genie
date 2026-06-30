@@ -1,6 +1,6 @@
 ---
 description: 'QA Workflow Orchestrator - Coordinates TestGenie, ScriptGenerator, and BugGenie agents to automate end-to-end testing workflows from Jira tickets to automated tests and defect reporting'
-tools: ['atlassian/atlassian-mcp-server/*', 'unified-automation-mcp/*', 'search/fileSearch', 'search/textSearch', 'search/listDirectory', 'web/fetch', 'edit', 'search/changes', 'search/codebase', 'read/readFile','execute/getTerminalOutput', 'execute/runInTerminal','read/terminalLastCommand','read/terminalSelection']
+tools: ['atlassian/atlassian-mcp-server/*', 'glass/*', 'unified-automation-mcp/*', 'search/fileSearch', 'search/textSearch', 'search/listDirectory', 'web/fetch', 'edit', 'search/changes', 'search/codebase', 'read/readFile','execute/getTerminalOutput', 'execute/runInTerminal','read/terminalLastCommand','read/terminalSelection']
 ---
 
 # QA Orchestrator Agent (v2.2 - Pipeline Enforcement)
@@ -11,29 +11,11 @@ tools: ['atlassian/atlassian-mcp-server/*', 'unified-automation-mcp/*', 'search/
 
 ---
 
-## ⚠️ WORKSPACE ROOT PATH MAPPING (CRITICAL)
+## ⚠️ Path Mapping (CRITICAL)
 
-**This agent runs from the WORKSPACE ROOT (`c:\Github\PW_regression-suite - Adv + SDK\`), NOT from `agentic-workflow/`.** All paths referenced in this file MUST be resolved relative to the workspace root using this mapping:
-
-| Referenced Path | Actual Workspace Root Path |
-|---|---|
-| `workflow-config.json` | `agentic-workflow/config/workflow-config.json` |
-| `test-cases/` | `agentic-workflow/test-cases/` |
-| `exploration-data/` | `agentic-workflow/exploration-data/` |
-| `scripts/` | `agentic-workflow/scripts/` |
-| `assertion-config.json` | `agentic-workflow/config/assertion-config.json` |
-| `docs/` | `agentic-workflow/docs/` |
-| `utils/` (agentic utils) | `agentic-workflow/utils/` |
-| `mcp-server/` | `agentic-workflow/mcp-server/` |
-| `.github/agents/lib/` | `.github/agents/lib/` (already at root) |
-| `tests/` | `tests/` (already at root) |
-| `tests/specs/` | `tests/specs/` (already at root) |
-| `tests/test-data/testData.js` | `tests/test-data/testData.js` (already at root) |
-| `tests/pageobjects/` | `tests/pageobjects/` (already at root) |
-| `tests/config/config.js` | `tests/config/config.js` (already at root) |
-
-**ALWAYS prefix `agentic-workflow/` to paths for: config (workflow-config, assertion-config), test-cases, exploration-data, scripts, docs, utils, mcp-server.**
-**NEVER prefix `agentic-workflow/` to paths for: tests/, .github/.**
+> This agent runs from the workspace root. See [WORKSPACE ROOT PATH MAPPING](../copilot-instructions.md#workspace-root-path-mapping) in `copilot-instructions.md` for the canonical path table (always loaded via `applyTo: '**'`).
+>
+> **Rule:** ALWAYS prefix `agentic-workflow/` to paths for: config (workflow-config, assertion-config), test-cases, exploration-data, scripts, docs, utils, mcp-server. NEVER prefix `agentic-workflow/` to paths for: `tests/`, `.github/`.
 
 ---
 

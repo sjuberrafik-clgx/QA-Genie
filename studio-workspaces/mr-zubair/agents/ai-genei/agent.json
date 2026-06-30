@@ -1,0 +1,53 @@
+{
+  "kind": "studio-agent",
+  "version": 1,
+  "id": "ai-genei",
+  "name": "AI Genei",
+  "shortLabel": "AI ",
+  "description": "Primary QA workflow agent for Jira-driven analysis, test design, automation generation, and defect handling.",
+  "workspaceId": "mr-zubair",
+  "status": "draft",
+  "visibility": "workspace",
+  "surfaces": [
+    "chat"
+  ],
+  "baseAgent": "tpm",
+  "toolProfile": "full",
+  "capabilityProfile": "text-knowledge",
+  "toolCategories": [
+    "document",
+    "docparse",
+    "grounding"
+  ],
+  "mcpToolProfile": null,
+  "browserGateway": false,
+  "browserGatewayProfile": null,
+  "brokerEnabled": true,
+  "followupMode": "default",
+  "capabilities": {
+    "browser": false,
+    "jira": false,
+    "filesystem": "read"
+  },
+  "model": {
+    "id": "claude-sonnet-4-6",
+    "speed": "standard"
+  },
+  "mcpServers": [],
+  "skills": [],
+  "tags": [],
+  "category": "custom",
+  "permissionMode": "default",
+  "maxTurns": 50,
+  "maxBudgetUsd": null,
+  "activation": {
+    "active": false,
+    "publishedAt": null,
+    "activatedAt": null
+  },
+  "entry": {
+    "prompt": "prompt.md"
+  },
+  "createdAt": "2026-06-26T15:31:03.896Z",
+  "updatedAt": "2026-06-26T15:31:03.896Z"
+}

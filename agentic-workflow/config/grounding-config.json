@@ -480,6 +480,13 @@
                 "labels": [],
                 "ancestorPageIds": [],
                 "_comment": "baseUrl, spaceKeys, credentials are loaded from .env (CONFLUENCE_BASE_URL, CONFLUENCE_SPACE_KEYS, JIRA_EMAIL, JIRA_API_TOKEN). Set ancestorPageIds to restrict search to specific page trees."
+            },
+            {
+                "type": "repo-mesh",
+                "name": "Federated Contract Mesh",
+                "enabled": false,
+                "priority": 2,
+                "_comment": "Backend microservice contracts (REST/Kafka/Elastic) from the repoMesh section. Enable after running 'repo-mesh-setup sync'. Flows through the same KB pipeline (intent gate, cache, Section-7 injection) and is local/offline. The dedicated SDK tools (trace_full_stack, search_contracts, ...) are the primary path; this provider adds passive injection."
             }
         ],
         "cache": {
@@ -543,7 +550,18 @@
                 "architecture",
                 "design",
                 "PRD",
-                "product requirements"
+                "product requirements",
+                "kafka",
+                "topic",
+                "event",
+                "elastic",
+                "index",
+                "endpoint",
+                "api",
+                "microservice",
+                "backend service",
+                "full-stack",
+                "contract"
             ],
             "_comment": "Intent detection determines when to fetch KB content automatically. domainTerms are project-specific; triggerTerms are generic knowledge-seeking indicators."
         },
@@ -573,5 +591,64 @@
         "dnaFallbackToBM25": true,
         "l2CardMaxChars": 800,
         "l1SkeletonMaxChars": 5000
+    },
+    "repoMesh": {
+        "enabled": false,
+        "_comment": "Federated Contract Mesh — ingests backend microservice repos as a knowledge base. Extracts QA-relevant CONTRACTS (REST endpoints, Kafka topics, Elastic indices, DTOs, config) — never raw source — compresses them to L1/L2/L3 DNA in a SEPARATE store (repo-mesh-data/) so 100+ backend repos never bloat the test-framework index. Incremental: only re-indexes when a contract's semantic hash changes, not when bytes change.",
+        "source": {
+            "provider": "github",
+            "org": "",
+            "query": "aotf",
+            "defaultBranch": "main",
+            "fetchMethod": "partial-clone",
+            "cloneDir": "repo-mesh-data/repos",
+            "include": ["**/*.java", "**/application*.yml", "**/application*.yaml", "**/application*.properties", "**/bootstrap*.yml"],
+            "exclude": ["**/test/**", "**/target/**", "**/generated/**", "**/*Test.java", "**/*IT.java"],
+            "_comment": "org and credentials come from .env (GITHUB_ORG, GITHUB_TOKEN). fetchMethod: 'partial-clone' (git --filter=blob:none, full fidelity + fast local diff) or 'api' (GitHub REST, lighter but rate-limited). Repos auto-discovered from the org via the query when 'repos' is empty."
+        },
+        "repos": [],
+        "extractors": {
+            "languages": ["java"],
+            "java": true,
+            "yaml": true,
+            "properties": true
+        },
+        "contracts": {
+            "rest": true,
+            "kafka": true,
+            "elastic": true,
+            "dataModels": true,
+            "config": true
+        },
+        "graph": {
+            "seedPath": "repo-mesh/data-flow-seed.json",
+            "persistPath": "repo-mesh-data/full-stack-graph.json",
+            "_comment": "seedPath holds the curated repo→Kafka→Elastic data-flow map (from the architecture spreadsheet). Derived edges from extracted contracts are merged on top."
+        },
+        "dna": {
+            "persistPath": "repo-mesh-data/contract-dna.json",
+            "statePath": "repo-mesh-data/sync-state.json",
+            "l2CardMaxChars": 600,
+            "l1MaxChars": 4000
+        },
+        "sync": {
+            "pollIntervalMinutes": 0,
+            "webhookEnabled": false,
+            "concurrency": 4,
+            "_comment": "pollIntervalMinutes=0 disables polling. Set GIT_WEBHOOK_SECRET in .env and webhookEnabled=true for push-driven delta sync."
+        },
+        "retrieval": {
+            "maxServices": 4,
+            "maxContentChars": 4000,
+            "defaultResolution": "L2",
+            "_comment": "Graph navigation selects at most maxServices relevant services per task; each rendered at defaultResolution (L1/L2/L3) within maxContentChars to prevent context bloat."
+        },
+        "fullStackAssertions": {
+            "enabled": false,
+            "gracefulDegradation": true,
+            "kafka": { "enabled": false, "consumeTimeoutMs": 15000 },
+            "elastic": { "enabled": false, "queryTimeoutMs": 10000 },
+            "_comment": "Requires test-runner network access + credentials to UAT Kafka/Elastic (see .env). gracefulDegradation=true downgrades to contract-verified + API/UI assertions and marks the run partial when brokers are unreachable."
+        }
     }
 }

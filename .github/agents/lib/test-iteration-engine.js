@@ -5,7 +5,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 
 class TestIterationEngine {
     constructor() {
@@ -84,9 +84,9 @@ class TestIterationEngine {
             const normalizedPath = specPath.replace(/\\/g, '/');
             console.log(`\n🧪 Executing tests: ${normalizedPath}`);
 
-            const output = execSync(
-                `npx playwright test "${normalizedPath}" --reporter=json`,
-                { encoding: 'utf-8', stdio: 'pipe' }
+            const output = execFileSync(
+                'npx', ['playwright', 'test', normalizedPath, '--reporter=json'],
+                { encoding: 'utf-8', stdio: 'pipe', shell: false }
             );
 
             // Parse JSON output
@@ -157,12 +157,12 @@ ${testResult.error ? testResult.error.substring(0, 500) : 'Tests timing out - se
 
 🚨 MANDATORY STEPS TO FIX:
 
-1. **Launch Playwright MCP Browser**
-   - Use: unified_navigate to open the application
+1. **Launch the browser MCP**
+   - Use: open (Glass) / unified_navigate (legacy) to open the application
    - Navigate to the test URL with proper authentication tokens
 
-2. **Take DOM Snapshot**
-   - Use: unified_snapshot({ verbose: true })
+2. **Perceive the page**
+   - Use: see() (Glass) / unified_snapshot({ verbose: true }) (legacy)
    - Analyze the actual DOM structure
    - Find the correct selectors for elements
 

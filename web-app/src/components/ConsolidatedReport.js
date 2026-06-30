@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { memo, useState, useEffect, useCallback, useMemo } from 'react';
 import apiClient from '@/lib/api-client';
 import DonutChart from './DonutChart';
 import AllureLogo from './AllureLogo';
@@ -40,7 +40,17 @@ function CountBar({ count, maxCount, passed = 0, failed = 0, broken = 0, skipped
 }
 
 /* ──────────────── Compute suite status breakdown ──────────────── */
+// Perf: memoize by suite reference. A large Playwright report can hold
+// thousands of nested suites and this function used to recurse the full
+// subtree on every SuiteRow render. Suite objects are stable across
+// renders (rebuilt only when `data` changes), so a WeakMap cache turns
+// repeated calls into O(1).
+const breakdownCache = new WeakMap();
 function suiteStatusBreakdown(suite) {
+    if (suite && typeof suite === 'object') {
+        const cached = breakdownCache.get(suite);
+        if (cached) return cached;
+    }
     let passed = 0, failed = 0, broken = 0, skipped = 0;
     for (const spec of (suite.specs || [])) {
         if (spec.status === 'passed' || spec.status === 'expected') passed++;
@@ -56,11 +66,14 @@ function suiteStatusBreakdown(suite) {
         broken += s.broken;
         skipped += s.skipped;
     }
-    return { passed, failed, broken, skipped };
+    const result = { passed, failed, broken, skipped };
+    if (suite && typeof suite === 'object') breakdownCache.set(suite, result);
+    return result;
 }
 
 /* ──────────────────────── Suite Row ──────────────────────── */
-function SuiteRow({ suite, depth = 0, sortMode, maxCount = 0 }) {
+// Perf: memo to avoid re-rendering closed subtrees when sibling state changes.
+const SuiteRow = memo(function SuiteRow({ suite, depth = 0, sortMode, maxCount = 0 }) {
     const [open, setOpen] = useState(depth === 0);
     const totalCount = countAllSpecs(suite);
     const hasContent = (suite.specs?.length || 0) > 0 || (suite.suites || []).length > 0;
@@ -109,10 +122,11 @@ function SuiteRow({ suite, depth = 0, sortMode, maxCount = 0 }) {
             )}
         </div>
     );
-}
+});
 
-/* ──────────────────────── Spec Item ──────────────────────── */
-function SpecItem({ spec, index }) {
+/* ────────────────────── Spec Item ────────────────────── */
+// Perf: memo so 1000s of leaf rows don't all re-render on parent filter/sort.
+const SpecItem = memo(function SpecItem({ spec, index }) {
     const [showError, setShowError] = useState(false);
     const isFailed = spec.status === 'failed' || spec.status === 'unexpected';
     const isBroken = spec.isBroken || spec.status === 'broken';
@@ -161,7 +175,7 @@ function SpecItem({ spec, index }) {
             )}
         </div>
     );
-}
+});
 
 /* ──────────────────────── Filter Pill Config ──────────────────────── */
 const PILL_CONFIG = [

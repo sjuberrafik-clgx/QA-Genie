@@ -13,6 +13,7 @@ function ConnectionIndicator({ compact = false }) {
     useEffect(() => {
         let mounted = true;
         const check = async () => {
+            if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
             try {
                 const data = await apiClient.ready();
                 if (mounted) setStatus(data?.ready ? 'online' : 'offline');
@@ -21,8 +22,15 @@ function ConnectionIndicator({ compact = false }) {
             }
         };
         check();
-        const id = setInterval(check, 30_000);
-        return () => { mounted = false; clearInterval(id); };
+        // Perf: pause polling while tab is hidden; re-check on focus.
+        const id = setInterval(check, 60_000);
+        const onVisible = () => { if (document.visibilityState === 'visible') check(); };
+        document.addEventListener('visibilitychange', onVisible);
+        return () => {
+            mounted = false;
+            clearInterval(id);
+            document.removeEventListener('visibilitychange', onVisible);
+        };
     }, []);
 
     const label = status === 'online' ? 'System Online' : status === 'offline' ? 'System Offline' : 'Checking...';

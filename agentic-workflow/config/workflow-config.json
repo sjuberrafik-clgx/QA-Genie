@@ -271,9 +271,33 @@
         "headedExecution": true
     },
     "mcpStrategy": {
-        "version": "2.1",
-        "description": "Hybrid MCP strategy - Playwright for initial exploration, Chrome DevTools for failure recovery",
+        "version": "2.2",
+        "description": "Hybrid MCP strategy - intelligent primitives first, Playwright for exploration, Chrome DevTools for failure recovery",
         "freshBrowserRequired": true,
+        "preferredPrimitives": {
+            "description": "High-level, self-healing, single round-trip tools. Prefer these over the low-level navigate/snapshot/click loop to reduce tool calls, context, and selector hallucination.",
+            "toolProfile": "intelligent",
+            "tools": [
+                "unified_act",
+                "unified_observe",
+                "unified_extract",
+                "unified_crawl"
+            ],
+            "capabilities": [
+                "self-healing-target-resolution",
+                "deterministic-fuzzy-name-matching",
+                "auto-popup-dismissal",
+                "autonomous-devtools-crawl",
+                "compact-token-lean-results"
+            ],
+            "useFor": [
+                "fast-action",
+                "selector-harvesting",
+                "assertion-extraction",
+                "site-mapping-and-coverage"
+            ],
+            "satisfiesExplorationGates": true
+        },
         "initialExploration": {
             "provider": "playwright",
             "freshBrowserFirst": true,
@@ -790,7 +814,65 @@
                 "framework",
                 "grounding"
             ],
-            "filegenie": []
+            "filegenie": [],
+            "_workspaceComment": "Workspace/custom agents created via Studio. Broad envelope so they can fulfil dynamic prompts (e.g. Summarizer asked to summarise a Jira URL). Both `workspace` and `custom` aliases are honoured.",
+            "workspace": [
+                "jira",
+                "evidence",
+                "document",
+                "framework",
+                "grounding",
+                "pipeline",
+                "docparse"
+            ],
+            "custom": [
+                "jira",
+                "evidence",
+                "document",
+                "framework",
+                "grounding",
+                "pipeline",
+                "docparse"
+            ]
+        }
+    },
+    "orchestration": {
+        "_comment": "Unified multi-agent orchestration engine (WorkflowConductor). Executes declarative blueprints whose nodes reference agents by catalog id (core:<mode> or workspace:<wsId>:<assetId>), so default and custom Studio agents are interchangeable. Powers BOTH chat master-agent auto-orchestration and the Studio visual builder via the SAME engine.",
+        "enabled": true,
+        "conductor": {
+            "_comment": "Runtime execution settings for blueprint runs. budget caps abort runaway cost/loops.",
+            "maxParallel": 4,
+            "defaultNodeTimeoutMs": 300000,
+            "defaultOnError": "abort",
+            "budget": {
+                "maxNodes": 50,
+                "maxDurationMs": 1800000,
+                "maxTokens": 0
+            },
+            "persistRuns": true,
+            "runsDir": "agentic-workflow/test-artifacts/orchestration-runs"
+        },
+        "delegation": {
+            "_comment": "Agent-to-agent handoff (delegate_to_specialist). Depth cap is structural — delegated sub-sessions cannot delegate again.",
+            "enabled": true,
+            "maxDepth": 1,
+            "maxPerTurn": 3,
+            "subAgentTimeoutMs": 300000,
+            "streamDeltas": true,
+            "deltaFlushMs": 120,
+            "maxStreamedChars": 24000
+        },
+        "routing": {
+            "_comment": "Semantic intent routing — 'Semantic Router, LLM-decided, deterministically-guarded'. mode=llm: the in-loop master agent (TPM) decides (zero extra call); mode=hybrid: BM25 recall shortlists then the LLM decides; mode=deterministic: BM25 only (fallback). RECALL never decides — it only shortlists to avoid roster bloat. GUARDS (validation/permission/cache/HITL) are always deterministic.",
+            "mode": "hybrid",
+            "recall": "bm25",
+            "shortlistK": 8,
+            "confidenceThreshold": 0.55,
+            "marginRatio": 1.15,
+            "decisionCacheTtlMs": 300000,
+            "hitlOnLowConfidence": true,
+            "routerModel": "",
+            "_routerModelNote": "Optional cheaper/faster model for the HEADLESS constrained micro-router. Empty = reuse sdk.model. Only used when no in-loop master agent is available."
         }
     },
     "cognitiveLoop": {

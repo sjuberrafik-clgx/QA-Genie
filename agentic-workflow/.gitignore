@@ -15,6 +15,9 @@ allure-results/
 .github/agents/state/*.json
 !.github/agents/state/.gitignore
 
+# Federated Contract Mesh — cloned repos + compiled DNA/graph (regenerated from source repos)
+repo-mesh-data/
+
 # OS files
 Thumbs.db
 .DS_Store

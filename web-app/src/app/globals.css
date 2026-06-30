@@ -2,6 +2,21 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─────────────────────────────────────────────────────────────────────────
+   Perf: native off-screen rendering for the chat timeline.
+   Each timeline item (message / tool group / approval) opts into
+   `content-visibility: auto`, which lets the browser skip layout, paint,
+   and rasterization of items outside the viewport. `contain-intrinsic-size`
+   reserves an estimated height so the scrollbar / scroll position stays
+   stable while items are virtual. Items become real on scroll-near.
+   We deliberately do NOT apply this to the streaming bubble (token append
+   would thrash the intrinsic-size estimate).
+   ───────────────────────────────────────────────────────────────────────── */
+.chat-timeline-item {
+    content-visibility: auto;
+    contain-intrinsic-size: 0 220px;
+}
+
 :root {
     --max-width: 1400px;
     --sidebar-width: 260px;
@@ -1946,6 +1961,7 @@ h2 {
     overflow-wrap: anywhere;
     word-break: break-word;
     line-height: 1.7;
+    text-wrap: pretty;
 }
 
 /* ── Headings ── */
@@ -1953,6 +1969,7 @@ h2 {
 .chat-markdown h2,
 .chat-markdown h3 {
     @apply font-semibold mt-4 mb-2 text-surface-900;
+    text-wrap: balance;
 }
 
 .chat-markdown h1 {
@@ -1973,9 +1990,74 @@ h2 {
     @apply mb-2.5 leading-relaxed;
 }
 
-/* ── Inline code ── */
+/* ── Inline code (un-pilled) ── */
 .chat-markdown code {
-    @apply bg-brand-50 text-brand-700 px-1.5 py-0.5 rounded text-[13px] font-mono border border-brand-100;
+    @apply bg-brand-50 text-brand-700 px-1.5 py-0.5 rounded font-mono border border-brand-100;
+    font-size: 0.86em;
+}
+
+/* ─── Chat-bubble accent ribbon (assistant) ──────────────────────── */
+.chat-bubble {
+    overflow: visible;
+    /* allow ribbon to bleed; nested overflow handled per-block */
+}
+
+.chat-bubble--assistant::before {
+    content: '';
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    left: 0;
+    width: 3px;
+    border-radius: 3px;
+    background: var(--agent-accent, theme('colors.brand.500'));
+    opacity: 0.85;
+}
+
+.chat-bubble--assistant {
+    border-left-width: 0 !important;
+}
+
+/* Clip long children inside bubble but never the ribbon */
+.chat-bubble--assistant>.chat-markdown {
+    overflow-x: clip;
+}
+
+/* ─── Status pills (inline-code upgrades) ───────────────────────── */
+.chat-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.05rem 0.45rem 0.1rem 0.4rem;
+    border-radius: 999px;
+    font-size: 0.78em;
+    font-weight: 600;
+    line-height: 1.5;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    vertical-align: baseline;
+    @apply ring-1;
+}
+
+.chat-status-pill__dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: currentColor;
+    opacity: 0.7;
+    flex-shrink: 0;
+}
+
+.chat-status-pill--jira {
+    text-decoration: none !important;
+    cursor: pointer;
+    font-feature-settings: 'tnum';
+    transition: filter 0.15s ease;
+}
+
+.chat-status-pill--jira:hover {
+    filter: brightness(0.96) saturate(1.1);
 }
 
 /* ── Code blocks — safety-net for any residual <pre> not handled by CodeBlock ── */
@@ -2078,25 +2160,79 @@ h2 {
     opacity: 0.5;
 }
 
-/* ── Tables ── */
+/* ── Tables ──────────────────────────────────────────────────────
+   Design goals:
+   - Robust against overlap (root cause of legacy bug: `min-width: max-content`
+     + auto layout + sticky thead inside `overflow-hidden` ancestor).
+   - Fixed table layout with equal column widths, so columns never collide.
+   - Sticky header with opaque background — no see-through ghosting on scroll.
+   - Edge-fade indicators only when the wrapper is actually overflowing.
+   - Optional frozen first column for wide tables (auto when cols ≥ 5 and narrow).
+   - Mobile (<640px) collapses each row into a card-per-row.
+*/
 .chat-table-shell {
-    @apply relative my-3 rounded-xl border border-surface-200 overflow-hidden bg-white;
-    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    position: relative;
+    isolation: isolate;
+    /* contains sticky thead + fade overlays */
+    margin: 0.85rem 0;
+    border-radius: 14px;
+    border: 1px solid theme('colors.surface.200');
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 18px rgba(15, 23, 42, 0.03);
+    overflow: hidden;
+    /* clips fade gradients to rounded corners */
 }
 
-.chat-table-toolbar {
-    @apply absolute top-1.5 right-1.5 z-[1] flex items-center gap-1.5 opacity-0 transition-opacity duration-150;
+/* Edge fade indicators driven by data-overflow-left/right toggled in JS */
+.chat-table-shell::before,
+.chat-table-shell::after {
+    content: '';
+    position: absolute;
+    top: 38px;
+    /* below toolbar */
+    bottom: 0;
+    width: 28px;
     pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.18s ease;
+    z-index: 2;
 }
 
-.chat-table-shell:hover .chat-table-toolbar,
-.chat-table-shell:focus-within .chat-table-toolbar {
+.chat-table-shell::before {
+    left: 0;
+    background: linear-gradient(to right, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0));
+}
+
+.chat-table-shell::after {
+    right: 0;
+    background: linear-gradient(to left, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0));
+}
+
+.chat-table-shell[data-overflow-left='true']::before {
     opacity: 1;
-    pointer-events: auto;
+}
+
+.chat-table-shell[data-overflow-right='true']::after {
+    opacity: 1;
+}
+
+/* ── Toolbar (always-visible compact strip) ── */
+.chat-table-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.4rem 0.55rem;
+    background: linear-gradient(180deg, rgba(248, 250, 252, 0.95), rgba(248, 250, 252, 0.6));
+    border-bottom: 1px solid theme('colors.surface.200');
+}
+
+.chat-table-toolbar--inline {
+    /* compact strip variant */
 }
 
 .chat-table-toolbar__meta {
-    @apply inline-flex items-center gap-1.5 rounded-md bg-white/95 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-surface-500 shadow-sm ring-1 ring-surface-200;
+    @apply inline-flex items-center gap-1.5 rounded-md bg-white/90 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-surface-500 ring-1 ring-surface-200;
 }
 
 .chat-table-toolbar__dot {
@@ -2104,50 +2240,107 @@ h2 {
     background: var(--gradient-brand);
 }
 
-.chat-table-toolbar__copy {
-    @apply inline-flex items-center gap-1 rounded-md bg-white px-2 py-1 text-[10px] font-semibold text-surface-600 shadow-sm ring-1 ring-surface-200 transition-all hover:bg-brand-50 hover:text-brand-700 hover:ring-brand-200;
+.chat-table-toolbar>div:last-child {
+    margin-left: auto;
 }
 
-.chat-table-toolbar__copy svg {
+.chat-table-toolbar__action {
+    @apply inline-flex items-center gap-1 rounded-md bg-white px-2 py-1 text-[10px] font-semibold text-surface-600 ring-1 ring-surface-200 transition-all hover:bg-brand-50 hover:text-brand-700 hover:ring-brand-200;
+    margin-left: 0.35rem;
+}
+
+.chat-table-toolbar__action svg {
     @apply h-3 w-3;
 }
 
+/* Distribute multiple action buttons */
+.chat-table-toolbar .chat-table-toolbar__action+.chat-table-toolbar__action {
+    margin-left: 0.25rem;
+}
+
+/* ── Scroll wrapper ── */
 .chat-table-wrapper {
-    @apply rounded-xl;
     overflow-x: auto;
+    overflow-y: hidden;
+    /* vertical scroll handled by parent; sticky thead lives in shell */
     -webkit-overflow-scrolling: touch;
-    max-height: 540px;
+    background: #fff;
+}
+
+.chat-table-wrapper--modal {
+    max-height: calc(85vh - 60px);
     overflow-y: auto;
 }
 
 .chat-table-wrapper::-webkit-scrollbar {
-    height: 6px;
-    width: 6px;
+    height: 8px;
+    width: 8px;
 }
 
 .chat-table-wrapper::-webkit-scrollbar-thumb {
     @apply rounded-full bg-surface-300;
 }
 
+.chat-table-wrapper::-webkit-scrollbar-thumb:hover {
+    @apply bg-surface-400;
+}
+
+/* ── Table itself ── */
 .chat-markdown table {
-    @apply w-full border-collapse text-sm;
-    /* Use max-content so narrow tables fit without forced horizontal scroll,
-       but wide tables still scroll naturally inside the wrapper */
-    min-width: max-content;
+    width: 100%;
+    table-layout: fixed;
+    /* equal column widths — prevents content-driven overlap */
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 13.5px;
     border: none;
     border-radius: 0;
 }
 
+/* When the table has many columns, allow it to exceed wrapper width so the
+   wrapper's horizontal scroll engages — but only via a stable minimum width
+   per column, never via `max-content`. */
+.chat-table-shell[data-cols='5'] table {
+    min-width: 760px;
+}
+
+.chat-table-shell[data-cols='6'] table {
+    min-width: 900px;
+}
+
+.chat-table-shell[data-cols='7'] table {
+    min-width: 1040px;
+}
+
+.chat-table-shell[data-cols='8'] table {
+    min-width: 1180px;
+}
+
+.chat-table-shell:not([data-cols]) table,
+.chat-table-shell[data-cols='1'] table,
+.chat-table-shell[data-cols='2'] table,
+.chat-table-shell[data-cols='3'] table,
+.chat-table-shell[data-cols='4'] table {
+    min-width: 0;
+}
+
 .chat-markdown thead {
-    background: var(--gradient-brand);
+    background: #1c8090;
+    /* solid brand-600 — opaque sticky header, no gradient bleed */
     position: sticky;
     top: 0;
     z-index: 1;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .chat-markdown th {
-    @apply px-3 py-2.5 text-left font-semibold text-white text-xs uppercase tracking-wider whitespace-nowrap;
+    @apply px-3 py-2.5 text-left font-semibold text-white text-[11.5px] uppercase tracking-wider align-middle;
     border: none;
+    background: inherit;
+    /* keeps each cell opaque under sticky */
+    white-space: normal;
+    /* allow wrap to avoid overflow */
+    overflow-wrap: anywhere;
 }
 
 .chat-markdown th:not(:last-child) {
@@ -2155,46 +2348,173 @@ h2 {
 }
 
 .chat-markdown td {
-    @apply border-b border-surface-200 px-3 py-2 text-surface-700 align-top;
+    @apply border-b border-surface-200 px-3 py-2.5 text-surface-700 align-top;
     border-left: none;
     border-right: none;
-    min-width: 80px;
-    line-height: 1.55;
+    line-height: 1.6;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: normal;
 }
 
-/* First column (Test Step ID) — keep narrow */
-.chat-markdown td:first-child,
-.chat-markdown th:first-child {
-    min-width: 60px;
-    max-width: 90px;
+/* Narrow first column for tables whose first column is numeric/ID-shaped.
+   Applied via JS by detecting cell content, not by positional guess. */
+.chat-table-shell[data-narrow-first='true'] .chat-markdown td:first-child,
+.chat-table-shell[data-narrow-first='true'] .chat-markdown th:first-child {
+    width: 64px;
     white-space: nowrap;
     text-align: center;
     font-variant-numeric: tabular-nums;
+    color: theme('colors.surface.500');
+    font-weight: 600;
 }
 
-/* Content columns — allow wrapping with comfortable minimum width */
-.chat-markdown td:nth-child(2),
-.chat-markdown td:nth-child(3),
-.chat-markdown td:nth-child(4) {
-    min-width: 200px;
-    max-width: 520px;
-    white-space: normal;
-    overflow-wrap: anywhere;
+/* Frozen first column for wide + narrow-first tables */
+.chat-table-shell[data-frozen-first='true'] .chat-markdown td:first-child,
+.chat-table-shell[data-frozen-first='true'] .chat-markdown th:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: #fff;
+    box-shadow: 1px 0 0 theme('colors.surface.200');
 }
 
-.chat-markdown tbody tr:nth-child(even) {
-    @apply bg-surface-50/60;
+.chat-table-shell[data-frozen-first='true'] .chat-markdown thead th:first-child {
+    background: #1c8090;
+    z-index: 3;
 }
 
-.chat-markdown tbody tr:hover {
-    @apply bg-brand-50/40;
+.chat-markdown tbody tr:nth-child(even) td {
+    background: rgba(248, 250, 252, 0.55);
+}
+
+.chat-table-shell[data-frozen-first='true'] .chat-markdown tbody tr:nth-child(even) td:first-child {
+    background: #f8fafc;
+}
+
+.chat-markdown tbody tr:hover td {
+    background: rgba(28, 128, 144, 0.045);
     transition: background 0.15s;
+}
+
+.chat-table-shell[data-frozen-first='true'] .chat-markdown tbody tr:hover td:first-child {
+    background: rgba(28, 128, 144, 0.07);
 }
 
 /* Inline code inside table cells stays readable */
 .chat-markdown td code {
     @apply bg-surface-100 text-surface-800 border-surface-200;
     word-break: break-word;
+    font-size: 0.85em;
+}
+
+/* ── Mobile: cards-per-row layout ── */
+@media (max-width: 640px) {
+
+    .chat-table-shell:not(.chat-table-shell--modal) .chat-markdown table,
+    .chat-table-shell:not(.chat-table-shell--modal) .chat-markdown thead,
+    .chat-table-shell:not(.chat-table-shell--modal) .chat-markdown tbody,
+    .chat-table-shell:not(.chat-table-shell--modal) .chat-markdown tr,
+    .chat-table-shell:not(.chat-table-shell--modal) .chat-markdown th,
+    .chat-table-shell:not(.chat-table-shell--modal) .chat-markdown td {
+        display: block;
+        width: auto !important;
+        min-width: 0 !important;
+        position: static !important;
+    }
+
+    .chat-table-shell:not(.chat-table-shell--modal) .chat-markdown thead {
+        display: none;
+    }
+
+    .chat-table-shell:not(.chat-table-shell--modal) .chat-markdown tbody tr {
+        padding: 0.65rem 0.85rem;
+        border-bottom: 1px solid theme('colors.surface.200');
+    }
+
+    .chat-table-shell:not(.chat-table-shell--modal) .chat-markdown tbody tr:last-child {
+        border-bottom: 0;
+    }
+
+    .chat-table-shell:not(.chat-table-shell--modal) .chat-markdown td {
+        border: 0;
+        padding: 0.2rem 0;
+        font-size: 13px;
+    }
+
+    .chat-table-shell:not(.chat-table-shell--modal) .chat-markdown td:first-child {
+        font-weight: 700;
+        color: theme('colors.brand.700');
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-bottom: 0.25rem;
+    }
+}
+
+/* ── Expand-to-modal view ── */
+.chat-table-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: rgba(15, 23, 42, 0.6);
+    backdrop-filter: blur(6px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: clamp(1rem, 4vw, 3rem);
+    animation: chatTableModalIn 0.18s ease-out;
+}
+
+@keyframes chatTableModalIn {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+.chat-table-modal__panel {
+    width: 100%;
+    max-width: 1400px;
+    max-height: 90vh;
+    background: #fff;
+    border-radius: 18px;
+    box-shadow: 0 28px 60px rgba(0, 0, 0, 0.25);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.chat-table-modal__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.65rem 0.9rem;
+    border-bottom: 1px solid theme('colors.surface.200');
+    background: theme('colors.surface.50');
+}
+
+.chat-table-modal__close {
+    @apply inline-flex h-7 w-7 items-center justify-center rounded-md text-surface-500 ring-1 ring-surface-200 bg-white transition-colors hover:bg-surface-100 hover:text-surface-700;
+}
+
+.chat-table-shell--modal {
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    flex: 1;
+    overflow: hidden;
+}
+
+.chat-table-shell--modal .chat-table-wrapper {
+    overflow-x: auto;
+    overflow-y: auto;
+    max-height: calc(90vh - 56px);
 }
 
 /* ── Links ── */
@@ -3015,6 +3335,11 @@ h2 {
 /* ─── Spec item ─── */
 .allure-spec-item {
     transition: background 0.15s;
+    /* Perf: skip layout/paint for off-screen specs in long reports.
+       Intrinsic size (~52px) matches the average spec row height so the
+       scroll position stays accurate while items are virtual. */
+    content-visibility: auto;
+    contain-intrinsic-size: 0 52px;
 }
 
 .allure-spec-item:hover {
@@ -3738,4 +4063,241 @@ body {
         opacity: 1;
         transform: translateY(0);
     }
+}
+
+/* ============================================================
+   Per-message action toolbar
+   ============================================================
+   Hover-revealed strip beneath assistant messages with Regenerate,
+   Continue, Simplify, Explain, Copy, and 👍 / 👎 feedback. Visible
+   muted by default, snaps to full opacity when the group is hovered
+   or any button has focus (keyboard a11y).
+   ============================================================ */
+.chat-msg-toolbar {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.125rem;
+    padding: 0.125rem 0.375rem;
+    border-radius: 9999px;
+    background: rgba(255, 255, 255, 0.7);
+    border: 1px solid theme('colors.surface.150', theme('colors.surface.200'));
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    opacity: 0.55;
+    transition: opacity 0.15s ease, box-shadow 0.15s ease;
+}
+
+.group:hover .chat-msg-toolbar,
+.chat-msg-toolbar:hover,
+.chat-msg-toolbar:focus-within {
+    opacity: 1;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+}
+
+.chat-msg-toolbar__btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.1875rem 0.5rem;
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1;
+    color: theme('colors.surface.500');
+    background: transparent;
+    border: none;
+    border-radius: 9999px;
+    cursor: pointer;
+    transition: color 0.12s ease, background 0.12s ease;
+    white-space: nowrap;
+}
+
+.chat-msg-toolbar__btn:hover:not(:disabled) {
+    color: theme('colors.brand.600');
+    background: theme('colors.brand.50');
+}
+
+.chat-msg-toolbar__btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.chat-msg-toolbar__btn--copied {
+    color: theme('colors.accent.600') !important;
+}
+
+.chat-msg-toolbar__btn--rate {
+    padding: 0.1875rem 0.375rem;
+    font-size: 12px;
+}
+
+.chat-msg-toolbar__btn--rate.is-active.is-up {
+    color: theme('colors.emerald.600');
+    background: theme('colors.emerald.50');
+}
+
+.chat-msg-toolbar__btn--rate.is-active.is-down {
+    color: theme('colors.rose.600');
+    background: theme('colors.rose.50');
+}
+
+.chat-msg-toolbar__divider {
+    width: 1px;
+    height: 0.875rem;
+    background: theme('colors.surface.200');
+    margin: 0 0.125rem;
+    flex-shrink: 0;
+}
+
+/* ============================================================
+   ToolCallCard — diff-style mutation preview
+   ============================================================ */
+.mutation-diff {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.mutation-diff__change {
+    border-radius: 0.5rem;
+    overflow: hidden;
+    border: 1px solid theme('colors.surface.200');
+    background: theme('colors.surface.50');
+}
+
+.mutation-diff__field {
+    padding: 0.375rem 0.625rem;
+    font-size: 11px;
+    font-weight: 600;
+    color: theme('colors.surface.700');
+    background: theme('colors.surface.100');
+    border-bottom: 1px solid theme('colors.surface.200');
+    letter-spacing: 0.01em;
+}
+
+.mutation-diff__hunk {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 11.5px;
+    line-height: 1.5;
+}
+
+.mutation-diff__line {
+    display: grid;
+    grid-template-columns: 1.25rem 1fr;
+    align-items: flex-start;
+    padding: 0.25rem 0.5rem 0.25rem 0.25rem;
+    gap: 0.25rem;
+}
+
+.mutation-diff__line--remove {
+    background: rgba(254, 226, 226, 0.55);
+    color: theme('colors.rose.700');
+}
+
+.mutation-diff__line--remove .mutation-diff__text {
+    text-decoration: line-through;
+    text-decoration-color: rgba(225, 29, 72, 0.45);
+}
+
+.mutation-diff__line--add {
+    background: rgba(220, 252, 231, 0.55);
+    color: theme('colors.emerald.700');
+}
+
+.mutation-diff__sigil {
+    text-align: center;
+    font-weight: 700;
+    user-select: none;
+    opacity: 0.7;
+}
+
+.mutation-diff__text {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    font: inherit;
+    color: inherit;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+/* ============================================================
+   ReasoningPanel — timeline view
+   ============================================================ */
+.reasoning-timeline {
+    list-style: none;
+    margin: 0;
+    padding: 0.25rem 0 0.25rem 0.25rem;
+    position: relative;
+}
+
+.reasoning-timeline::before {
+    content: "";
+    position: absolute;
+    left: 0.5625rem;
+    top: 0.75rem;
+    bottom: 0.5rem;
+    width: 1px;
+    background: linear-gradient(to bottom,
+            theme('colors.violet.200'),
+            theme('colors.violet.100') 80%,
+            transparent);
+}
+
+.reasoning-timeline__item {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1.25rem 1fr;
+    gap: 0.5rem;
+    padding: 0.25rem 0 0.5rem 0;
+}
+
+.reasoning-timeline__item:last-child {
+    padding-bottom: 0.125rem;
+}
+
+.reasoning-timeline__dot {
+    margin-top: 0.375rem;
+    width: 0.625rem;
+    height: 0.625rem;
+    border-radius: 9999px;
+    box-shadow: 0 0 0 3px #fff, 0 0 0 4px rgba(167, 139, 250, 0.18);
+    justify-self: center;
+    flex-shrink: 0;
+}
+
+.reasoning-timeline__content {
+    min-width: 0;
+}
+
+.reasoning-timeline__head {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin-bottom: 0.25rem;
+}
+
+.reasoning-timeline__tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.0625rem 0.375rem;
+    font-size: 10px;
+    font-weight: 600;
+    border-radius: 9999px;
+    letter-spacing: 0.02em;
+    line-height: 1.4;
+}
+
+.reasoning-timeline__body {
+    margin: 0;
+    font-family: inherit;
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: theme('colors.violet.700');
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    background: transparent;
+    padding: 0;
+    border: 0;
 }

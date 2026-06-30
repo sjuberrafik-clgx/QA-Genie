@@ -14,12 +14,6 @@ export default function manifest() {
                 type: 'image/svg+xml',
                 purpose: 'any maskable',
             },
-            {
-                src: '/apple-icon.svg',
-                sizes: 'any',
-                type: 'image/svg+xml',
-                purpose: 'any',
-            },
         ],
     };
 }

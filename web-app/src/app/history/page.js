@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import { Virtuoso } from 'react-virtuoso';
 import apiClient from '@/lib/api-client';
 import ChatMessage from '@/components/ChatMessage';
 import ErrorBanner from '@/components/ErrorBanner';
@@ -10,6 +11,13 @@ import RobotMascotLogo from '@/components/RobotMascotLogo';
 import { formatDate } from '@/lib/report-utils';
 import { ClockIcon, SearchIcon, ConversationIcon, TrashIcon, XIcon, LockIcon, ChevronDownIcon } from '@/components/Icons';
 import useResetScrollOnRouteChange from '@/hooks/useResetScrollOnRouteChange';
+
+// Stable spacers for the virtualized conversation viewer (replaces the pane's
+// px-6 py-5 padding; per-row px-6 is applied in itemContent).
+const HISTORY_VIRTUOSO_COMPONENTS = {
+    Header: () => <div className="h-5" aria-hidden />,
+    Footer: () => <div className="h-5" aria-hidden />,
+};
 
 function getSessionDisplayLabel(session) {
     if (session?.title?.trim()) return session.title.trim();
@@ -62,7 +70,7 @@ export default function HistoryPage() {
             return next;
         });
     };
-    const messagesEndRef = useRef(null);
+    const historyVirtuosoRef = useRef(null);
     const sessionListRef = useRef(null);
     const messagePaneRef = useRef(null);
 
@@ -72,11 +80,6 @@ export default function HistoryPage() {
     useEffect(() => {
         loadSessions();
     }, []);
-
-    // Auto-scroll to bottom when messages change
-    useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messages]);
 
     const loadSessions = async () => {
         setLoading(true);
@@ -357,58 +360,71 @@ export default function HistoryPage() {
                             </div>
                         )}
 
-                        <div ref={messagePaneRef} className="flex-1 overflow-y-auto px-6 py-5">
-                            {!selectedSessionId && (
-                                <div className="flex h-full items-center justify-center">
-                                    <div className="max-w-xl text-center">
-                                        <div className="history-empty-orbit mx-auto mb-5">
-                                            <span className="history-empty-orbit__ring" aria-hidden="true" />
-                                            <span className="history-empty-orbit__ring history-empty-orbit__ring--inner" aria-hidden="true" />
-                                            <div className="history-empty-orbit__core">
-                                                <RobotMascotLogo size={52} mood="minimal" />
+                        {selectedSessionId && !loadingHistory && messages.length > 0 ? (
+                            <Virtuoso
+                                key={selectedSessionId}
+                                ref={historyVirtuosoRef}
+                                className="flex-1 min-h-0"
+                                data={messages}
+                                computeItemKey={(index) => index}
+                                itemContent={(_, msg) => (
+                                    <div className="px-6">
+                                        <div className="py-2">
+                                            <ChatMessage message={msg} />
+                                        </div>
+                                    </div>
+                                )}
+                                components={HISTORY_VIRTUOSO_COMPONENTS}
+                                initialTopMostItemIndex={Math.max(0, messages.length - 1)}
+                                increaseViewportBy={{ top: 600, bottom: 600 }}
+                            />
+                        ) : (
+                            <div ref={messagePaneRef} className="flex-1 overflow-y-auto px-6 py-5">
+                                {!selectedSessionId && (
+                                    <div className="flex h-full items-center justify-center">
+                                        <div className="max-w-xl text-center">
+                                            <div className="history-empty-orbit mx-auto mb-5">
+                                                <span className="history-empty-orbit__ring" aria-hidden="true" />
+                                                <span className="history-empty-orbit__ring history-empty-orbit__ring--inner" aria-hidden="true" />
+                                                <div className="history-empty-orbit__core">
+                                                    <RobotMascotLogo size={52} mood="minimal" />
+                                                </div>
                                             </div>
+                                            <div className="inline-flex items-center gap-2 rounded-full border border-brand-200/70 bg-brand-50/80 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-brand-600">
+                                                <ConversationIcon className="h-3.5 w-3.5" />
+                                                Archive workspace
+                                            </div>
+                                            <h3 className="type-section-title mt-4 text-[1.7rem]">Review prior conversations without losing the current workspace style.</h3>
+                                            <p className="mt-3 text-[15px] font-medium leading-8 tracking-[-0.012em] text-surface-500">
+                                                Select any archived or active session from the left panel to inspect the conversation, attachments, and context that was generated during that run.
+                                            </p>
                                         </div>
-                                        <div className="inline-flex items-center gap-2 rounded-full border border-brand-200/70 bg-brand-50/80 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-brand-600">
-                                            <ConversationIcon className="h-3.5 w-3.5" />
-                                            Archive workspace
-                                        </div>
-                                        <h3 className="type-section-title mt-4 text-[1.7rem]">Review prior conversations without losing the current workspace style.</h3>
-                                        <p className="mt-3 text-[15px] font-medium leading-8 tracking-[-0.012em] text-surface-500">
-                                            Select any archived or active session from the left panel to inspect the conversation, attachments, and context that was generated during that run.
-                                        </p>
                                     </div>
-                                </div>
-                            )}
+                                )}
 
-                            {loadingHistory && (
-                                <div className="flex h-full items-center justify-center py-12">
-                                    <BouncingLoader
-                                        label="Loading conversation"
-                                        caption="Retrieving messages, attachments, and session metadata."
-                                        size="lg"
-                                    />
-                                </div>
-                            )}
-
-                            {selectedSessionId && !loadingHistory && messages.length === 0 && (
-                                <div className="flex items-center justify-center py-12">
-                                    <div className="text-center">
-                                        <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-[20px] border border-surface-100 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.92))] shadow-sm">
-                                            <RobotMascotLogo size={34} mood="minimal" />
-                                        </div>
-                                        <p className="text-sm text-surface-500">No messages were stored in this session.</p>
+                                {loadingHistory && (
+                                    <div className="flex h-full items-center justify-center py-12">
+                                        <BouncingLoader
+                                            label="Loading conversation"
+                                            caption="Retrieving messages, attachments, and session metadata."
+                                            size="lg"
+                                        />
                                     </div>
-                                </div>
-                            )}
+                                )}
 
-                            <div className="space-y-4">
-                                {messages.map((msg, i) => (
-                                    <ChatMessage key={i} message={msg} />
-                                ))}
+                                {selectedSessionId && !loadingHistory && messages.length === 0 && (
+                                    <div className="flex items-center justify-center py-12">
+                                        <div className="text-center">
+                                            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-[20px] border border-surface-100 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.92))] shadow-sm">
+                                                <RobotMascotLogo size={34} mood="minimal" />
+                                            </div>
+                                            <p className="text-sm text-surface-500">No messages were stored in this session.</p>
+                                        </div>
+                                    </div>
+                                )}
+
                             </div>
-
-                            <div ref={messagesEndRef} />
-                        </div>
+                        )}
 
                         {selectedSessionId && (
                             <div className="border-t border-surface-200/80 bg-surface-50/80 px-6 py-3">

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import dynamic from 'next/dynamic';
 import { usePipeline } from '@/hooks/usePipeline';
 import useModelCatalog from '@/hooks/useModelCatalog';
 import StageProgress from '@/components/StageProgress';
@@ -10,7 +11,17 @@ import PageHeader from '@/components/PageHeader';
 import ErrorBanner from '@/components/ErrorBanner';
 import CognitiveInsights from '@/components/CognitiveInsights';
 import MissionEvidenceSummary from '@/components/MissionEvidenceSummary';
-import TerminalWorkbench from '@/components/TerminalWorkbench';
+// Perf: TerminalWorkbench pulls in @xterm/xterm (~200kB) plus the addon-fit
+// bundle and a 750-line component. Lazy-load on the client only — it's not
+// needed for first paint of the dashboard, and SSR can't render xterm anyway.
+const TerminalWorkbench = dynamic(() => import('@/components/TerminalWorkbench'), {
+    ssr: false,
+    loading: () => (
+        <div className="rounded-2xl border border-surface-200 bg-surface-50/60 px-4 py-6 text-xs text-surface-500">
+            Loading terminal workbench…
+        </div>
+    ),
+});
 import apiClient from '@/lib/api-client';
 import { getDefaultModel, hasModelValue } from '@/lib/model-options';
 import { ClockIcon, RetryIcon, DashboardIcon } from '@/components/Icons';
@@ -59,10 +70,18 @@ export default function DashboardPage() {
     }, []);
 
     useEffect(() => {
-        apiClient.ready()
-            .then(data => setBackendStatus(data))
-            .catch(() => setBackendStatus({ ready: false, error: 'Cannot reach backend' }));
-        refreshRuns();
+        // Perf: parallelize bootstrap fetches so a slow backend ready-check
+        // doesn't block the runs list from rendering.
+        Promise.allSettled([
+            apiClient.ready(),
+            Promise.resolve(refreshRuns()),
+        ]).then(([readyRes]) => {
+            if (readyRes.status === 'fulfilled') {
+                setBackendStatus(readyRes.value);
+            } else {
+                setBackendStatus({ ready: false, error: 'Cannot reach backend' });
+            }
+        });
     }, [refreshRuns]);
 
     useEffect(() => {

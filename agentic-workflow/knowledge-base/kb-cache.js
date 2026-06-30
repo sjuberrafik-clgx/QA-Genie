@@ -476,7 +476,9 @@ class KBCache {
     // ─── Internal: Utilities ────────────────────────────────────────
 
     _hash(content) {
-        return crypto.createHash('md5').update(content).digest('hex').slice(0, 16);
+        // CWE-327: use SHA-256 instead of MD5 (MD5 is cryptographically broken).
+        // We still truncate to 16 hex chars because this is a non-security cache key.
+        return crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
     }
 
     _getExpiryTime(fromISO) {

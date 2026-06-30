@@ -1,0 +1,43 @@
+{
+  "kind": "studio-agent",
+  "version": 1,
+  "id": "scri-runner",
+  "name": "Scri-Runner",
+  "shortLabel": "SCR",
+  "description": "Runs existing Playwright specs, captures execution evidence, and turns failures into actionable QA feedback.",
+  "workspaceId": "monica-genie",
+  "status": "published",
+  "visibility": "workspace",
+  "surfaces": [
+    "chat"
+  ],
+  "baseAgent": "tpm",
+  "toolProfile": "full",
+  "followupMode": "default",
+  "capabilities": {
+    "browser": true,
+    "jira": true,
+    "filesystem": "read"
+  },
+  "model": {
+    "id": "claude-sonnet-4-6",
+    "speed": "standard"
+  },
+  "mcpServers": [],
+  "skills": [],
+  "tags": [],
+  "category": "custom",
+  "permissionMode": "default",
+  "maxTurns": 50,
+  "maxBudgetUsd": null,
+  "activation": {
+    "active": true,
+    "publishedAt": "2026-04-27T17:31:44.020Z",
+    "activatedAt": "2026-04-27T17:31:44.020Z"
+  },
+  "entry": {
+    "prompt": "prompt.md"
+  },
+  "createdAt": "2026-04-27T17:31:37.914Z",
+  "updatedAt": "2026-04-27T17:31:44.020Z"
+}

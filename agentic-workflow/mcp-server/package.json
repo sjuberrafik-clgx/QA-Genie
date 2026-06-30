@@ -10,7 +10,10 @@
     "start:http": "node server.js --transport=http --port=3000",
     "dev": "node --watch server.js",
     "test": "node test-server.js",
-    "test:integration": "node test-server-integration.js"
+    "test:integration": "node test-server-integration.js",
+    "bench": "node benchmark/run-benchmark.js",
+    "bench:baseline": "node benchmark/capture-baseline.js",
+    "bench:compare": "node benchmark/compare-metrics.js"
   },
   "keywords": [
     "mcp",

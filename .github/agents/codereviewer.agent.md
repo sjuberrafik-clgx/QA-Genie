@@ -9,17 +9,8 @@ user-invokable: true
 
 **Purpose:** Review and refactor generated Playwright automation scripts to ensure they follow codebase standards, are lightweight, maintainable, and production-ready.
 
-## ⚠️ WORKSPACE ROOT PATH MAPPING
-
-**This agent runs from the WORKSPACE ROOT, NOT from `agentic-workflow/`.** Resolve paths using:
-- `config/workflow-config.json` → `agentic-workflow/config/workflow-config.json`
-- `docs/AUTOMATION_STANDARDS.md` → `agentic-workflow/docs/AUTOMATION_STANDARDS.md`
-- `docs/` → `agentic-workflow/docs/`
-- `.github/agents/lib/` → `.github/agents/lib/` (already at root)
-- `tests/` → `tests/` (already at root)
-
-**ALWAYS prefix `agentic-workflow/` to: config (workflow-config), docs, scripts, utils.**
-
+> **Path mapping:** See [WORKSPACE ROOT PATH MAPPING](../copilot-instructions.md#workspace-root-path-mapping) in `copilot-instructions.md` for the canonical path table. Key file for this agent: `agentic-workflow/docs/AUTOMATION_STANDARDS.md`.
+>
 > **Dynamic Paths:** Review standards adapt to `frameworkMode` in `agentic-workflow/config/workflow-config.json → projectPaths`. In `"basic"` mode, POmanager/launchBrowser patterns are not required — standalone Playwright patterns are valid.
 
 ---

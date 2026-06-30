@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useEffect, useRef } from 'react';
+import { memo, useState, useMemo, useEffect, useRef } from 'react';
 import { getToolDisplay, getCategoryColorClasses } from '@/lib/tool-display-names';
 import { WrenchIcon, CheckIcon, ExclamationIcon, XIcon } from '@/components/Icons';
 import { FileAttachmentCard } from '@/components/FilePreview';
@@ -68,33 +68,30 @@ function MutationPayloadBlock({ payload, isFailed }) {
     const subjectLabel = payload.subject?.label || payload.subject?.id || payload.subject?.title || 'Target resource';
     const changes = Array.isArray(payload.changes) ? payload.changes : [];
     const notes = Array.isArray(payload.notes) ? payload.notes : [];
+    const isReceipt = payload.kind === 'mutation-receipt';
     const accentClasses = isFailed
         ? 'border-red-100/80 bg-red-50/50'
-        : 'border-surface-200/70 bg-white/70';
+        : isReceipt
+            ? 'border-emerald-200/70 bg-emerald-50/40'
+            : 'border-amber-200/70 bg-amber-50/30';
 
     return (
         <div className={`mt-2 ml-[26px] rounded-lg border px-3 py-2.5 space-y-2 ${accentClasses}`}>
             <div className="flex items-center justify-between gap-3 text-[10px] uppercase tracking-wide text-surface-500 font-semibold">
-                <span>{payload.title || (payload.kind === 'mutation-receipt' ? 'Mutation receipt' : 'Mutation preview')}</span>
-                <span className="normal-case text-surface-600">{subjectLabel}</span>
+                <span className="inline-flex items-center gap-1.5">
+                    <span className={`h-1.5 w-1.5 rounded-full ${isReceipt ? 'bg-emerald-500' : isFailed ? 'bg-red-500' : 'bg-amber-500'}`} />
+                    {payload.title || (isReceipt ? 'Mutation applied' : 'Mutation preview')}
+                </span>
+                <span className="normal-case text-surface-600 truncate max-w-[60%]" title={subjectLabel}>{subjectLabel}</span>
             </div>
 
             {changes.length > 0 && (
-                <div className="space-y-1.5">
+                <div className="mutation-diff">
                     {changes.map((change, index) => (
-                        <div key={`${change.field || 'field'}_${index}`} className="rounded-md border border-surface-200/70 bg-surface-50/80 px-2.5 py-2">
-                            <div className="text-[11px] font-semibold text-surface-700">{change.label || change.field || 'Field'}</div>
-                            <div className="mt-1 grid grid-cols-1 gap-1 text-[11px] text-surface-600 sm:grid-cols-2 sm:gap-2">
-                                <div>
-                                    <span className="font-medium text-surface-500">Before: </span>
-                                    <span>{change.beforeDisplay || '(empty)'}</span>
-                                </div>
-                                <div>
-                                    <span className="font-medium text-surface-500">After: </span>
-                                    <span>{change.afterDisplay || '(empty)'}</span>
-                                </div>
-                            </div>
-                        </div>
+                        <DiffChange
+                            key={`${change.field || 'field'}_${index}`}
+                            change={change}
+                        />
                     ))}
                 </div>
             )}
@@ -117,6 +114,49 @@ function MutationPayloadBlock({ payload, isFailed }) {
             )}
         </div>
     );
+}
+
+// ─── Diff-style change row ───────────────────────────────────────────────────
+// Renders one field's before/after value as Git-style hunk lines: red strike-
+// through for removed, green for added. Falls back to a compact label when
+// either side is empty (pure addition/deletion).
+
+function DiffChange({ change }) {
+    const fieldLabel = change.label || change.field || 'Field';
+    const before = formatDiffValue(change.beforeDisplay);
+    const after = formatDiffValue(change.afterDisplay);
+    const isPureAdd = !before && !!after;
+    const isPureDel = !!before && !after;
+
+    return (
+        <div className="mutation-diff__change">
+            <div className="mutation-diff__field">{fieldLabel}</div>
+            <div className="mutation-diff__hunk" role="group" aria-label={`Diff for ${fieldLabel}`}>
+                {!isPureAdd && (
+                    <div className="mutation-diff__line mutation-diff__line--remove">
+                        <span className="mutation-diff__sigil" aria-hidden>−</span>
+                        <pre className="mutation-diff__text">{before || '(empty)'}</pre>
+                    </div>
+                )}
+                {!isPureDel && (
+                    <div className="mutation-diff__line mutation-diff__line--add">
+                        <span className="mutation-diff__sigil" aria-hidden>+</span>
+                        <pre className="mutation-diff__text">{after || '(empty)'}</pre>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+function formatDiffValue(value) {
+    if (value == null) return '';
+    if (typeof value === 'string') return value;
+    try {
+        return JSON.stringify(value, null, 2);
+    } catch {
+        return String(value);
+    }
 }
 
 // ─── Elapsed Timer ───────────────────────────────────────────────────────────
@@ -318,7 +358,7 @@ function ToolCallItem({ tool }) {
 
 const COLLAPSE_THRESHOLD = 6; // Auto-collapse when more than this many completed tools
 
-export default function ToolCallCard({ group }) {
+function ToolCallCard({ group }) {
     const [isCollapsed, setIsCollapsed] = useState(false);
 
     const tools = group.tools || [];
@@ -406,3 +446,10 @@ export default function ToolCallCard({ group }) {
         </div>
     );
 }
+
+// Memoized: the chat page re-creates the toolGroups array on every tool event,
+// but only the matched group object changes reference. With a stable `group`
+// reference for untouched groups, memo lets every other tool card skip
+// re-rendering — critical during agent runs that emit many tool events
+// (renderer-churn contributor to Chrome STATUS_BREAKPOINT).
+export default memo(ToolCallCard);

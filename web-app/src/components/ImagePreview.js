@@ -25,11 +25,14 @@ export default function ImagePreview({ attachments, onRemove }) {
                     key={att.id}
                     className="relative group flex-shrink-0 w-20 h-20 rounded-lg overflow-hidden border border-surface-200 bg-surface-50 shadow-sm"
                 >
-                    {/* Thumbnail */}
+                    {/* Thumbnail (data URI \u2014 next/image not applicable) */}
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                         src={att.dataUrl}
                         alt={att.name || `Attachment ${idx + 1}`}
                         className="w-full h-full object-cover"
+                        loading="lazy"
+                        decoding="async"
                     />
                     {/* Size label */}
                     <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent px-1.5 py-1">

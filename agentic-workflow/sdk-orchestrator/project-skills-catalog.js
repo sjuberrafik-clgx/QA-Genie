@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { normalizeText } = require('../utils/text-normalizers');
 
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const SKILLS_ROOT = path.join(PROJECT_ROOT, '.github', 'skills');
@@ -23,14 +24,6 @@ const STOP_WORDS = new Set([
 
 let cachedCatalog = null;
 let cachedSignature = null;
-
-function normalizeText(value) {
-    return String(value || '')
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-}
 
 function getCatalogSignature() {
     const parts = [];

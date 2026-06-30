@@ -1,10 +1,13 @@
 {
   "devDependencies": {
     "@playwright/test": "^1.58.2",
-    "dotenv": "^17.3.1",
-    "xlsx": "^0.18.5"
+    "dotenv": "^17.3.1"
   },
   "dependencies": {
     "lodash": "^4.17.23"
+  },
+  "optionalDependencies": {
+    "kafkajs": "^2.2.4",
+    "@elastic/elasticsearch": "^8.14.0"
   }
 }

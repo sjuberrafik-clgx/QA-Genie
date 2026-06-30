@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CBR Fixture — Infinite Scroll (incremental growth)</title>
+    <style>
+        body { font-family: system-ui, sans-serif; margin: 0; padding: 12px; }
+        #list { display: flex; flex-direction: column; gap: 6px; }
+        .row { border: 1px solid #e2e2e2; padding: 8px; display: flex; justify-content: space-between; }
+        .btn { padding: 6px 10px; cursor: pointer; }
+        .btn-primary { background: #0a64c2; color: #fff; border: none; }
+    </style>
+</head>
+
+<body>
+    <!--
+      Purpose: simulate an infinitely-growing list (feed / search results).
+      Each "load more" appends a batch of rows. This stresses the snapshot
+      engine's re-walk cost as the DOM grows, and is the canonical case where
+      a delta-pushing resident agent should send only the *new* rows instead of
+      re-serializing the entire (growing) page on every perception.
+    -->
+    <header>
+        <h1>Listings feed</h1>
+        <button id="load-more" class="btn btn-primary" onclick="window.__fixture.loadMore()">Load more</button>
+        <span id="count" aria-label="Item count">items: 0</span>
+    </header>
+
+    <main>
+        <section aria-label="Feed">
+            <div id="list" role="list"></div>
+        </section>
+    </main>
+
+    <script>
+        (function () {
+            const BATCH = 10;
+            let seq = 0;
+
+            function addBatch(n) {
+                const list = document.getElementById('list');
+                const frag = document.createDocumentFragment();
+                for (let i = 0; i < n; i++) {
+                    seq += 1;
+                    const row = document.createElement('div');
+                    row.className = 'row';
+                    row.setAttribute('role', 'listitem');
+                    row.setAttribute('data-testid', 'feed-row-' + seq);
+
+                    const label = document.createElement('span');
+                    label.textContent = 'Listing #' + seq;
+                    row.appendChild(label);
+
+                    const save = document.createElement('button');
+                    save.className = 'btn';
+                    save.textContent = 'Save #' + seq;
+                    save.setAttribute('aria-label', 'Save listing ' + seq);
+                    row.appendChild(save);
+
+                    frag.appendChild(row);
+                }
+                list.appendChild(frag);
+                document.getElementById('count').textContent = 'items: ' + seq;
+            }
+
+            window.__fixture = {
+                loadMore: function () { addBatch(BATCH); },
+                loadN: function (n) { addBatch(n); },
+                reset: function () { document.getElementById('list').innerHTML = ''; seq = 0; document.getElementById('count').textContent = 'items: 0'; },
+                count: function () { return seq; },
+            };
+
+            // Also append a batch when the user scrolls near the bottom.
+            window.addEventListener('scroll', function () {
+                if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 40) addBatch(BATCH);
+            });
+
+            addBatch(BATCH);
+        })();
+    </script>
+</body>
+
+</html>

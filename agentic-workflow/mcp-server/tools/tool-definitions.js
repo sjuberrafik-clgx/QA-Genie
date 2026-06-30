@@ -48,6 +48,65 @@ import { ADVANCED_TOOLS, ADVANCED_TOOL_MAPPING } from './advanced-tool-definitio
 
 export const UNIFIED_TOOLS = [
     // ═══════════════════════════════════════════════════════════════════════════════
+    // INTELLIGENT PRIMITIVES (high-level, self-healing, single round-trip)
+    // Prefer these over the low-level navigate→snapshot→find→click loop. They
+    // resolve targets deterministically (no LLM, no hallucination), auto-dismiss
+    // popups, self-heal on miss, and return tiny results.
+    // ═══════════════════════════════════════════════════════════════════════════════
+    {
+        name: 'unified_act',
+        description: 'Perform ONE action against a described target in a single self-healing call: resolves the target (ref, css, role+name, or fuzzy name match), auto-dismisses popups, acts, retries with a fresh snapshot on miss, and returns a compact diff (ok, target, urlChanged). PREFER this over manual snapshot+click/type. Supports actions: click, dblclick, type, fill, hover, check, uncheck, select, press.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                action: { type: 'string', description: 'click | dblclick | type | fill | hover | check | uncheck | select | press. Default click.' },
+                target: { type: 'string', description: 'What to act on: an element description/accessible name, a ref from a prior snapshot, or a CSS selector. For structured targeting pass targetSpec instead.' },
+                targetSpec: { type: 'object', description: 'Structured target: { ref?, selector?, role?, name?, text?, nth?, exact? }. Use when you need a role-scoped or indexed match.' },
+                text: { type: 'string', description: 'Text to type/fill (for type/fill actions).' },
+                value: { type: 'string', description: 'Option value (for select action).' },
+                values: { type: 'array', items: { type: 'string' }, description: 'Option values (for multi-select).' },
+                label: { type: 'string', description: 'Option label (for select action).' },
+                key: { type: 'string', description: 'Key to press (for press action), e.g. "Enter".' },
+                exact: { type: 'boolean', description: 'Require exact name match when resolving by name.' },
+                nth: { type: 'number', description: 'Pick the nth matching element (0-based) when several match.' },
+                snapshotAfter: { type: 'boolean', description: 'Also return a fresh compact snapshot after acting. Default false (keeps result tiny).' },
+                force: { type: 'boolean', description: 'Bypass the custom overlay/blocker guard and rely on Playwright native actionability (auto-scroll + trusted event). Use when an action is falsely blocked by page chrome such as a map/canvas or sticky layout. Default false.' }
+            }
+        },
+        _meta: { source: 'playwright', category: 'intelligent', readOnly: false }
+    },
+    {
+        name: 'unified_observe',
+        description: 'Rank candidate elements for a described target WITHOUT acting. Returns up to N candidates with ref, role, accessible name, Playwright selector, CSS, uniqueness, and a match score. Use to plan an action or disambiguate before calling unified_act. Cheap (served from snapshot cache when the page is unchanged).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                target: { type: 'string', description: 'Element description / accessible name to search for.' },
+                targetSpec: { type: 'object', description: 'Structured target: { role?, name?, text?, testId? }.' },
+                max: { type: 'number', description: 'Maximum candidates to return. Default 5.' },
+                threshold: { type: 'number', description: 'Minimum match score 0..1. Default 0.3.' }
+            }
+        },
+        _meta: { source: 'playwright', category: 'intelligent', readOnly: true }
+    },
+    {
+        name: 'unified_extract',
+        description: 'Extract structured content for assertions, returning ONLY what was asked. what: text | value | attribute | list | table. Resolves the target the same way as unified_act; omit target to read from the whole page. Use for assertion data instead of full snapshots.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                target: { type: 'string', description: 'Element description / ref / CSS selector to extract from. Omit to read the whole page.' },
+                targetSpec: { type: 'object', description: 'Structured target: { ref?, selector?, role?, name?, text? }.' },
+                what: { type: 'string', description: 'text | value | attribute | list | table. Default text.' },
+                attribute: { type: 'string', description: 'Attribute name (when what=attribute).' },
+                all: { type: 'boolean', description: 'Return all matches instead of the first. Default false.' },
+                max: { type: 'number', description: 'Cap the number of items/rows returned. Default 50.' }
+            }
+        },
+        _meta: { source: 'playwright', category: 'intelligent', readOnly: true }
+    },
+
+    // ═══════════════════════════════════════════════════════════════════════════════
     // NAVIGATION TOOLS (Primary: Playwright MCP)
     // ═══════════════════════════════════════════════════════════════════════════════
     {
@@ -93,13 +152,29 @@ export const UNIFIED_TOOLS = [
     // ═══════════════════════════════════════════════════════════════════════════════
     {
         name: 'unified_snapshot',
-        description: 'Capture accessibility snapshot of the current page. Returns a structured tree with element refs that can be used for interactions. This is PREFERRED over screenshots for automation. Use the filter parameter to reduce result size and focus on relevant elements.',
+        description: 'Capture a compact accessibility snapshot of the current page. Returns a token-lean list of elements (ref, role, name, winning selector, interaction hints) plus blocker state. PREFERRED over screenshots. By default the result is compact and large pages are auto-filtered to interactive+visible elements; repeated snapshots with no DOM change are served from cache. Use filter to narrow further, verbose:true for full element fingerprints + ARIA tree.',
         inputSchema: {
             type: 'object',
             properties: {
                 filename: {
                     type: 'string',
                     description: 'Optional filename to save snapshot as markdown'
+                },
+                verbose: {
+                    type: 'boolean',
+                    description: 'Return full element fingerprints (all attributes + ranked selector candidates) and the ARIA tree. Default false (compact). Only use when you need deep detail.'
+                },
+                includeAria: {
+                    type: 'boolean',
+                    description: 'Include the ARIA accessibility tree string in the result without switching to full verbose elements. Default false (skipped to save latency and tokens).'
+                },
+                autoFilter: {
+                    type: 'boolean',
+                    description: 'When true (default) and no explicit filter is given, automatically reduce large pages to interactive + visible elements (capped) to prevent context bloat. Set false to return every captured element.'
+                },
+                useCache: {
+                    type: 'boolean',
+                    description: 'When true (default), reuse the previous snapshot if the DOM has not changed since (near-instant). Set false to force a fresh capture.'
                 },
                 filter: {
                     type: 'object',
@@ -221,6 +296,10 @@ export const UNIFIED_TOOLS = [
                     type: 'array',
                     items: { type: 'string' },
                     description: 'Modifier keys to press (Ctrl, Shift, Alt, Meta)'
+                },
+                force: {
+                    type: 'boolean',
+                    description: 'Bypass the custom overlay/blocker guard and rely on Playwright native actionability (auto-scroll + trusted event). Use when a click is falsely blocked by page chrome such as a map/canvas or sticky layout. Default false.'
                 }
             }
         },
@@ -260,6 +339,10 @@ export const UNIFIED_TOOLS = [
                 slowly: {
                     type: 'boolean',
                     description: 'Type one character at a time for key handlers'
+                },
+                force: {
+                    type: 'boolean',
+                    description: 'Bypass the custom overlay/blocker guard and rely on Playwright native actionability. Use when typing is falsely blocked by page chrome. Default false.'
                 }
             },
             required: ['text']
@@ -1183,6 +1266,11 @@ export const UNIFIED_TOOLS = [
  * Tool name mapping from unified to source MCPs
  */
 export const TOOL_MAPPING = {
+    // Intelligent primitives (high-level, self-healing)
+    unified_act: 'browser_act',
+    unified_observe: 'browser_observe',
+    unified_extract: 'browser_extract',
+
     // Playwright MCP mappings
     unified_navigate: 'browser_navigate',
     unified_navigate_back: 'browser_navigate_back',
@@ -1273,6 +1361,10 @@ export const ALL_TOOLS = [...UNIFIED_TOOLS, ...ENHANCED_TOOLS, ...ADVANCED_TOOLS
 // ═══════════════════════════════════════════════════════════════════════════════════════
 
 export const ALWAYS_LOADED_TOOLS = new Set([
+    // Intelligent primitives (preferred high-level entry points)
+    'unified_act',
+    'unified_observe',
+    'unified_extract',
     // Navigation (must-have)
     'unified_navigate',
     'unified_navigate_back',
@@ -1310,6 +1402,8 @@ export const ALWAYS_LOADED_TOOLS = new Set([
     'unified_browser_close',
     // Programmatic execution (Phase 3)
     'unified_execute_exploration',
+    // Autonomous DevTools crawler
+    'unified_crawl',
 ]);
 
 /**

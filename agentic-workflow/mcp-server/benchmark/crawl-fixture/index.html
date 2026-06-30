@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Crawl Fixture — Home</title>
+</head>
+
+<body>
+    <h1>Home</h1>
+    <img src="missing-home.png" alt="broken asset" width="1" height="1" />
+    <nav aria-label="Primary">
+        <a href="page-a.html" data-qa="to-a">Go to A</a>
+        <a href="page-b.html" data-qa="to-b">Go to B</a>
+        <a href="https://example.com/external" data-qa="external">External (out of scope)</a>
+    </nav>
+    <form id="newsletter">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" data-testid="email" placeholder="you@example.com" />
+        <button type="submit" data-testid="subscribe">Subscribe</button>
+    </form>
+    <script>
+        // Produce a console error for DevTools capture; the broken <img> above
+        // produces a captured failed network request (file:// blocks fetch()).
+        console.error('home boot warning');
+    </script>
+</body>
+
+</html>

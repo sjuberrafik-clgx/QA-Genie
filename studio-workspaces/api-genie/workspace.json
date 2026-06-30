@@ -1,0 +1,25 @@
+{
+  "kind": "studio-workspace",
+  "version": 1,
+  "id": "api-genie",
+  "name": "API Genie",
+  "description": "",
+  "status": "draft",
+  "visibility": "workspace",
+  "createdBy": "studio-ui",
+  "createdAt": "2026-04-27T05:32:14.813Z",
+  "updatedAt": "2026-04-27T05:39:07.499Z",
+  "paths": {
+    "root": "studio-workspaces/api-genie",
+    "manifest": "studio-workspaces/api-genie/workspace.json",
+    "readme": "studio-workspaces/api-genie/README.md",
+    "agents": "studio-workspaces/api-genie/agents",
+    "skills": "studio-workspaces/api-genie/skills",
+    "mcpServers": "studio-workspaces/api-genie/mcp-servers",
+    "files": "studio-workspaces/api-genie/files",
+    "notes": "studio-workspaces/api-genie/notes"
+  },
+  "runtime": {
+    "root": "agentic-workflow/studio-runtime/api-genie"
+  }
+}

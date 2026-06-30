@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CBR Fixture — Modal Storm (blocker latency)</title>
+    <style>
+        body { font-family: system-ui, sans-serif; margin: 0; padding: 12px; }
+        .btn { padding: 6px 10px; cursor: pointer; }
+        .btn-primary { background: #0a64c2; color: #fff; border: none; }
+        .modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); }
+        .modal { position: fixed; top: 20%; left: 30%; width: 300px; background: #fff; padding: 16px; border-radius: 6px; }
+        .hidden { display: none; }
+    </style>
+</head>
+
+<body>
+    <!--
+      Purpose: stress blocker (modal/dialog) detection latency. The current
+      runtime polls for blockers after every action (a fixed settle delay).
+      The event-driven core should detect the modal the instant it appears via
+      a pushed signal, collapsing detection latency toward zero. Exposes hooks
+      so the benchmark can open/close modals deterministically.
+    -->
+    <header>
+        <h1>Property detail</h1>
+        <button id="open-tour" class="btn btn-primary" onclick="window.__fixture.openModal(0)">Request a tour</button>
+        <button id="open-welcome" class="btn" onclick="window.__fixture.openWelcome()">Show welcome</button>
+    </header>
+
+    <main>
+        <p>123 Sample Street — listed for $499,000.</p>
+        <button id="save-prop" class="btn" aria-label="Save this property">Save property</button>
+    </main>
+
+    <!-- Tour modal (DOM modal with backdrop) -->
+    <div id="tour-backdrop" class="modal-backdrop hidden" role="presentation"></div>
+    <div id="tour-modal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Request a tour">
+        <h2>Request a tour</h2>
+        <label>Preferred date<input id="tour-date" type="date" /></label>
+        <button id="tour-submit" class="btn btn-primary">Submit request</button>
+        <button id="tour-close" class="btn" onclick="window.__fixture.closeModal()">Close</button>
+    </div>
+
+    <!-- Welcome popup (a second, lighter blocker) -->
+    <div id="welcome-backdrop" class="modal-backdrop hidden" role="presentation"></div>
+    <div id="welcome-modal" class="modal hidden" role="dialog" aria-label="Welcome">
+        <h2>Welcome to OneHome</h2>
+        <button id="welcome-dismiss" class="btn btn-primary" onclick="window.__fixture.closeWelcome()">Get started</button>
+    </div>
+
+    <script>
+        (function () {
+            const show = (id) => document.getElementById(id).classList.remove('hidden');
+            const hide = (id) => document.getElementById(id).classList.add('hidden');
+            let pending = null;
+
+            window.__fixture = {
+                openModal: function (delayMs) {
+                    if (pending) clearTimeout(pending);
+                    const open = () => { show('tour-backdrop'); show('tour-modal'); };
+                    if (!delayMs) open();
+                    else pending = setTimeout(open, delayMs);
+                },
+                closeModal: function () { hide('tour-backdrop'); hide('tour-modal'); },
+                openWelcome: function () { show('welcome-backdrop'); show('welcome-modal'); },
+                closeWelcome: function () { hide('welcome-backdrop'); hide('welcome-modal'); },
+                isModalOpen: function () { return !document.getElementById('tour-modal').classList.contains('hidden'); },
+            };
+        })();
+    </script>
+</body>
+
+</html>

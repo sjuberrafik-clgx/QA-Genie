@@ -31,6 +31,9 @@ const copyFile = promisify(fs.copyFile);
 const rm = promisify(fs.rm);
 const realpath = promisify(fs.realpath);
 
+// Shared, canonical approval-answer check (APPROVE / YES / PROCEED).
+const { isApprovalAnswer } = require('./tools/mutation-helpers');
+
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const MAX_READ_SIZE = 10 * 1024 * 1024;   // 10 MB for text reads
@@ -186,10 +189,18 @@ async function findFileInWorkspace(root, filename, limit = 10) {
  * @returns {Promise<boolean>} true if approved
  */
 async function requestConfirmation(deps, sessionId, description) {
+    // Fail CLOSED: a destructive filesystem operation must never run without
+    // explicit user consent. When there is no chat session to ask (headless /
+    // pipeline), deny by default. Trusted automation can opt in via the
+    // FILEGENIE_AUTO_APPROVE env flag.
     if (!deps?.chatManager?.requestUserInput) {
-        // If chat manager not available, default to allowed (pipeline mode)
-        console.warn('[FileGenie] No chatManager for confirmation — auto-approving');
-        return true;
+        const autoApprove = String(process.env.FILEGENIE_AUTO_APPROVE || '').toLowerCase() === 'true';
+        if (autoApprove) {
+            console.warn('[FileGenie] No chatManager for confirmation — FILEGENIE_AUTO_APPROVE=true, proceeding');
+            return true;
+        }
+        console.warn('[FileGenie] No chatManager for confirmation — failing closed (operation denied)');
+        return false;
     }
 
     const response = await deps.chatManager.requestUserInput(
@@ -198,15 +209,9 @@ async function requestConfirmation(deps, sessionId, description) {
         { type: 'confirmation', sessionId }
     );
 
-    const answer = typeof response === 'string' ? response : response?.answer;
-
-    const approved = typeof answer === 'string' && (
-        answer.toLowerCase().includes('yes') ||
-        answer.toLowerCase().includes('proceed') ||
-        answer.toLowerCase().includes('approve')
-    );
-
-    return approved;
+    // Shared approval check — also treats the confirmation auto-resolution
+    // ("Cancel" on timeout / no SSE client) as a denial.
+    return isApprovalAnswer(response);
 }
 
 // ─── Helper Utilities ───────────────────────────────────────────────────────
@@ -886,12 +891,16 @@ function createFilesystemTools(defineTool, deps = {}, options = {}) {
                     ? new Set(extensions.split(',').map(e => e.trim().toLowerCase().replace(/^\.?/, '.')))
                     : null;
 
+                // CWE-1333 fix: escape regex metacharacters to prevent ReDoS
+                const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
                 // Build name pattern from query (simple glob support)
+                // Escape first, then replace glob wildcards with regex equivalents
                 const nameRegex = !contentSearch
-                    ? new RegExp(query.replace(/\*/g, '.*').replace(/\?/g, '.'), 'i')
+                    ? new RegExp(escapeRegex(query).replace(/\\\*/g, '.*').replace(/\\\?/g, '.'), 'i')
                     : null;
 
-                const contentRegex = contentSearch ? new RegExp(query, 'ig') : null;
+                const contentRegex = contentSearch ? new RegExp(escapeRegex(query), 'ig') : null;
 
                 async function searchDir(dir) {
                     if (results.length >= MAX_SEARCH_RESULTS) return;

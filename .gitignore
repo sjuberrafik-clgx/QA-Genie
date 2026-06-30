@@ -9,6 +9,19 @@ node_modules/
 .env
 .env.local
 .env.*.local
+# Private keys & certificates (any folder)
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+# Common secret-bearing artifacts
+secrets.json
+secrets.yaml
+secrets.yml
+credentials.json
+*-secrets.json
+studio-workspaces/**/secrets*
 
 # ─── Test Output ──────────────────────────────────────────────────────────────
 test-results/
@@ -20,6 +33,7 @@ allure-results/
 
 # ─── Build Artifacts ─────────────────────────────────────────────────────────
 .next/
+.next-dev/
 out/
 dist/
 build/
@@ -36,6 +50,7 @@ Thumbs.db
 agentic-workflow/test-results/
 agentic-workflow/test-artifacts/
 agentic-workflow/learning-data/
+agentic-workflow/studio-runtime/
 
 # ─── Testing Artifacts (generated, not project code) ─────────────────────────
 # Test case Excel files

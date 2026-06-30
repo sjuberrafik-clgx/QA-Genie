@@ -595,7 +595,9 @@ function buildL3(l2Cards, config = {}) {
 // ─── Helper Functions ───────────────────────────────────────────────────────
 
 function generateRegionId(filePath) {
-    return crypto.createHash('md5').update(filePath).digest('hex').slice(0, 12);
+    // CWE-327: use SHA-256 instead of MD5. Truncated to 12 hex chars for a
+    // short non-security region identifier.
+    return crypto.createHash('sha256').update(filePath).digest('hex').slice(0, 12);
 }
 
 function inferPurpose(l1) {

@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OneHome Benchmark Fixture — Property Search</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            margin: 0;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .card {
+            border: 1px solid #ddd;
+            padding: 8px;
+            margin: 6px;
+        }
+
+        .btn {
+            padding: 6px 10px;
+        }
+
+        .btn-primary {
+            background: #0a64c2;
+            color: #fff;
+        }
+
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, .4);
+        }
+
+        .modal {
+            position: fixed;
+            top: 20%;
+            left: 30%;
+            background: #fff;
+            padding: 16px;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Navigation: stable roles + names -->
+    <header>
+        <nav aria-label="Primary">
+            <a href="/en-US/properties/map" data-qa="nav-search">Search</a>
+            <a href="/en-US/saved" data-qa="nav-saved">Saved</a>
+            <a href="/en-US/account" id="acct-link-3af2c1e9b">Account</a>
+            <button class="btn" aria-label="Open menu">Menu</button>
+        </nav>
+    </header>
+
+    <!-- Search form: inputs with labels, data-testid, placeholders -->
+    <main>
+        <section aria-label="Search filters">
+            <h1>Find your next home</h1>
+            <form id="search-form">
+                <label for="city">City</label>
+                <input id="city" name="city" data-testid="filter-city" placeholder="Enter a city" />
+
+                <label for="price">Max price</label>
+                <input id="price" name="price" type="number" data-testid="filter-price" placeholder="$" />
+
+                <label for="beds">Beds</label>
+                <select id="beds" name="beds" data-testid="filter-beds">
+                    <option value="any">Any</option>
+                    <option value="1">1+</option>
+                    <option value="2">2+</option>
+                    <option value="3">3+</option>
+                </select>
+
+                <label for="baths">Baths</label>
+                <select id="baths" name="baths" data-testid="filter-baths">
+                    <option value="any">Any</option>
+                    <option value="1">1+</option>
+                    <option value="2">2+</option>
+                </select>
+
+                <label><input type="checkbox" name="pool" data-qa="filter-pool" /> Pool</label>
+                <label><input type="checkbox" name="garage" data-qa="filter-garage" /> Garage</label>
+
+                <button type="submit" class="btn btn-primary" data-testid="apply-filters">Apply filters</button>
+                <button type="reset" class="btn">Reset</button>
+            </form>
+        </section>
+
+        <!-- Results grid: generated to make the page genuinely large -->
+        <section aria-label="Search results" id="results"></section>
+
+        <!-- Data table -->
+        <section aria-label="Recent activity">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Address</th>
+                        <th>Price</th>
+                        <th>Status</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="activity-rows"></tbody>
+            </table>
+        </section>
+    </main>
+
+    <!-- Footer: app store links (common assertion targets) -->
+    <footer>
+        <h2>Download the OneHome App</h2>
+        <a href="https://apps.apple.com/us/app/onehome/id123" aria-label="Download on the App Store">App Store</a>
+        <a href="https://play.google.com/store/apps/details?id=onehome" aria-label="Get it on Google Play">Google
+            Play</a>
+    </footer>
+
+    <!-- A modal that starts hidden; toggled to test blocker detection -->
+    <div id="welcome-backdrop" class="modal-backdrop hidden" role="presentation"></div>
+    <div id="welcome-modal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Welcome">
+        <h2>Welcome to OneHome</h2>
+        <p>Get started by searching for properties.</p>
+        <button class="btn btn-primary" data-testid="welcome-close">Got it</button>
+    </div>
+
+    <script>
+        // Generate a realistic number of result cards so the page is large
+        // enough to exercise filtering, ranking, and uniqueness validation.
+        const results = document.getElementById('results');
+        const CARD_COUNT = 40;
+        for (let i = 1; i <= CARD_COUNT; i++) {
+            const card = document.createElement('article');
+            card.className = 'card';
+            card.setAttribute('role', 'group');
+            card.setAttribute('aria-label', 'Property ' + i);
+            // Dynamic id (should be rejected by selector engine in favor of data-testid)
+            card.id = 'card-' + Math.random().toString(16).slice(2, 10);
+            card.innerHTML =
+                '<h3>' + (100 + i) + ' Main St</h3>' +
+                '<span>$' + (300 + i) + ',000</span>' +
+                '<a href="/en-US/property/aotf~' + i + '" data-testid="card-link-' + i + '">View details</a>' +
+                '<button class="btn" data-qa="save-' + i + '" aria-label="Save property ' + i + '">Save</button>' +
+                '<button class="btn" aria-label="Compare property ' + i + '">Compare</button>';
+            results.appendChild(card);
+        }
+
+        const rows = document.getElementById('activity-rows');
+        for (let i = 1; i <= 10; i++) {
+            const tr = document.createElement('tr');
+            tr.innerHTML =
+                '<td>' + (200 + i) + ' Oak Ave</td>' +
+                '<td>$' + (400 + i) + ',000</td>' +
+                '<td>Active</td>' +
+                '<td><button class="btn" data-testid="row-action-' + i + '">Open</button></td>';
+            rows.appendChild(tr);
+        }
+
+        // Expose a helper for the benchmark to toggle the modal
+        window.__showWelcome = function () {
+            document.getElementById('welcome-backdrop').classList.remove('hidden');
+            document.getElementById('welcome-modal').classList.remove('hidden');
+        };
+
+        // Keep the fixture stable during benchmarking: links and form submits
+        // are realistic targets but must not navigate away from this page.
+        document.addEventListener('click', function (e) {
+            const a = e.target.closest('a');
+            if (a) e.preventDefault();
+        });
+        document.getElementById('search-form').addEventListener('submit', function (e) {
+            e.preventDefault();
+        });
+    </script>
+</body>
+
+</html>

@@ -643,22 +643,26 @@ function mapAriaRole(explicitRole, tag) {
  *
  * This is the JS source that runs IN THE BROWSER during snapshot.
  */
-const ENRICHED_DOM_WALKER_SOURCE = `
-(function() {
-    const interactiveTags = ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'LABEL'];
-    const interactiveRoles = ['button', 'link', 'textbox', 'checkbox', 'radio', 'menuitem', 'tab', 'combobox', 'option', 'switch', 'slider', 'spinbutton', 'searchbox'];
-    const refs = [];
-    const counter = { value: 0 };
-    const refMap = {};  // nodeIndex → ref  (for parentRef lookback)
+/**
+ * FINGERPRINT PRIMITIVES — the per-node classification + fingerprint logic, factored
+ * into standalone in-page functions so BOTH the legacy enriched DOM walker AND the
+ * resident perception agent (runtime/resident-agent.js) compute byte-identical element
+ * fingerprints. This single source of truth prevents the two paths from drifting.
+ *
+ * Defines, in page scope:
+ *   __cbrClassify(node)            → { tag, tagLower, role, isInteractive, capture }
+ *   __cbrFingerprint(node, ref, parentRef, classify?) → enriched element object
+ */
+const FINGERPRINT_PRIMITIVES_SOURCE = `
+    const __cbrInteractiveTags = ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'LABEL'];
+    const __cbrInteractiveRoles = ['button', 'link', 'textbox', 'checkbox', 'radio', 'menuitem', 'tab', 'combobox', 'option', 'switch', 'slider', 'spinbutton', 'searchbox'];
 
-    function walk(node, parentRef) {
-        if (node.nodeType !== Node.ELEMENT_NODE) return;
-
+    function __cbrClassify(node) {
         const tag = node.tagName;
         const tagLower = tag.toLowerCase();
         const role = node.getAttribute('role');
-        const isInteractive = interactiveTags.includes(tag) ||
-            interactiveRoles.includes(role) ||
+        const isInteractive = __cbrInteractiveTags.includes(tag) ||
+            __cbrInteractiveRoles.includes(role) ||
             node.onclick != null ||
             node.hasAttribute('onclick') ||
             (node.tabIndex >= 0 && node.tabIndex !== -1);
@@ -667,77 +671,151 @@ const ENRICHED_DOM_WALKER_SOURCE = `
         const hasId = !!node.id;
         const hasTestId = node.hasAttribute('data-testid') || node.hasAttribute('data-test-id') || node.hasAttribute('data-qa');
         const hasAriaLabel = node.hasAttribute('aria-label');
+        // Headings are common assertion targets — capture them even without an
+        // explicit role/id so they are resolvable by accessible name.
+        const isHeading = tag.length === 2 && tag.charCodeAt(0) === 72 && tag[1] >= '1' && tag[1] <= '6';
+        const capture = isInteractive || hasId || hasTestId || hasAriaLabel || !!role || isHeading;
 
-        if (isInteractive || hasId || hasTestId || hasAriaLabel || role) {
+        return { tag, tagLower, role, isInteractive, capture };
+    }
+
+    // Classify an element's INTERACTION AFFORDANCE — what kind of control it is.
+    // Cheap and layout-free (tag/role/type/className only), so it runs for every
+    // captured node. This is the "what is clickable, and of what kind" signal:
+    // buttons, links, clickable cards, maps, inputs, CTAs, tabs, media, headings.
+    function __cbrAffordance(node, tag, role, isInteractive) {
+        const T = (tag || '').toUpperCase();
+        const r = (role || '').toLowerCase();
+        const type = (node.type || '').toLowerCase();
+        if (T === 'BUTTON' || r === 'button' || (T === 'INPUT' && (type === 'button' || type === 'submit' || type === 'reset' || type === 'image'))) return 'button';
+        if (r === 'tab') return 'tab';
+        if (r === 'menuitem' || r === 'menuitemcheckbox' || r === 'menuitemradio') return 'menuitem';
+        if ((T === 'A' && node.getAttribute('href') != null) || r === 'link') return 'link';
+        if ((T === 'INPUT' && type === 'checkbox') || r === 'checkbox') return 'checkbox';
+        if ((T === 'INPUT' && type === 'radio') || r === 'radio') return 'radio';
+        if (r === 'switch') return 'switch';
+        if (T === 'SELECT' || r === 'combobox' || r === 'listbox') return 'select';
+        if (T === 'INPUT' || T === 'TEXTAREA' || r === 'textbox' || r === 'searchbox') return 'input';
+        if (T === 'LABEL') return 'label';
+        // Map / canvas surfaces (Google Maps, Mapbox, Leaflet, MapLibre).
+        const cls = typeof node.className === 'string' ? node.className : '';
+        if (T === 'CANVAS' || /gm-style|mapboxgl|leaflet|maplibregl/i.test(cls)) return 'map';
+        if (T === 'IMG' || T === 'VIDEO' || T === 'SVG') return 'media';
+        if (T.length === 2 && T[0] === 'H' && T[1] >= '1' && T[1] <= '6') return 'heading';
+        // A non-standard interactive container (div/li/article with onclick / tabindex /
+        // a button-ish role) is a "clickable card" — the OneHome property-card pattern.
+        if (isInteractive) return 'card';
+        return 'text';
+    }
+
+    function __cbrFingerprint(node, ref, parentRef, classify) {
+        const c = classify || __cbrClassify(node);
+        const tag = c.tag;
+        const tagLower = c.tagLower;
+        const role = c.role;
+        const rect = node.getBoundingClientRect();
+
+        // Compute the best accessible label
+        const ariaLabel = node.getAttribute('aria-label') || undefined;
+        const placeholder = node.placeholder || undefined;
+        const title = node.getAttribute('title') || undefined;
+        const alt = node.getAttribute('alt') || undefined;
+        // Checkbox/radio inputs default to value="on" — that is NOT an accessible
+        // name. Use their associated label instead (computed below).
+        const isCheckRadio = tag === 'INPUT' && (node.type === 'checkbox' || node.type === 'radio');
+        const text = (node.innerText || (isCheckRadio ? '' : node.value) || '').substring(0, 500).trim() || undefined;
+        const textShort = text ? text.substring(0, 100) : undefined;
+        const computedLabel = ariaLabel || placeholder || title || alt || textShort || undefined;
+
+        // Get associated label for form elements
+        let associatedLabel = undefined;
+        if (['INPUT', 'SELECT', 'TEXTAREA'].includes(tag)) {
+            if (node.id) {
+                const labelEl = document.querySelector('label[for="' + node.id + '"]');
+                if (labelEl) associatedLabel = labelEl.innerText.trim().substring(0, 100);
+            }
+            if (!associatedLabel && node.closest('label')) {
+                associatedLabel = node.closest('label').innerText.trim().substring(0, 100);
+            }
+        }
+
+        // Compute nthIndex — position among siblings with same tag+role
+        let nthIndex = 0;
+        if (node.parentElement) {
+            const siblings = Array.from(node.parentElement.children);
+            const sameKind = siblings.filter(s =>
+                s.tagName === tag && (s.getAttribute('role') || '') === (role || '')
+            );
+            nthIndex = sameKind.indexOf(node);
+        }
+
+        // Input type refinement
+        let inputType = undefined;
+        if (tag === 'INPUT') {
+            inputType = node.type || 'text';
+        }
+
+        // ── Affordance / interactability (CBR) ────────────────────────────────
+        // Semantic control kind + a viewport check, both derived from data already
+        // in hand (tag/role/type + the rect computed above). This lets the resolver
+        // and the agent tell what is clickable and whether it is on screen RIGHT NOW
+        // — defeating hidden responsive duplicates and off-viewport copies without a
+        // second browser round-trip.
+        const affordance = __cbrAffordance(node, tag, role, c.isInteractive);
+        const __vw = window.innerWidth || document.documentElement.clientWidth || 0;
+        const __vh = window.innerHeight || document.documentElement.clientHeight || 0;
+        const inViewport = rect.width > 0 && rect.height > 0 &&
+            rect.bottom > 0 && rect.right > 0 && rect.top < __vh && rect.left < __vw;
+
+        return {
+            ref,
+            tag: tagLower,
+            role: role || undefined,
+            text: textShort,
+            textFull: text,
+            id: node.id || undefined,
+            name: node.getAttribute('name') || undefined,
+            className: typeof node.className === 'string' ? node.className : undefined,
+            type: node.type || undefined,
+            inputType,
+            href: node.href || undefined,
+            placeholder,
+            ariaLabel,
+            ariaDescribedBy: node.getAttribute('aria-describedby') || undefined,
+            ariaRoleDescription: node.getAttribute('aria-roledescription') || undefined,
+            title,
+            alt,
+            computedLabel,
+            associatedLabel,
+            dataTestId: node.getAttribute('data-testid') || undefined,
+            dataTestIdAlt: node.getAttribute('data-test-id') || undefined,
+            dataQa: node.getAttribute('data-qa') || undefined,
+            visible: rect.width > 0 && rect.height > 0,
+            bounds: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
+            nthIndex,
+            parentRef: parentRef || undefined,
+            isInteractive: c.isInteractive,
+            affordance,
+            inViewport,
+        };
+    }
+`;
+
+const ENRICHED_DOM_WALKER_SOURCE = `
+(function() {
+${FINGERPRINT_PRIMITIVES_SOURCE}
+    const refs = [];
+    const counter = { value: 0 };
+    const refMap = {};  // nodeIndex → ref  (for parentRef lookback)
+
+    function walk(node, parentRef) {
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+        const classify = __cbrClassify(node);
+
+        if (classify.capture) {
             const ref = 's1e' + (++counter.value);
-            const rect = node.getBoundingClientRect();
-
-            // Compute the best accessible label
-            const ariaLabel = node.getAttribute('aria-label') || undefined;
-            const placeholder = node.placeholder || undefined;
-            const title = node.getAttribute('title') || undefined;
-            const alt = node.getAttribute('alt') || undefined;
-            const text = (node.innerText || node.value || '').substring(0, 500).trim() || undefined;
-            const textShort = text ? text.substring(0, 100) : undefined;
-            const computedLabel = ariaLabel || placeholder || title || alt || textShort || undefined;
-
-            // Get associated label for form elements
-            let associatedLabel = undefined;
-            if (['INPUT', 'SELECT', 'TEXTAREA'].includes(tag)) {
-                if (node.id) {
-                    const labelEl = document.querySelector('label[for="' + node.id + '"]');
-                    if (labelEl) associatedLabel = labelEl.innerText.trim().substring(0, 100);
-                }
-                if (!associatedLabel && node.closest('label')) {
-                    associatedLabel = node.closest('label').innerText.trim().substring(0, 100);
-                }
-            }
-
-            // Compute nthIndex — position among siblings with same tag+role
-            let nthIndex = 0;
-            if (node.parentElement) {
-                const siblings = Array.from(node.parentElement.children);
-                const sameKind = siblings.filter(s =>
-                    s.tagName === tag && (s.getAttribute('role') || '') === (role || '')
-                );
-                nthIndex = sameKind.indexOf(node);
-            }
-
-            // Input type refinement
-            let inputType = undefined;
-            if (tag === 'INPUT') {
-                inputType = node.type || 'text';
-            }
-
-            const element = {
-                ref,
-                tag: tagLower,
-                role: role || undefined,
-                text: textShort,
-                textFull: text,
-                id: node.id || undefined,
-                name: node.getAttribute('name') || undefined,
-                className: typeof node.className === 'string' ? node.className : undefined,
-                type: node.type || undefined,
-                inputType,
-                href: node.href || undefined,
-                placeholder,
-                ariaLabel,
-                ariaDescribedBy: node.getAttribute('aria-describedby') || undefined,
-                ariaRoleDescription: node.getAttribute('aria-roledescription') || undefined,
-                title,
-                alt,
-                computedLabel,
-                associatedLabel,
-                dataTestId: node.getAttribute('data-testid') || undefined,
-                dataTestIdAlt: node.getAttribute('data-test-id') || undefined,
-                dataQa: node.getAttribute('data-qa') || undefined,
-                visible: rect.width > 0 && rect.height > 0,
-                bounds: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
-                nthIndex,
-                parentRef: parentRef || undefined,
-                isInteractive,
-            };
+            const element = __cbrFingerprint(node, ref, parentRef, classify);
 
             refs.push(element);
             refMap[counter.value] = ref;
@@ -828,6 +906,15 @@ const SelectorEngine = {
      */
     getEnrichedDomWalkerSource() {
         return ENRICHED_DOM_WALKER_SOURCE;
+    },
+
+    /**
+     * Get the per-node fingerprint primitives source (__cbrClassify / __cbrFingerprint).
+     * Shared with the resident perception agent so both paths produce identical
+     * element fingerprints. Inject this into page scope, then call the functions.
+     */
+    getFingerprintPrimitivesSource() {
+        return FINGERPRINT_PRIMITIVES_SOURCE;
     },
 
     /**

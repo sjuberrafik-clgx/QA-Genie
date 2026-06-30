@@ -17,8 +17,22 @@ import { EventEmitter } from 'events';
 import { createRequire } from 'module';
 import { applyEnhancedMethods } from './enhanced-playwright-methods.js';
 import { applyAdvancedMethods } from './advanced-playwright-methods.js';
+import { applyIntelligentPrimitives } from './intelligent-primitives-methods.js';
 import { SelectorEngine } from '../utils/selector-engine.js';
 import { BlockerRegistry } from '../utils/blocker-registry.js';
+// Cognitive Browser Runtime (CBR) — feature-flagged perception/control layer (default OFF).
+import { getResidentAgentSource, RESIDENT_AGENT_VERSION } from '../runtime/resident-agent.js';
+import { PerceptionStore } from '../runtime/perception-store.js';
+import { ReactiveCore } from '../runtime/reactive-core.js';
+import { HealStore } from '../runtime/heal-store.js';
+import { HealingResolver } from '../runtime/healing-resolver.js';
+import { VisionFusion } from '../runtime/vision-fusion.js';
+import { AppGraph } from '../runtime/app-graph.js';
+import { GraphRecorder } from '../runtime/graph-recorder.js';
+import { IntentProtocol } from '../runtime/intent-protocol.js';
+import { PlaywrightTransport } from '../transport/playwright-transport.js';
+import { RawCdpTransport } from '../transport/raw-cdp-transport.js';
+import { TransportRouter } from '../transport/transport-router.js';
 
 const require = createRequire(import.meta.url);
 
@@ -39,6 +53,11 @@ export class PlaywrightDirectBridge extends EventEmitter {
             autoDismissDiscoveredBlockers: config.autoDismissDiscoveredBlockers ?? true,
             blockerRegistryEnabled: config.blockerRegistryEnabled ?? true,
             blockerRegistryPath: config.blockerRegistryPath,
+            // CBR feature flags (default OFF via env; legacy behavior untouched).
+            residentAgent: config.residentAgent ?? (process.env.MCP_RESIDENT_AGENT === 'true'),
+            visionFusion: config.visionFusion ?? (process.env.MCP_VISION_FUSION === 'true'),
+            appGraph: config.appGraph ?? (process.env.MCP_APP_GRAPH === 'true'),
+            rawCdp: config.rawCdp ?? (process.env.MCP_RAW_CDP === 'true'),
             ...config,
             blockerRecovery: {
                 postActionObservationMs: config.blockerRecovery?.postActionObservationMs ?? 750,
@@ -53,6 +72,35 @@ export class PlaywrightDirectBridge extends EventEmitter {
         this.page = null;
         this.connected = false;
         this.snapshotRefs = new Map(); // Store element references from snapshots
+        this._snapshotCache = null; // { key, payload } — enables near-free repeated snapshots
+
+        // ── Cognitive Browser Runtime (CBR) — feature-flagged perception/control layer ──
+        // Resident perception agent (P1): live in-page Digital Twin + delta push.
+        this._residentAgentEnabled = this.config.residentAgent === true;
+        this._perceptionStore = new PerceptionStore();
+        this._residentBindingExposed = false;
+        // Event-driven reactive core (P2): push-based blocker/quiescence awaits (resident is its source).
+        this._reactiveCore = this._residentAgentEnabled ? new ReactiveCore(this) : null;
+        // Self-healing resolver + learning store (P4): re-anchor broken selectors by stable identity.
+        this._healStore = this._residentAgentEnabled ? new HealStore({ persist: this.config.healPersist !== false }) : null;
+        this._healingResolver = this._residentAgentEnabled
+            ? new HealingResolver(this, { healStore: this._healStore, onHeal: (h) => this.emit('selector-heal', h) })
+            : null;
+        // Vision+DOM+AX fusion (P5): fills names for DOM-blind elements (icon-only, canvas).
+        this._visionFusionEnabled = this.config.visionFusion === true;
+        this._visionFusion = this._visionFusionEnabled
+            ? new VisionFusion(this, { maxVisionCalls: this.config.maxVisionCalls ?? 8 })
+            : null;
+        // Application knowledge graph (P6): records page states + labeled journeys (offline reasoning).
+        this._appGraphEnabled = this.config.appGraph === true;
+        this._appGraph = this._appGraphEnabled ? new AppGraph({ persist: this.config.appGraphPersist !== false }) : null;
+        this._graphRecorder = this._appGraph ? new GraphRecorder(this, this._appGraph) : null;
+        // Semantic intent protocol (P7): perceive/act/await/observe + transparent resolution audit.
+        this._intent = new IntentProtocol(this);
+        // Raw-CDP fast-path transport (P3): lazily initialized on first use.
+        this._rawCdpEnabled = this.config.rawCdp === true;
+        this._transport = null;
+        this._visionResolve = false; // set transiently by act() for vision-assisted target resolution
 
         // Storage for multi-page and download handling
         this._lastNewPage = null;
@@ -84,6 +132,10 @@ export class PlaywrightDirectBridge extends EventEmitter {
 
         // Apply advanced methods (iframe, shadow DOM, network interception, storage, etc.)
         applyAdvancedMethods(this);
+
+        // Apply intelligent primitives (act / observe / extract) — high-level,
+        // self-healing, single round-trip. Wraps callTool, so it is applied last.
+        applyIntelligentPrimitives(this);
     }
 
     /**
@@ -121,6 +173,35 @@ export class PlaywrightDirectBridge extends EventEmitter {
             this.context = await this.browser.newContext({
                 viewport: this.config.viewport,
             });
+
+            // Snapshot-cache invalidation. With the resident perception agent (P1) the in-page
+            // Digital Twin maintains window.__mcpDomSeq itself and streams deltas to Node;
+            // otherwise install the lightweight standalone DOM-version counter.
+            if (this._residentAgentEnabled) {
+                await this._installResidentAgent();
+            } else {
+                await this.context.addInitScript(() => {
+                    try {
+                        if (window.__mcpDomSeqInstalled) return;
+                        window.__mcpDomSeqInstalled = true;
+                        window.__mcpDomSeq = 0;
+                        const bump = () => { window.__mcpDomSeq = (window.__mcpDomSeq || 0) + 1; };
+                        const observe = () => {
+                            if (!document.documentElement) return;
+                            try {
+                                new MutationObserver(bump).observe(document.documentElement, {
+                                    subtree: true, childList: true, attributes: true,
+                                });
+                            } catch (e) { /* no-op */ }
+                        };
+                        if (document.readyState === 'loading') {
+                            document.addEventListener('DOMContentLoaded', observe, { once: true });
+                        } else {
+                            observe();
+                        }
+                    } catch (e) { /* no-op */ }
+                });
+            }
 
             // Create initial page
             this.page = await this.context.newPage();
@@ -250,6 +331,8 @@ export class PlaywrightDirectBridge extends EventEmitter {
             this._dialogs.push(entry);
             this._activeDialog = entry;
             this.emit('dialog', entry);
+            // Feed the reactive core (P2) so post-action observation resolves instantly.
+            this.emit('native-dialog', { id: entry.id, type: entry.type, message: entry.message });
 
             const pendingHandler = this._pendingDialogHandler;
             if (pendingHandler) {
@@ -802,6 +885,34 @@ export class PlaywrightDirectBridge extends EventEmitter {
             return await this.page.evaluate(({ targetSelector }) => {
                 const normalizeText = (value) => (value || '').replace(/\s+/g, ' ').trim();
                 const escapeText = (value) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                // Page chrome that is NOT a dismissable modal even when positioned / high z-index:
+                // maps (Google/Mapbox/Leaflet) and raw canvases routinely cover the viewport and
+                // intercept pointer events, but they ARE the page — flagging them as blockers
+                // produces false RUNTIME_BLOCKER errors on legitimate clicks.
+                const EXCLUDED_CHROME_SELECTOR = '.gm-style,.gmnoprint,.gm-style-cc,canvas,[class*="mapboxgl"],.leaflet-container,.leaflet-pane,[class*="map-canvas" i],[class*="mapCanvas" i]';
+                const isExcludedChrome = (element) => {
+                    if (!element || typeof element.matches !== 'function') return false;
+                    try {
+                        if (element.matches(EXCLUDED_CHROME_SELECTOR)) return true;
+                        if (typeof element.closest === 'function' &&
+                            element.closest('.gm-style,[class*="mapboxgl"],.leaflet-container')) return true;
+                    } catch { /* invalid selector / detached node */ }
+                    return false;
+                };
+                const isBodyScrollLocked = () => {
+                    try {
+                        const bodyOverflow = window.getComputedStyle(document.body).overflow;
+                        const htmlOverflow = window.getComputedStyle(document.documentElement).overflow;
+                        return ['hidden', 'clip'].includes(bodyOverflow) || ['hidden', 'clip'].includes(htmlOverflow);
+                    } catch { return false; }
+                };
+                const hasModalSignal = (element) => {
+                    if (!element || typeof element.matches !== 'function') return false;
+                    try {
+                        if (element.matches('dialog,[role="dialog"],[role="alertdialog"],[aria-modal="true"]')) return true;
+                        return !!element.querySelector('[role="dialog"],[role="alertdialog"],[aria-modal="true"]');
+                    } catch { return false; }
+                };
                 const safeQuerySelector = (selector) => {
                     if (!selector || typeof selector !== 'string') return null;
                     if (/^text=|^xpath=|>>|:has-text\(/i.test(selector)) return null;
@@ -833,13 +944,30 @@ export class PlaywrightDirectBridge extends EventEmitter {
                         if (targetElement && (current === targetElement || current.contains(targetElement))) {
                             return null;
                         }
+                        if (isExcludedChrome(current)) {
+                            // The element on top is map/canvas page chrome, not a real overlay —
+                            // let Playwright's native actionability handle it instead of blocking.
+                            return null;
+                        }
+                        // Interactive controls are never modal blockers — a plain button/link/
+                        // input (e.g. "View Public Record Data") sitting over the click point is
+                        // handled by Playwright's native actionability, not flagged as an overlay.
+                        if (current.matches?.('button,a,input,select,textarea,label') &&
+                            !current.matches?.('[role="dialog"],[role="alertdialog"],[aria-modal="true"]')) {
+                            return null;
+                        }
                         const style = window.getComputedStyle(current);
                         const rect = current.getBoundingClientRect();
                         const zIndex = Number.parseInt(style.zIndex || '0', 10) || 0;
                         const area = rect.width * rect.height;
-                        const flagged = current.matches?.('dialog,[role="dialog"],[aria-modal="true"],[class*="modal"],[class*="overlay"],[class*="popup"],[class*="alert"],[class*="notice"]');
+                        const coverage = area / Math.max(window.innerWidth * window.innerHeight, 1);
+                        const isDialogLike = current.matches?.('dialog,[role="dialog"],[role="alertdialog"],[aria-modal="true"]');
                         const positioned = ['fixed', 'sticky', 'absolute'].includes(style.position);
-                        if ((flagged || positioned || zIndex >= 5) && area > 0 && style.pointerEvents !== 'none') {
+                        // A positioned occluder blocks only when it is a real dialog OR a large
+                        // overlay (covers a meaningful share of the viewport) — not any small
+                        // positioned element that merely overlaps the click point.
+                        const significantOverlay = (positioned || zIndex >= 5) && coverage >= 0.2;
+                        if ((isDialogLike || significantOverlay) && area > 0 && style.pointerEvents !== 'none') {
                             return current;
                         }
                         current = current.parentElement;
@@ -857,15 +985,22 @@ export class PlaywrightDirectBridge extends EventEmitter {
 
                 const viewportArea = Math.max(window.innerWidth * window.innerHeight, 1);
                 const candidates = new Set();
-                document.querySelectorAll('dialog,[role="dialog"],[aria-modal="true"],[class*="modal"],[class*="dialog"],[class*="overlay"],[class*="popup"],[class*="alert"],[class*="notice"],[class*="toast"],[id*="modal" i],[id*="popup" i],[id*="dialog" i]').forEach((element) => candidates.add(element));
+                document.querySelectorAll('dialog,[role="dialog"],[aria-modal="true"],[class*="modal"],[class*="dialog"],[class*="overlay"],[class*="popup"],[class*="alert"],[class*="notice"],[class*="toast"],[id*="modal" i],[id*="popup" i],[id*="dialog" i]').forEach((element) => {
+                    if (!isExcludedChrome(element)) candidates.add(element);
+                });
                 Array.from(document.body?.children || []).forEach((element) => {
+                    if (isExcludedChrome(element)) return;
                     const style = window.getComputedStyle(element);
                     const rect = element.getBoundingClientRect();
                     const coverage = (rect.width * rect.height) / viewportArea;
                     const zIndex = Number.parseInt(style.zIndex || '0', 10) || 0;
                     const isOverlayPosition = style.position === 'fixed' || style.position === 'sticky' || style.position === 'absolute';
                     const interceptsPointerEvents = style.pointerEvents !== 'none';
-                    if (isOverlayPosition && interceptsPointerEvents && coverage > 0.15 && zIndex >= 5) {
+                    // A large positioned element is only treated as a blocker when it carries a real
+                    // modal signal (dialog / aria-modal) or locks body scroll. Untagged full-bleed
+                    // layout chrome (maps, hero sections, sticky shells) must NOT be flagged.
+                    const looksModal = hasModalSignal(element) || isBodyScrollLocked();
+                    if (isOverlayPosition && interceptsPointerEvents && coverage > 0.15 && zIndex >= 5 && looksModal) {
                         candidates.add(element);
                     }
                 });
@@ -903,8 +1038,23 @@ export class PlaywrightDirectBridge extends EventEmitter {
                     }
                 }
 
+                const isRealBlocker = (element) => {
+                    // A genuine blocker is a dialog, a real occluder of the target, or a large
+                    // positioned overlay (optionally with body-scroll lock / modal markup).
+                    // Interactive controls (button/link/input) are explicitly NOT blockers, so a
+                    // plain button matching [class*="notice"] etc. cannot be a false positive.
+                    if (element.matches?.('dialog,[role="dialog"],[role="alertdialog"],[aria-modal="true"]')) return true;
+                    if (element.matches?.('button,a,input,select,textarea,label')) return false;
+                    if (element.__mcpOcclusion?.pointsBlocked > 0) return true;
+                    const style = window.getComputedStyle(element);
+                    const rect = element.getBoundingClientRect();
+                    const coverage = (rect.width * rect.height) / viewportArea;
+                    const positioned = ['fixed', 'sticky', 'absolute'].includes(style.position);
+                    return positioned && coverage >= 0.2 && (isBodyScrollLocked() || hasModalSignal(element));
+                };
+
                 const ranked = Array.from(candidates)
-                    .filter(isVisible)
+                    .filter((element) => isVisible(element) && !isExcludedChrome(element) && isRealBlocker(element))
                     .map((element) => {
                         const rect = element.getBoundingClientRect();
                         const style = window.getComputedStyle(element);
@@ -1094,8 +1244,47 @@ export class PlaywrightDirectBridge extends EventEmitter {
     }
 
     async _capturePostActionBlocker(action, target, waitMs = this.config.blockerRecovery?.postActionObservationMs || 750) {
-        const deadline = Date.now() + waitMs;
         const pollIntervalMs = this.config.blockerRecovery?.pollIntervalMs || 50;
+
+        // ── Event-driven path (P2) ──────────────────────────────────────────
+        // With the resident agent + reactive core active, replace the poll loop with: ONE
+        // immediate check (catches synchronous / already-present modals fast), then — only if
+        // nothing is there yet — await a PUSHED blocker signal or DOM quiescence. No continuous
+        // polling: the common no-blocker path costs a single getBlockingState instead of
+        // ~waitMs/pollIntervalMs DOM round-trips.
+        if (this._reactiveCore && this._residentAgentEnabled) {
+            const targetSel = typeof target === 'string' ? target : null;
+            let blockerState = await this.getBlockingState({ targetSelector: targetSel });
+            if (!blockerState.present) {
+                const observed = await this._reactiveCore.observePostAction({
+                    maxMs: waitMs,
+                    quietMs: Math.max(60, pollIntervalMs * 2),
+                });
+                const blockerLikely = observed.blocker || (this._activeDialog && this._activeDialog.handled !== true);
+                if (!blockerLikely) return null;
+                blockerState = await this.getBlockingState({ targetSelector: targetSel });
+                if (!blockerState.present) return null;
+            }
+            const recovery = await this._attemptBlockerRecovery(action, target, blockerState.blocker, { includeDom: true });
+            const remaining = await this.getBlockingState();
+            if (!remaining.present) return null;
+            return this._buildBlockedResult(action, remaining.blocker, {
+                target,
+                actionPerformed: true,
+                attemptedRecovery: recovery,
+            });
+        }
+
+        // ── Legacy poll path (resident agent off) ───────────────────────────
+        const deadline = Date.now() + waitMs;
+        // Event-driven early exit: once the DOM has been quiet for a couple of
+        // polls and no blocker is present, nothing more is going to pop up — so
+        // return immediately instead of burning the full observation window.
+        // While the DOM keeps mutating (async modal still rendering), keep
+        // watching up to the cap so late popups are still caught & dismissed.
+        const STABLE_POLLS = 2;
+        let lastSeq = await this._readDomSeqQuick();
+        let stablePolls = 0;
         while (Date.now() <= deadline) {
             const blockerState = await this.getBlockingState({ targetSelector: typeof target === 'string' ? target : null });
             if (blockerState.present) {
@@ -1110,6 +1299,14 @@ export class PlaywrightDirectBridge extends EventEmitter {
                     actionPerformed: true,
                     attemptedRecovery: recovery,
                 });
+            }
+
+            const seq = await this._readDomSeqQuick();
+            if (seq === lastSeq) {
+                if (++stablePolls >= STABLE_POLLS) return null; // settled — nothing popped up
+            } else {
+                stablePolls = 0;
+                lastSeq = seq;
             }
             await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
         }
@@ -1247,6 +1444,9 @@ export class PlaywrightDirectBridge extends EventEmitter {
         console.error(`[PlaywrightDirect] Navigating to: ${url}`);
 
         await this.page.goto(url, { waitUntil });
+        this._invalidateSnapshotCache();
+        // P6: record the arrival state + the transition that brought us here (when enabled).
+        if (this._graphRecorder) { try { await this._graphRecorder.recordCurrent({ snapshot: true }); } catch (e) { /* non-fatal */ } }
         return { success: true, url: this.page.url(), title: await this.page.title() };
     }
 
@@ -1255,7 +1455,79 @@ export class PlaywrightDirectBridge extends EventEmitter {
      */
     async navigateBack() {
         await this.page.goBack();
+        this._invalidateSnapshotCache();
         return { success: true, url: this.page.url() };
+    }
+
+    /**
+     * Install the resident perception agent (P1 Digital Twin) on the context: expose the duplex
+     * __cbrPush binding (page → perception store + reactive-core events) and inject the agent
+     * source so the page maintains a live element model and streams structural deltas. Idempotent.
+     */
+    async _installResidentAgent() {
+        if (!this._residentBindingExposed) {
+            try {
+                await this.context.exposeBinding('__cbrPush', (source, payload) => {
+                    try { this._perceptionStore.applyPush(source?.page, payload); } catch (e) { /* isolated */ }
+                    if (payload && payload.type === 'perception-delta') {
+                        this.emit('perception-delta', { ...payload });
+                    } else if (payload && payload.type === 'ready') {
+                        this.emit('perception-ready', { ...payload });
+                    } else if (payload && payload.type === 'blocker') {
+                        // In-page modal/overlay detection — pushed the instant it changes.
+                        this.emit('blocker', { ...payload });
+                    }
+                });
+                this._residentBindingExposed = true;
+            } catch (e) {
+                console.error('[PlaywrightDirect] exposeBinding(__cbrPush) failed:', e.message);
+            }
+        }
+        try {
+            await this.context.addInitScript(getResidentAgentSource());
+            console.error('[PlaywrightDirect] Resident perception agent installed (Digital Twin v' + RESIDENT_AGENT_VERSION + ')');
+        } catch (e) {
+            console.error('[PlaywrightDirect] resident agent injection failed:', e.message);
+        }
+    }
+
+    /**
+     * Lazily build the transport router (P3). Pairs a Playwright transport with a raw-CDP
+     * transport (Chromium) and prefers raw-CDP for hot ops, falling back transparently. Returns
+     * null when the raw-CDP fast path is disabled.
+     */
+    _getTransport() {
+        if (!this._rawCdpEnabled) return null;
+        if (!this._transport) {
+            const getPage = () => this.page;
+            this._transport = new TransportRouter(
+                {
+                    playwright: new PlaywrightTransport(getPage),
+                    rawCdp: new RawCdpTransport(getPage, { browser: this.config.browser }),
+                },
+                { preferRaw: true },
+            );
+        }
+        return this._transport;
+    }
+
+    /**
+     * Fast click of a snapshot ref via the raw-CDP transport: clicks the element's center using
+     * the Digital Twin's bounds (no actionability round-trip). Falls back to the normal click()
+     * when the transport/bounds are unavailable. Returns { success, via, ref }.
+     */
+    async fastClickRef(ref) {
+        const transport = this._getTransport();
+        const el = this.snapshotRefs.get(ref);
+        const b = el?.bounds;
+        if (!transport || !b || b.width <= 0 || b.height <= 0) {
+            const fallback = await this.click({ ref });
+            return { success: fallback?.success !== false, via: 'playwright-click', ref };
+        }
+        const x = b.x + b.width / 2;
+        const y = b.y + b.height / 2;
+        await transport.clickAt(x, y);
+        return { success: true, via: 'transport', ref, point: { x: Math.round(x), y: Math.round(y) } };
     }
 
     /**
@@ -1263,67 +1535,232 @@ export class PlaywrightDirectBridge extends EventEmitter {
      * (Anthropic Technique 2: Dynamic Filtering)
      */
     async snapshot(args = {}) {
-        const { verbose = true, filter = {} } = args;
-
-        console.error('[PlaywrightDirect] Taking accessibility snapshot...');
+        const {
+            verbose = false,
+            includeAria = false,
+            filter,
+            autoFilter = true,
+            useCache = true,
+            vision = false,
+        } = args;
 
         // Ensure page is available and ready
         if (!this.page) {
             throw new Error('No page available. Please navigate to a URL first.');
         }
 
-        // Get ARIA snapshot using modern Playwright API (page.accessibility was removed in 1.41+)
-        let ariaTree = null;
-        try {
-            ariaTree = await this.page.locator('body').ariaSnapshot({ timeout: 10000 });
-        } catch (ariaError) {
-            console.error('[PlaywrightDirect] ARIA snapshot failed:', ariaError.message);
-            // Continue without ARIA tree - element extraction will still work
+        // ── Cache check (Pillar 1: near-free repeated snapshots) ─────────────
+        // A cheap DOM-version read decides whether anything changed since the
+        // last snapshot. If not, return the cached payload without re-walking
+        // the DOM or re-validating selectors.
+        const domVersion = await this._readDomVersion();
+        const filterKey = JSON.stringify(filter || (autoFilter ? 'auto' : null));
+        const visionKey = (vision && this._visionFusion) ? '|vision=1' : '';
+        const cacheKey = `${domVersion.url}|seq=${domVersion.seq}|n=${domVersion.count}|v=${verbose}|a=${includeAria}|f=${filterKey}${visionKey}`;
+        if (useCache && this._snapshotCache && this._snapshotCache.key === cacheKey) {
+            return { ...this._snapshotCache.payload, _cache: { hit: true, domVersion: domVersion.seq } };
         }
 
-        // Phase 1: Enriched DOM walk — captures all attributes the SelectorEngine needs
-        const enrichedDomWalkerSource = SelectorEngine.getEnrichedDomWalkerSource();
-        const elements = await this.page.evaluate(enrichedDomWalkerSource);
+        console.error('[PlaywrightDirect] Taking accessibility snapshot...');
 
-        // Phase 2: Uniqueness validation — count how many DOM nodes each candidate CSS selector matches
+        // ARIA tree only when explicitly requested. It is an expensive full-tree
+        // serialization that duplicates the enriched DOM walk, so it is excluded
+        // from the default (compact) path to cut latency and tokens.
+        let ariaTree = null;
+        if (verbose || includeAria) {
+            try {
+                ariaTree = await this.page.locator('body').ariaSnapshot({ timeout: 10000 });
+            } catch (ariaError) {
+                console.error('[PlaywrightDirect] ARIA snapshot failed:', ariaError.message);
+            }
+        }
+
+        // Element fingerprints. With the resident agent active, read the live maintained model
+        // (incremental — no full re-walk); otherwise run the enriched DOM walker. Always falls
+        // back to the walker on any miss.
+        let elements = null;
+        if (this._residentAgentEnabled) {
+            try {
+                const perceived = await this.page.evaluate(
+                    () => (window.__cbr ? window.__cbr.perceive({ refreshLayout: true }) : null)
+                );
+                if (perceived && Array.isArray(perceived.elements) && perceived.elements.length) {
+                    elements = perceived.elements;
+                }
+            } catch (e) {
+                console.error('[PlaywrightDirect] resident perceive failed, falling back to walker:', e.message);
+            }
+        }
+        if (!elements) {
+            elements = await this.page.evaluate(SelectorEngine.getEnrichedDomWalkerSource());
+        }
+
+        // Uniqueness validation — count how many DOM nodes each candidate matches.
         let matchCounts = {};
         try {
-            const validationScript = SelectorEngine.getUniquenessValidationScript(elements);
-            matchCounts = await this.page.evaluate(validationScript);
+            matchCounts = await this.page.evaluate(SelectorEngine.getUniquenessValidationScript(elements));
         } catch (valError) {
             console.error('[PlaywrightDirect] Uniqueness validation failed (non-fatal):', valError.message);
         }
 
-        // Phase 3: Score & rank selectors per element
-        let enrichedElements = SelectorEngine.processSnapshotElements(elements, matchCounts);
+        // Score & rank selectors per element.
+        const fullElements = SelectorEngine.processSnapshotElements(elements, matchCounts);
 
-        // ── Dynamic Filtering (Anthropic Technique 2) ────────────────────────
-        // Apply server-side filters BEFORE returning to the agent.
-        // This reduces token usage by ~70% per snapshot compared to returning
-        // everything and letting the agent or context engine trim it.
-        const preFilterCount = enrichedElements.length;
-
-        if (filter && Object.keys(filter).length > 0) {
-            enrichedElements = this._applySnapshotFilters(enrichedElements, filter);
-            console.error(`[PlaywrightDirect] Dynamic filtering: ${preFilterCount} → ${enrichedElements.length} elements`);
-        }
-
-        // Store refs for later use (click, type, hover, etc.)
+        // Store the FULL (pre-filter) set so any ref resolves for later
+        // interactions, even when filtered out of the agent-facing view.
         this.snapshotRefs.clear();
-        for (const el of enrichedElements) {
+        for (const el of fullElements) {
             this.snapshotRefs.set(el.ref, el);
         }
 
-        return {
-            blockerState: await this.getBlockingState(),
-            ariaTree: ariaTree,
-            elements: enrichedElements,
+        // ── Vision+DOM+AX fusion (P5) ─────────────────────────────────────────
+        // Fill names for DOM-blind elements (icon-only buttons, canvas) before filtering so the
+        // fused names participate. Budget-capped; only when requested (vision:true) AND enabled.
+        let visionResult = null;
+        if (vision && this._visionFusion) {
+            try {
+                visionResult = await this._visionFusion.fuse(fullElements);
+            } catch (e) {
+                console.error('[PlaywrightDirect] vision fusion failed (non-fatal):', e.message);
+            }
+        }
+
+        // ── Filtering: explicit when provided, automatic when the page is large ─
+        const preFilterCount = fullElements.length;
+        let viewElements = fullElements;
+        const explicitFilter = filter && Object.keys(filter).length > 0;
+        let appliedFilter = explicitFilter ? filter : (autoFilter ? this._computeAutoFilter(preFilterCount) : null);
+        if (appliedFilter) {
+            viewElements = this._applySnapshotFilters(fullElements, appliedFilter);
+            console.error(`[PlaywrightDirect] Filtering: ${preFilterCount} → ${viewElements.length} elements`);
+        }
+
+        const blockerState = await this.getBlockingState();
+        const payload = {
             url: this.page.url(),
             title: await this.page.title(),
-            _filtering: filter && Object.keys(filter).length > 0
-                ? { applied: true, before: preFilterCount, after: enrichedElements.length }
-                : { applied: false, total: enrichedElements.length },
+            blockerState,
+            elementCount: viewElements.length,
+            elements: verbose ? viewElements : this._toCompactElements(viewElements),
+            _filtering: appliedFilter
+                ? { applied: true, before: preFilterCount, after: viewElements.length, auto: !explicitFilter }
+                : { applied: false, total: preFilterCount },
         };
+        if (visionResult) payload._vision = { provider: visionResult.provider, fused: visionResult.fusedCount, ambiguous: visionResult.ambiguousCount };
+        // Affordance overview (CBR): up-front "what is clickable" analysis over the whole page.
+        const affordances = this._summarizeAffordances(fullElements);
+        if (affordances) payload.affordances = affordances;
+        if (verbose || includeAria) payload.ariaTree = ariaTree;
+        if (verbose) payload.verbose = true;
+
+        this._snapshotCache = { key: cacheKey, payload };
+        return { ...payload, _cache: { hit: false, domVersion: domVersion.seq } };
+    }
+
+    /**
+     * Read a cheap DOM-version signature used as the snapshot cache key.
+     * `seq` is bumped by a MutationObserver installed at context creation, so it
+     * reflects any DOM change since the last read. Falls back to element count.
+     */
+    async _readDomVersion() {
+        try {
+            return await this.page.evaluate(() => ({
+                seq: (typeof window.__mcpDomSeq === 'number') ? window.__mcpDomSeq : null,
+                count: document.getElementsByTagName('*').length,
+                url: location.href,
+            }));
+        } catch {
+            return { seq: null, count: -1, url: this.page ? this.page.url() : '' };
+        }
+    }
+
+    /** Invalidate the cached snapshot payload (called on navigation). */
+    _invalidateSnapshotCache() {
+        this._snapshotCache = null;
+    }
+
+    /** Lean read of just the DOM mutation counter, for hot poll loops. */
+    async _readDomSeqQuick() {
+        try {
+            return await this.page.evaluate(() => (typeof window.__mcpDomSeq === 'number' ? window.__mcpDomSeq : -1));
+        } catch {
+            return -1;
+        }
+    }
+
+    /**
+     * Decide an automatic filter when the element set is large enough that
+     * returning everything would bloat the agent context.
+     */
+    _computeAutoFilter(count) {
+        const threshold = this.config.snapshotAutoFilterThreshold ?? 60;
+        if (count <= threshold) return null;
+        return {
+            interactiveOnly: true,
+            visibleOnly: true,
+            maxElements: this.config.snapshotMaxElements ?? 150,
+        };
+    }
+
+    /**
+     * Project full enriched elements down to a compact, token-lean shape.
+     * Keeps only what an agent needs to reason and act: ref, role, name,
+     * winning selector, and a few interaction hints. Full fingerprints remain
+     * available via snapshotRefs (for interactions) and verbose mode.
+     */
+    _toCompactElements(elements) {
+        return elements.map((el) => {
+            const name = el.computedLabel || el.ariaLabel || el.associatedLabel || el.text || el.name || el.placeholder;
+            // Prefer a semantic ARIA role (e.g. input → textbox, a → link) over the raw tag.
+            const role = el.role || SelectorEngine.mapAriaRole(el.role, el.tag) || el.tag;
+            const out = { ref: el.ref, role };
+            if (el.tag && role !== el.tag) out.tag = el.tag;
+            if (name) out.name = String(name).substring(0, 120);
+            // Playwright locator the agent should use (e.g. getByRole/getByTestId);
+            // the bridge resolves refs to CSS independently for interactions.
+            if (el.selector?.primary) out.selector = el.selector.primary;
+            if (el.selector && el.selector.isUnique === false) out.ambiguous = true;
+            if (el.inputType) out.inputType = el.inputType;
+            if (el.isInteractive) out.interactive = true;
+            if (el.visible === false) out.visible = false;
+            // Affordance / interactability (CBR): WHAT kind of control this is (button, link,
+            // card, map, input, cta…) and — for clickable things — whether it is on screen now.
+            // This is the "what is clickable and what is not" signal that lets the agent target
+            // the actionable copy instead of blindly text-clicking a hidden responsive duplicate.
+            if (el.affordance && el.affordance !== 'text') out.affordance = el.affordance;
+            if (el.isInteractive && el.inViewport === false) out.inViewport = false;
+            // Vision-fused name (P5): transparent provenance — the caller sees the name came
+            // from visual perception, not the DOM (QA-integrity).
+            if (el.fusedName) { out.visualSource = el.visualSource; out.visualConfidence = el.visualConfidence; }
+            return out;
+        });
+    }
+
+    /**
+     * Build a page-level affordance overview — an up-front "what is clickable and what is not"
+     * analysis the agent can read before attempting any action. Counts each interaction kind
+     * (button / link / card / map / input / tab / cta…) and, crucially, how many clickable
+     * controls are actually in the viewport right now (i.e. immediately actionable) versus
+     * off-screen. Derived entirely from data already on each fingerprint — no extra round-trip.
+     *
+     * @param {Array} elements - full (pre-filter) enriched element set
+     * @returns {Object|null} { byKind, clickable, clickableInViewport } or null when nothing interactive
+     */
+    _summarizeAffordances(elements) {
+        const byKind = {};
+        let clickable = 0;
+        let clickableInViewport = 0;
+        for (const el of elements) {
+            const kind = el.affordance || 'text';
+            if (kind === 'text') continue;
+            byKind[kind] = (byKind[kind] || 0) + 1;
+            if (el.isInteractive) {
+                clickable++;
+                if (el.inViewport !== false && el.visible !== false) clickableInViewport++;
+            }
+        }
+        if (Object.keys(byKind).length === 0) return null;
+        return { byKind, clickable, clickableInViewport };
     }
 
     /**
@@ -1362,7 +1799,9 @@ export class PlaywrightDirectBridge extends EventEmitter {
         let nameRegex = null;
         if (namePattern) {
             try {
-                nameRegex = new RegExp(namePattern, 'i');
+                // CWE-1333 fix: escape user input to prevent ReDoS
+                const escaped = namePattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                nameRegex = new RegExp(escaped, 'i');
             } catch {
                 console.error(`[PlaywrightDirect] Invalid namePattern regex: ${namePattern}`);
             }
@@ -1437,6 +1876,8 @@ export class PlaywrightDirectBridge extends EventEmitter {
             button = 'left',
             doubleClick = false,
             modifiers = [],
+            force = false,
+            timeout,
         } = args;
 
         let selector;
@@ -1459,7 +1900,10 @@ export class PlaywrightDirectBridge extends EventEmitter {
         }
 
         console.error(`[PlaywrightDirect] Clicking: ${selector}`);
-        const blocked = await this._guardInteraction('click', selector, { includeDom: true });
+        // force:true bypasses the custom overlay/blocker guard and relies on Playwright's
+        // native actionability (auto-scroll + trusted event). Use when a click is falsely
+        // blocked by page chrome such as a map/canvas.
+        const blocked = force ? null : await this._guardInteraction('click', selector, { includeDom: true });
         if (blocked) {
             return blocked;
         }
@@ -1469,6 +1913,11 @@ export class PlaywrightDirectBridge extends EventEmitter {
             modifiers,
             clickCount: doubleClick ? 2 : 1,
         };
+        // A bounded timeout lets a wrong pick (e.g. a hidden responsive duplicate that never
+        // becomes actionable) fail fast with a clear reason instead of hanging to the tool
+        // ceiling. force already bypasses the custom guard above; Playwright's own native
+        // actionability (auto-scroll + trusted event) is intentionally preserved.
+        if (Number.isFinite(timeout)) clickOptions.timeout = timeout;
 
         await this.page.click(selector, clickOptions);
         const postActionBlocker = await this._capturePostActionBlocker('click', selector);
@@ -1497,6 +1946,7 @@ export class PlaywrightDirectBridge extends EventEmitter {
             clear = false,
             slowly = false,
             submit = false,
+            force = false,
         } = args;
 
         let selector;
@@ -1521,7 +1971,7 @@ export class PlaywrightDirectBridge extends EventEmitter {
 
         console.error(`[PlaywrightDirect] Typing into: ${selector}`);
 
-        const blocked = await this._guardInteraction('type', selector, { includeDom: true });
+        const blocked = force ? null : await this._guardInteraction('type', selector, { includeDom: true });
         if (blocked) {
             return blocked;
         }
@@ -1530,15 +1980,19 @@ export class PlaywrightDirectBridge extends EventEmitter {
             await this.page.fill(selector, '');
         }
 
+        // Use locator.pressSequentially (modern, fires trusted key events that framework
+        // inputs such as Angular/React forms listen for) instead of the deprecated page.type.
+        const locator = this.page.locator(selector);
         if (slowly) {
-            const locator = this.page.locator(selector);
             if (typeof locator.pressSequentially === 'function') {
-                await locator.pressSequentially(text);
+                await locator.pressSequentially(text, { delay: 100 });
             } else {
-                await this.page.type(selector, text, { delay: 100 });
+                await locator.type(text, { delay: 100 });
             }
+        } else if (typeof locator.pressSequentially === 'function') {
+            await locator.pressSequentially(text);
         } else {
-            await this.page.type(selector, text);
+            await locator.type(text);
         }
 
         if (submit) {
@@ -1952,26 +2406,55 @@ export class PlaywrightDirectBridge extends EventEmitter {
     }
 
     /**
-     * Evaluate JavaScript
+     * Evaluate JavaScript in the browser context (sandboxed by Chromium).
+     * Only simple return-value expressions are allowed — no multi-statement
+     * scripts, assignment to globals, or network/FS access from Node.
+     *
+     * Security: CWE-94 mitigation — block dangerous patterns before execution.
      */
     async evaluate(args) {
         const { script, expression } = args;
         const code = script || expression;
+
+        if (!code || typeof code !== 'string') {
+            return { error: 'evaluate() requires a non-empty string script or expression' };
+        }
+
+        // Block patterns that indicate code-injection attempts in browser context
+        const blockedPatterns = [
+            /\brequire\s*\(/i,
+            /\bprocess\b/i,
+            /\b__dirname\b/i,
+            /\b__filename\b/i,
+            /\bglobalThis\b/i,
+            /\bimport\s*\(/i,
+        ];
+        for (const pattern of blockedPatterns) {
+            if (pattern.test(code)) {
+                return { error: `evaluate() blocked: expression contains disallowed pattern "${pattern.source}"` };
+            }
+        }
 
         const result = await this.page.evaluate(code);
         return { result };
     }
 
     /**
-     * Run Playwright code
+     * Run Playwright code — DISABLED for security (CWE-94).
+     *
+     * This method previously used `new Function()` to execute arbitrary
+     * Node.js code with full access to the Playwright page, context, and
+     * browser objects. This is equivalent to `eval()` and enables arbitrary
+     * remote code execution for any caller that can invoke MCP tools.
+     *
+     * Use the individual MCP action tools (click, fill, navigate, etc.)
+     * instead of arbitrary code execution.
      */
-    async runCode(args) {
-        const { code } = args;
-
-        // Execute the code with page context
-        const fn = new Function('page', 'context', 'browser', `return (async () => { ${code} })()`);
-        const result = await fn(this.page, this.context, this.browser);
-        return { result };
+    async runCode(_args) {
+        return {
+            error: 'runCode() has been disabled for security reasons (CWE-94: Code Injection). '
+                + 'Use the individual MCP action tools (click, fill, navigate, snapshot, etc.) instead.',
+        };
     }
 
     /**
@@ -2139,6 +2622,10 @@ export class PlaywrightDirectBridge extends EventEmitter {
         // ensureConnected() sees stale connected=true and tries to use a dead
         // page object, causing cascading "Target closed" errors.
         try {
+            if (this._reactiveCore) { try { this._reactiveCore.dispose(); } catch (e) { /* non-fatal */ } }
+            if (this._healStore) { try { this._healStore.flush(); } catch (e) { /* non-fatal */ } }
+            if (this._appGraph) { try { this._appGraph.flush(); } catch (e) { /* non-fatal */ } }
+            if (this._transport) { try { await this._transport.dispose(); } catch (e) { /* non-fatal */ } }
             if (this.browser) {
                 await this.browser.close();
             }

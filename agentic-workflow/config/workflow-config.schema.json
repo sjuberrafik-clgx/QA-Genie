@@ -945,6 +945,79 @@
                 }
             }
         },
+        "guardrails": {
+            "type": "object",
+            "description": "Universal mutation guardrail. Always-on onPreToolUse layer that gates every write/update/delete tool call (all agents, incl. custom Studio agents and custom MCP tools) behind an Approve/Cancel prompt. Deterministic classification — zero LLM cost.",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Master toggle for the universal mutation guardrail."
+                },
+                "failMode": {
+                    "type": "string",
+                    "enum": ["closed", "open"],
+                    "default": "closed",
+                    "description": "'closed' denies mutations when no approver is available. Interactive prompts are inherently fail-closed (auto-Cancel on timeout)."
+                },
+                "browserInteractionsRequireApproval": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, browser/MCP UI actions (click/type/fill/navigate/snapshot) also require approval. Off by default — exploration is not a data mutation."
+                },
+                "gateUnclassifiedTools": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, tools whose names have no recognizable read/write verb are also gated (maximum strictness)."
+                },
+                "exemptCategories": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "default": ["browser"],
+                    "description": "Tool categories that are never gated."
+                },
+                "allowlist": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "default": [],
+                    "description": "Tool names that are never gated (overrides heuristics)."
+                },
+                "denylist": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "default": [],
+                    "description": "Tool names that always require approval, regardless of classification."
+                },
+                "extraMutatingVerbs": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "default": [],
+                    "description": "Additional verbs that mark an unknown tool as mutating."
+                },
+                "extraReadVerbs": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "default": [],
+                    "description": "Additional leading verbs that mark an unknown tool as read-only."
+                },
+                "classificationOverrides": {
+                    "type": "object",
+                    "description": "Per-tool classification overrides keyed by tool name (effect, impactLevel, requiresApproval, selfGated, etc.).",
+                    "additionalProperties": true
+                },
+                "pipeline": {
+                    "type": "object",
+                    "description": "Headless/autonomous pipeline policy. Known-safe mutations auto-approve; unknown/high-risk mutations are blocked.",
+                    "properties": {
+                        "blockUnknownMutations": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Block unknown or non-pipeline-safe mutating tools during autonomous pipeline runs (no human approver)."
+                        }
+                    }
+                }
+            }
+        },
         "cognitiveLoop": {
             "type": "object",
             "description": "Cognitive QA Loop configuration. Controls the 5-phase (Analyst→Explorer→Coder→Reviewer→DryRun) script generation pipeline with CoT/ToT reasoning and inference-time scaling.",

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback, memo } from 'react';
 import { createPortal } from 'react-dom';
+import DOMPurify from 'dompurify';
 
 /**
  * MermaidBlock — renders mermaid DSL strings as interactive SVG diagrams.
@@ -13,6 +14,48 @@ import { createPortal } from 'react-dom';
 export default memo(MermaidBlock);
 
 let idCounter = 0;
+
+// Perf: hoist the mermaid engine singleton + initialize-once promise to
+// module scope so N diagrams in one message reuse a single engine instance
+// instead of each MermaidBlock effect re-importing + re-initializing.
+let mermaidEnginePromise = null;
+
+function getMermaidEngine() {
+    if (mermaidEnginePromise) return mermaidEnginePromise;
+    mermaidEnginePromise = (async () => {
+        const mermaid = (await import('mermaid')).default;
+        mermaid.initialize({
+            startOnLoad: false,
+            theme: 'base',
+            themeVariables: {
+                primaryColor: '#E8F4F6',
+                primaryTextColor: '#1a1a2e',
+                primaryBorderColor: '#1c8090',
+                lineColor: '#6B7280',
+                secondaryColor: '#F0FDFA',
+                tertiaryColor: '#FFF7ED',
+                fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
+                fontSize: '13px',
+                nodeBorder: '#1c8090',
+                mainBkg: '#E8F4F6',
+                edgeLabelBackground: '#ffffff',
+            },
+            flowchart: {
+                htmlLabels: true,
+                curve: 'basis',
+                padding: 16,
+                nodeSpacing: 50,
+                rankSpacing: 60,
+                useMaxWidth: false,
+                wrappingWidth: 200,
+            },
+            sequence: { useMaxWidth: false, showSequenceNumbers: true },
+            securityLevel: 'loose',
+        });
+        return mermaid;
+    })();
+    return mermaidEnginePromise;
+}
 
 /* ── Sanitizer ─────────────────────────────────────────────────── */
 function sanitizeMermaidCode(raw) {
@@ -289,36 +332,7 @@ function MermaidBlock({ children }) {
             if (cancelled) return;
 
             try {
-                const mermaid = (await import('mermaid')).default;
-
-                mermaid.initialize({
-                    startOnLoad: false,
-                    theme: 'base',
-                    themeVariables: {
-                        primaryColor: '#E8F4F6',
-                        primaryTextColor: '#1a1a2e',
-                        primaryBorderColor: '#1c8090',
-                        lineColor: '#6B7280',
-                        secondaryColor: '#F0FDFA',
-                        tertiaryColor: '#FFF7ED',
-                        fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
-                        fontSize: '13px',
-                        nodeBorder: '#1c8090',
-                        mainBkg: '#E8F4F6',
-                        edgeLabelBackground: '#ffffff',
-                    },
-                    flowchart: {
-                        htmlLabels: true,
-                        curve: 'basis',
-                        padding: 16,
-                        nodeSpacing: 50,
-                        rankSpacing: 60,
-                        useMaxWidth: false,
-                        wrappingWidth: 200,
-                    },
-                    sequence: { useMaxWidth: false, showSequenceNumbers: true },
-                    securityLevel: 'loose',
-                });
+                const mermaid = await getMermaidEngine();
 
                 // Pre-validate with mermaid.parse() before render (throws on invalid syntax)
                 try {
@@ -334,7 +348,9 @@ function MermaidBlock({ children }) {
                 const { svg } = await mermaid.render(uniqueId, code);
 
                 if (!cancelled) {
-                    setSvgHtml(svg);
+                    // CWE-79 fix: sanitize SVG output before injecting via dangerouslySetInnerHTML
+                    const safeSvg = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true }, ADD_TAGS: ['foreignObject'] });
+                    setSvgHtml(safeSvg);
                     setStatus('rendered');
                 }
             } catch (err) {

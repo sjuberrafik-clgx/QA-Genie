@@ -1,0 +1,31 @@
+{
+  "kind": "studio-skill",
+  "version": 1,
+  "id": "api-genie",
+  "name": "API Genie",
+  "description": "Automate API testing, validation, and script generation for REST endpoints in QA workflows.",
+  "workspaceId": "api-genie",
+  "status": "draft",
+  "keywords": [
+    "API testing",
+    "REST API",
+    "endpoint testing",
+    "API validation",
+    "API automation",
+    "Swagger testing",
+    "OpenAPI testing",
+    "API test scripts",
+    "endpoint validation",
+    "API coverage",
+    "REST validation",
+    "API test cases",
+    "API response validation"
+  ],
+  "allowedTools": [],
+  "agentBindings": [],
+  "entry": {
+    "instruction": "SKILL.md"
+  },
+  "createdAt": "2026-04-27T05:39:07.499Z",
+  "updatedAt": "2026-04-27T05:39:07.499Z"
+}

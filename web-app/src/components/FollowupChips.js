@@ -1,5 +1,6 @@
 'use client';
 
+import { memo } from 'react';
 import { SparkleIcon, PlayIcon, CodeIcon, DocumentIcon, BugIcon, GlobeIcon } from './Icons';
 
 /**
@@ -45,7 +46,7 @@ const DEFAULT_STYLE = 'bg-surface-50 border-surface-200/80 text-surface-700 hove
  * @param {Function} props.onSelect - Called with the full followup object when a chip is clicked
  * @param {boolean} [props.disabled] - Disable clicks (e.g., while processing)
  */
-export default function FollowupChips({ followups = [], onSelect, disabled = false }) {
+function FollowupChips({ followups = [], onSelect, disabled = false }) {
     if (!followups || followups.length === 0) return null;
 
     return (
@@ -84,3 +85,7 @@ export default function FollowupChips({ followups = [], onSelect, disabled = fal
         </div>
     );
 }
+
+// Perf: memoize so the chip row doesn't re-render on every parent state
+// update (e.g. each streaming token in ChatMessage).
+export default memo(FollowupChips);

@@ -115,10 +115,9 @@ class TerminalSessionManager {
             return unixProfiles[requested];
         }
 
-        if (requested.startsWith('/')) {
-            return { id: 'custom', command: requested, args: ['-i'], label: requested };
-        }
-
+        // CWE-78 fix: reject arbitrary binary paths — only allow whitelisted shells
+        // Previously accepted any absolute path starting with '/'
+        console.warn(`[TerminalSessionManager] Rejected unknown shell: ${requested}`);
         return unixProfiles.bash;
     }
 

@@ -10,7 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 
 // Dynamic path resolution
 let _projectPaths;
@@ -118,7 +118,7 @@ const QualityGates = {
                 passed: false,
                 error: 'MCP exploration data not found',
                 expected: explorationPath,
-                fix: 'ScriptGenerator MUST perform LIVE MCP exploration (mcp_unified-autom_unified_navigate + mcp_unified-autom_unified_snapshot) before generating scripts'
+                fix: 'ScriptGenerator MUST perform LIVE browser exploration (Glass: open + see, or legacy: unified_navigate + unified_snapshot) before generating scripts'
             };
         }
 
@@ -152,18 +152,19 @@ const QualityGates = {
                 passed: false,
                 error: 'Exploration used web-fetch, NOT live MCP snapshot. This is invalid.',
                 actualSource: exploration.source,
-                requiredSource: 'mcp-live-snapshot',
-                fix: 'ScriptGenerator MUST call mcp_unified-autom_unified_navigate and mcp_unified-autom_unified_snapshot for LIVE exploration. Do NOT use fetch_webpage as a substitute.'
+                requiredSource: 'glass-see | mcp-live-snapshot',
+                fix: 'ScriptGenerator MUST perform LIVE browser exploration (Glass: open + see, or legacy: unified_navigate + unified_snapshot). Do NOT use fetch_webpage as a substitute.'
             };
         }
 
-        // ── CRITICAL: Verify source is explicitly "mcp-live-snapshot" ──
-        if (exploration.source !== 'mcp-live-snapshot' && exploration.source !== 'mcp-snapshot') {
+        // ── CRITICAL: Verify source is a recognized LIVE browser-MCP source ──
+        const LIVE_SOURCES = ['mcp-live-snapshot', 'mcp-snapshot', 'glass-see', 'glass-live', 'glass-snapshot'];
+        if (!LIVE_SOURCES.includes(exploration.source)) {
             return {
                 passed: false,
                 error: `Exploration source "${exploration.source}" is not a recognized live MCP source`,
-                requiredSource: 'mcp-live-snapshot',
-                fix: 'Exploration data must have "source": "mcp-live-snapshot" — this is set automatically when using MCP tools'
+                requiredSource: 'glass-see | mcp-live-snapshot',
+                fix: 'Exploration data must have "source": "glass-see" (Glass) or "mcp-live-snapshot" (legacy unified) — set automatically when using the browser MCP tools'
             };
         }
 
@@ -173,15 +174,17 @@ const QualityGates = {
             return {
                 passed: false,
                 error: `No MCP snapshots recorded (need at least ${minSnapshots}, found ${(exploration.snapshots || []).length})`,
-                fix: 'ScriptGenerator must call mcp_unified-autom_unified_snapshot at least once per page and store results in snapshots array'
+                fix: 'ScriptGenerator must perceive each page (Glass see / unified_snapshot) at least once and store results in the snapshots array'
             };
         }
 
-        // ── Verify element refs from accessibility tree ──
-        const hasElementRefs = exploration.snapshots.some(snap =>
-            Array.isArray(snap.elements) && snap.elements.length > 0 &&
-            snap.elements.some(el => el.ref || el.role || el.name || el.ariaLabel)
-        );
+        // ── Verify element refs (a11y elements OR Glass affordances/handles) ──
+        const hasElementRefs = exploration.snapshots.some(snap => {
+            const els = Array.isArray(snap.elements) ? snap.elements : [];
+            const affs = Array.isArray(snap.affordances) ? snap.affordances : [];
+            return (els.length > 0 && els.some(el => el.ref || el.role || el.name || el.ariaLabel)) ||
+                (affs.length > 0 && affs.some(a => a.h || a.handle || a.role || a.name));
+        });
 
         // ── Verify deep exploration data ──
         const hasDeepExploration = !!exploration.deepExploration;
@@ -197,7 +200,7 @@ const QualityGates = {
 
         // Validate exploration data structure
         const checks = {
-            hasLiveSource: exploration.source === 'mcp-live-snapshot' || exploration.source === 'mcp-snapshot',
+            hasLiveSource: LIVE_SOURCES.includes(exploration.source),
             hasSnapshots: hasSnapshots,
             hasElementRefs: hasElementRefs,
             hasTimestamp: !!exploration.timestamp,
@@ -222,7 +225,7 @@ const QualityGates = {
                 failedChecks: failed,
                 hardFailures: hardFailures,
                 checks: checks,
-                fix: 'Re-run ScriptGenerator with LIVE MCP exploration — ensure mcp_unified-autom_unified_navigate and mcp_unified-autom_unified_snapshot are called'
+                fix: 'Re-run ScriptGenerator with LIVE browser exploration — Glass (open + see) or legacy unified (unified_navigate + unified_snapshot)'
             };
         }
 
@@ -373,13 +376,14 @@ const QualityGates = {
 
         try {
             // Run first test only (TC1 or first test found)
-            const result = execSync(
-                `npx playwright test "${scriptFilePath}" --grep "TC1" --reporter=list`,
+            const result = execFileSync(
+                'npx', ['playwright', 'test', scriptFilePath, '--grep', 'TC1', '--reporter=list'],
                 {
                     timeout: 90000, // 90 seconds max
                     encoding: 'utf8',
                     cwd: process.cwd(),
-                    stdio: 'pipe'
+                    stdio: 'pipe',
+                    shell: false
                 }
             );
 

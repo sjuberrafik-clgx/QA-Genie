@@ -21,6 +21,7 @@ import {
     SparkleIcon,
 } from '@/components/Icons';
 import AgentBuilderWizard from '@/components/AgentBuilderWizard';
+import { ToolsStep, normalizeCapabilityRuntimeConfig } from '@/components/wizard-steps';
 import TemplateGallery from '@/components/TemplateGallery';
 import McpDesigner from '@/components/McpDesigner';
 import AgentAnalyticsDashboard from '@/components/AgentAnalyticsDashboard';
@@ -149,7 +150,7 @@ function WorkspaceTreeNode({ node, depth = 0, selectedPath, onOpenFile }) {
 // Cards
 // ───────────────────────────────────────────────────────────────
 
-function AgentRow({ agent, busy, highlight, onPublish, onToggleActivation, onOpenFile, onDelete, onExport, onValidate, validating }) {
+function AgentRow({ agent, busy, highlight, onPublish, onToggleActivation, onOpenFile, onDelete, onExport, onValidate, validating, onConfigureCapabilities }) {
     const promptFile = agent.files?.find((f) => f.label === 'Prompt');
     const manifestFile = agent.files?.find((f) => f.label === 'Manifest');
 
@@ -165,13 +166,36 @@ function AgentRow({ agent, busy, highlight, onPublish, onToggleActivation, onOpe
                         <Chip className="border-surface-200 bg-surface-50 text-surface-600">
                             {agent.toolProfile || 'full'}
                         </Chip>
+                        {agent.capabilityProfile && (
+                            <Chip className="border-teal-200 bg-teal-50 text-teal-700">
+                                {agent.capabilityProfile}
+                            </Chip>
+                        )}
                     </div>
                     <p className="mt-0.5 truncate text-[11px] font-medium text-surface-400">{agent.path}</p>
                 </div>
             </div>
             <p className="mt-3 line-clamp-2 text-[13px] leading-5 text-surface-500">{agent.description || 'No description yet.'}</p>
 
+            <div className="mt-3 flex flex-wrap gap-1.5 text-[10px] font-semibold">
+                <span className={`rounded-full px-2 py-0.5 ${agent.capabilities?.browser ? 'bg-blue-50 text-blue-700' : 'bg-surface-100 text-surface-400'}`}>Browser</span>
+                <span className={`rounded-full px-2 py-0.5 ${agent.capabilities?.jira ? 'bg-amber-50 text-amber-700' : 'bg-surface-100 text-surface-400'}`}>Jira</span>
+                <span className="rounded-full bg-surface-100 px-2 py-0.5 text-surface-500">FS: {agent.capabilities?.filesystem || 'none'}</span>
+                {(agent.toolCategories || []).slice(0, 4).map(category => (
+                    <span key={category} className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">{category}</span>
+                ))}
+            </div>
+
             <div className="mt-3 flex flex-wrap gap-2">
+                {onConfigureCapabilities && (
+                    <button
+                        type="button"
+                        onClick={() => onConfigureCapabilities(agent)}
+                        className="inline-flex items-center rounded-lg border border-teal-200 bg-teal-50 px-2.5 py-1 text-[11px] font-semibold text-teal-700 hover:bg-teal-100"
+                    >
+                        Capabilities
+                    </button>
+                )}
                 {promptFile && (
                     <button
                         type="button"
@@ -377,6 +401,10 @@ export default function StudioPage() {
     const [exportTarget, setExportTarget] = useState(null); // { agentId, agentName }
     const [validationResult, setValidationResult] = useState(null);
     const [validatingAgentId, setValidatingAgentId] = useState('');
+    const [capabilityEditor, setCapabilityEditor] = useState(null);
+    const [capabilityEditorSaving, setCapabilityEditorSaving] = useState(false);
+    const [capabilityProfiles, setCapabilityProfiles] = useState([]);
+    const [mcpServers, setMcpServers] = useState([]);
 
     // URL-driven state
     const selectedWorkspaceId = searchParams.get('workspace') || '';
@@ -621,6 +649,97 @@ export default function StudioPage() {
             setError(err.message || 'Failed to validate agent');
         } finally {
             setValidatingAgentId('');
+        }
+    }
+
+    const loadCapabilityResources = useCallback(async () => {
+        const [mcpRes, profileRes] = await Promise.all([
+            apiClient.listMcpRegistry(),
+            apiClient.listStudioCapabilityProfiles(),
+        ]);
+        const nextMcpServers = mcpRes.items || [];
+        const nextProfiles = profileRes.items || [];
+        setMcpServers(nextMcpServers);
+        setCapabilityProfiles(nextProfiles);
+        return { mcpServers: nextMcpServers, capabilityProfiles: nextProfiles };
+    }, []);
+
+    async function handleConfigureCapabilities(agent) {
+        if (!selectedWorkspaceId) return;
+        const manifestFile = agent.files?.find((f) => f.label === 'Manifest');
+        if (!manifestFile?.path) {
+            setError('Agent manifest file was not found.');
+            return;
+        }
+
+        setError('');
+        try {
+            const resources = await loadCapabilityResources();
+            const file = await apiClient.getStudioWorkspaceFile(selectedWorkspaceId, manifestFile.path);
+            const manifest = JSON.parse(file.content || '{}');
+            const runtime = normalizeCapabilityRuntimeConfig(manifest, resources.capabilityProfiles);
+            setCapabilityEditor({
+                agentId: agent.id,
+                agentName: agent.name,
+                manifestPath: manifestFile.path,
+                manifest,
+                config: {
+                    toolProfile: manifest.toolProfile || 'full',
+                    ...runtime,
+                    model: manifest.model?.id || 'claude-sonnet-4-6',
+                    mcpServers: Array.isArray(manifest.mcpServers) ? manifest.mcpServers : [],
+                    skills: Array.isArray(manifest.skills) ? manifest.skills : [],
+                    permissionMode: manifest.permissionMode || 'default',
+                    maxTurns: manifest.maxTurns || 50,
+                    maxBudgetUsd: manifest.maxBudgetUsd || '',
+                },
+            });
+        } catch (err) {
+            setError(err.message || 'Failed to open capability editor');
+        }
+    }
+
+    async function handleSaveCapabilities() {
+        if (!selectedWorkspaceId || !capabilityEditor) return;
+        setCapabilityEditorSaving(true);
+        setError('');
+        try {
+            const config = capabilityEditor.config;
+            const updatedManifest = {
+                ...capabilityEditor.manifest,
+                toolProfile: config.toolProfile,
+                followupMode: config.toolProfile === 'full' ? 'default' : config.toolProfile,
+                capabilityProfile: config.capabilityProfile || null,
+                capabilities: config.capabilities,
+                toolCategories: Array.isArray(config.toolCategories) ? config.toolCategories : [],
+                mcpToolProfile: config.capabilities?.browser ? (config.mcpToolProfile || null) : null,
+                browserGateway: config.capabilities?.browser ? false : config.browserGateway === true,
+                browserGatewayProfile: config.capabilities?.browser ? null : (config.browserGateway ? (config.browserGatewayProfile || 'dryrun') : null),
+                brokerEnabled: config.brokerEnabled !== false,
+                model: { id: config.model, speed: 'standard' },
+                mcpServers: config.mcpServers || [],
+                skills: config.skills || [],
+                permissionMode: config.permissionMode || 'default',
+                maxTurns: config.maxTurns || 50,
+                maxBudgetUsd: config.maxBudgetUsd ? parseFloat(config.maxBudgetUsd) : null,
+                updatedAt: new Date().toISOString(),
+            };
+
+            const saved = await apiClient.saveStudioWorkspaceFile(selectedWorkspaceId, {
+                path: capabilityEditor.manifestPath,
+                content: JSON.stringify(updatedManifest, null, 2),
+            });
+            if (selectedFile?.path === saved.path) {
+                setSelectedFile(saved);
+                setEditorContent(saved.content || '');
+                setEditorDirty(false);
+            }
+            setCapabilityEditor(null);
+            await Promise.all([loadWorkspaces(), loadWorkspaceDetails(selectedWorkspaceId)]);
+        } catch (err) {
+            setError(err.message || 'Failed to save capabilities');
+        } finally {
+            setCapabilityEditorSaving(false);
         }
     }
 
@@ -1217,6 +1336,7 @@ export default function StudioPage() {
                                                         onExport={(a) => setExportTarget({ agentId: a.id, agentName: a.name })}
                                                         onValidate={handleValidateAgent}
                                                         validating={validatingAgentId === agent.id}
+                                                        onConfigureCapabilities={handleConfigureCapabilities}
                                                     />
                                                 </div>
                                             ))}
@@ -1650,6 +1770,55 @@ export default function StudioPage() {
                             }}
                             onCancel={() => setShowBuilderWizard(false)}
                         />
+                    </div>
+                </div>
+            )}
+
+            {/* ─── Overlay: Agent Capability Editor ─── */}
+            {capabilityEditor && selectedWorkspaceId && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                    <div className="flex h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-surface-200 bg-white shadow-xl">
+                        <div className="flex items-center justify-between border-b border-surface-200 px-6 py-4">
+                            <div className="min-w-0">
+                                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-surface-400">Agent capabilities</p>
+                                <h2 className="truncate text-lg font-bold text-surface-900">{capabilityEditor.agentName}</h2>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setCapabilityEditor(null)}
+                                className="rounded-xl border border-surface-200 px-3 py-1.5 text-[12px] font-semibold text-surface-600 hover:bg-surface-50"
+                            >
+                                Close
+                            </button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto px-6 py-6">
+                            <ToolsStep
+                                config={capabilityEditor.config}
+                                onChange={(updates) => setCapabilityEditor((prev) => prev ? ({
+                                    ...prev,
+                                    config: { ...prev.config, ...updates },
+                                }) : prev)}
+                                mcpServers={mcpServers}
+                                capabilityProfiles={capabilityProfiles}
+                            />
+                        </div>
+                        <div className="flex items-center justify-end gap-2 border-t border-surface-200 px-6 py-4">
+                            <button
+                                type="button"
+                                onClick={() => setCapabilityEditor(null)}
+                                className="rounded-xl border border-surface-200 px-4 py-2 text-[13px] font-semibold text-surface-600 hover:bg-surface-50"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleSaveCapabilities}
+                                disabled={capabilityEditorSaving}
+                                className="rounded-xl bg-surface-900 px-5 py-2 text-[13px] font-semibold text-white hover:bg-surface-800 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                                {capabilityEditorSaving ? 'Saving...' : 'Save capabilities'}
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}

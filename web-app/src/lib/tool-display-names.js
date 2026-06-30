@@ -9,6 +9,7 @@
 
 export const TOOL_CATEGORIES = {
     browser: { label: 'Browser', color: 'blue' },
+    glass: { label: 'Glass', color: 'sky' },
     interaction: { label: 'Interaction', color: 'indigo' },
     selector: { label: 'Selector', color: 'cyan' },
     state: { label: 'State', color: 'teal' },
@@ -30,6 +31,15 @@ export const TOOL_CATEGORIES = {
 // ─── Display Name Registry ───────────────────────────────────────────────────
 
 const TOOL_DISPLAY_MAP = {
+    // ── Glass MCP (8-verb standalone browser server) ──
+    'mcp_glass_open': { label: 'Open / Navigate', category: 'glass' },
+    'mcp_glass_see': { label: 'Perceive Affordances', category: 'glass' },
+    'mcp_glass_do': { label: 'Act on Target', category: 'glass' },
+    'mcp_glass_read': { label: 'Read Content', category: 'glass' },
+    'mcp_glass_wait': { label: 'Wait For Condition', category: 'glass' },
+    'mcp_glass_net': { label: 'Network', category: 'glass' },
+    'mcp_glass_devtool': { label: 'DevTools (CDP)', category: 'glass' },
+    'mcp_glass_script': { label: 'Run Script', category: 'glass' },
     // ── MCP Browser Tools (unified-automation) ──
     'mcp_unified-autom_unified_navigate': { label: 'Navigate to Page', category: 'browser' },
     'mcp_unified-autom_unified_navigate_back': { label: 'Navigate Back', category: 'browser' },
@@ -205,7 +215,7 @@ const TOOL_DISPLAY_MAP = {
     'mcp_atlassian_atl_getJiraIssue': { label: 'Get Jira Issue', category: 'jira' },
     'mcp_atlassian_atl_createJiraIssue': { label: 'Create Jira Issue', category: 'jira', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
     'mcp_atlassian_atl_editJiraIssue': { label: 'Edit Jira Issue', category: 'jira', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
-    'mcp_atlassian_atl_addCommentToJiraIssue': { label: 'Add Jira Comment', category: 'jira', effect: 'write', impactLevel: 'medium', requiresConfirmation: false },
+    'mcp_atlassian_atl_addCommentToJiraIssue': { label: 'Add Jira Comment', category: 'jira', effect: 'write', impactLevel: 'medium', requiresConfirmation: true },
     'mcp_atlassian_atl_getVisibleJiraProjects': { label: 'List Jira Projects', category: 'jira' },
     'mcp_atlassian_atl_getTransitionsForJiraIssue': { label: 'Get Jira Transitions', category: 'jira' },
     'mcp_atlassian_atl_transitionJiraIssue': { label: 'Transition Jira Issue', category: 'jira', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
@@ -242,10 +252,13 @@ const TOOL_DISPLAY_MAP = {
     'get_jira_ticket_capabilities': { label: 'Inspect Jira Capabilities', category: 'jira' },
     'create_jira_ticket': { label: 'Create Jira Ticket', category: 'jira', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
     'remove_jira_issue_link': { label: 'Remove Jira Issue Link', category: 'jira', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
-    'attach_session_evidence_to_jira': { label: 'Attach Evidence to Jira', category: 'jira' },
-    'attach_session_images_to_jira': { label: 'Attach Images to Jira', category: 'jira' },
-    'attach_video_frames_to_jira': { label: 'Attach Video Evidence to Jira', category: 'jira' },
-    'add_comment_with_images': { label: 'Add Comment with Inline Images', category: 'jira', effect: 'write', impactLevel: 'high' },
+    'attach_session_evidence_to_jira': { label: 'Attach Evidence to Jira', category: 'jira', effect: 'write', impactLevel: 'medium', requiresConfirmation: true },
+    'attach_session_images_to_jira': { label: 'Attach Images to Jira', category: 'jira', effect: 'write', impactLevel: 'medium', requiresConfirmation: true },
+    'attach_video_frames_to_jira': { label: 'Attach Video Evidence to Jira', category: 'jira', effect: 'write', impactLevel: 'medium', requiresConfirmation: true },
+    'attach_file_to_jira': { label: 'Attach File to Jira', category: 'jira', effect: 'write', impactLevel: 'medium', requiresConfirmation: true },
+    'add_comment_with_images': { label: 'Add Comment with Inline Images', category: 'jira', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
+    'add_comment_with_media': { label: 'Add Comment with Media', category: 'jira', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
+    'link_jira_issues': { label: 'Link Jira Issues', category: 'jira', effect: 'write', impactLevel: 'medium', requiresConfirmation: true },
     'delete_jira_ticket': { label: 'Delete Jira Ticket', category: 'jira', effect: 'delete', impactLevel: 'destructive', requiresConfirmation: true },
     'delete_jira_attachment': { label: 'Delete Jira Attachment', category: 'jira', effect: 'delete', impactLevel: 'destructive', requiresConfirmation: true },
     'delete_jira_comment': { label: 'Delete Jira Comment', category: 'jira', effect: 'delete', impactLevel: 'destructive', requiresConfirmation: true },
@@ -257,7 +270,8 @@ const TOOL_DISPLAY_MAP = {
     'generate_test_case_excel': { label: 'Generate Test Case Excel', category: 'excel' },
     'find_test_files': { label: 'Find Test Files', category: 'framework' },
     'execute_test': { label: 'Execute Test Suite', category: 'execution' },
-    'run_command': { label: 'Run Command', category: 'execution' },
+    'run_command': { label: 'Run Command', category: 'execution', effect: 'execute', impactLevel: 'high', requiresConfirmation: true },
+    'commit_and_push_repo_changes': { label: 'Commit & Push Repo Changes', category: 'execution', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
     'write_shared_context': { label: 'Write Shared Context', category: 'context' },
     'read_shared_context': { label: 'Read Shared Context', category: 'context' },
     'register_artifact': { label: 'Register Artifact', category: 'context' },
@@ -267,6 +281,12 @@ const TOOL_DISPLAY_MAP = {
     'get_selector_recommendations': { label: 'Get Selector Recommendations', category: 'grounding' },
     'check_existing_coverage': { label: 'Check Existing Coverage', category: 'grounding' },
     'get_snapshot_quality': { label: 'Get Snapshot Quality', category: 'validation' },
+    'search_contracts': { label: 'Search Backend Contracts', category: 'grounding' },
+    'trace_full_stack': { label: 'Trace Full-Stack', category: 'grounding' },
+    'get_service_contract': { label: 'Get Service Contract', category: 'grounding' },
+    'get_event_schema': { label: 'Get Kafka Event Schema', category: 'grounding' },
+    'get_index_mapping': { label: 'Get Elastic Index Mapping', category: 'grounding' },
+    'verify_backend_assertions': { label: 'Verify Backend Assertions', category: 'validation' },
     'search_knowledge_base': { label: 'Search Knowledge Base', category: 'kb' },
     'get_knowledge_base_page': { label: 'Get KB Page', category: 'kb' },
     'search_confluence_content': { label: 'Search Confluence Content', category: 'kb' },
@@ -293,12 +313,12 @@ const TOOL_DISPLAY_MAP = {
     'search_files': { label: 'Search Files', category: 'filesystem' },
     'parse_document': { label: 'Parse Document', category: 'filesystem' },
     'get_document_summary': { label: 'Summarize Document', category: 'filesystem' },
-    'write_file_content': { label: 'Write File', category: 'filesystem' },
-    'create_directory': { label: 'Create Directory', category: 'filesystem' },
-    'move_items': { label: 'Move Items', category: 'filesystem' },
-    'copy_items': { label: 'Copy Items', category: 'filesystem' },
-    'rename_item': { label: 'Rename Item', category: 'filesystem' },
-    'delete_items': { label: 'Delete Items', category: 'filesystem' },
+    'write_file_content': { label: 'Write File', category: 'filesystem', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
+    'create_directory': { label: 'Create Directory', category: 'filesystem', effect: 'write', impactLevel: 'low', requiresConfirmation: true },
+    'move_items': { label: 'Move Items', category: 'filesystem', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
+    'copy_items': { label: 'Copy Items', category: 'filesystem', effect: 'write', impactLevel: 'medium', requiresConfirmation: true },
+    'rename_item': { label: 'Rename Item', category: 'filesystem', effect: 'write', impactLevel: 'high', requiresConfirmation: true },
+    'delete_items': { label: 'Delete Items', category: 'filesystem', effect: 'delete', impactLevel: 'destructive', requiresConfirmation: true },
 };
 
 // ─── Helper: get display info for a tool ─────────────────────────────────────
@@ -347,16 +367,51 @@ export function getToolDisplay(rawName) {
     else if (rawName.startsWith('mcp_atlassian_')) category = 'jira';
     else if (rawName.startsWith('mcp_microsoft_pla_')) category = 'browser';
 
+    // Heuristic effect detection for unknown/custom tools (e.g. custom Studio MCP
+    // tools), mirroring the backend mutation-guard classifier so the UI shows
+    // confirmation styling for write/update/delete operations. Browser tools are
+    // treated as exempt exploration actions.
+    const guess = guessToolEffect(rawName, category);
+
     const cat = TOOL_CATEGORIES[category] || TOOL_CATEGORIES.context;
     return {
         label: cleaned,
         category,
         categoryLabel: cat.label,
         color: cat.color,
-        effect: 'read',
-        impactLevel: 'low',
-        requiresConfirmation: false,
+        effect: guess.effect,
+        impactLevel: guess.impactLevel,
+        requiresConfirmation: guess.requiresConfirmation,
     };
+}
+
+// ─── Heuristic effect detection (UI mirror of backend mutation-guard) ─────────
+const UI_DESTRUCTIVE_VERBS = new Set(['delete', 'remove', 'destroy', 'drop', 'purge', 'erase', 'wipe', 'truncate', 'uninstall', 'revoke', 'unlink', 'rmdir', 'rm', 'kill', 'terminate', 'reset']);
+const UI_MUTATING_VERBS = new Set(['create', 'update', 'write', 'edit', 'set', 'add', 'insert', 'put', 'patch', 'post', 'modify', 'change', 'rename', 'move', 'copy', 'upload', 'attach', 'publish', 'deploy', 'push', 'commit', 'merge', 'transition', 'assign', 'link', 'save', 'send', 'submit', 'register', 'provision', 'append', 'replace', 'apply', 'grant', 'install', 'run', 'exec', 'execute']);
+const UI_READ_VERBS = new Set(['get', 'list', 'read', 'search', 'fetch', 'find', 'query', 'view', 'show', 'describe', 'inspect', 'scan', 'check', 'detect', 'extract', 'snapshot', 'observe', 'crawl', 'lookup', 'resolve', 'count', 'exists', 'stat', 'summarize', 'analyze', 'preview', 'expect', 'is', 'has', 'wait', 'poll', 'load', 'download', 'validate', 'verify', 'compare', 'parse', 'report', 'status', 'navigate', 'click', 'type', 'fill', 'select', 'hover', 'press', 'scroll', 'screenshot', 'answer']);
+
+function guessToolEffect(rawName, category) {
+    // Browser/exploration actions are not data mutations.
+    if (category === 'browser') {
+        return { effect: 'read', impactLevel: 'low', requiresConfirmation: false };
+    }
+    const tokens = String(rawName || '')
+        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+        .split(/[^a-zA-Z0-9]+/)
+        .map(t => t.toLowerCase())
+        .filter(Boolean);
+    const firstToken = tokens[0] || '';
+    if (tokens.some(t => UI_DESTRUCTIVE_VERBS.has(t))) {
+        return { effect: 'delete', impactLevel: 'destructive', requiresConfirmation: true };
+    }
+    const hasMutating = tokens.some(t => UI_MUTATING_VERBS.has(t));
+    if (UI_READ_VERBS.has(firstToken) && !hasMutating) {
+        return { effect: 'read', impactLevel: 'low', requiresConfirmation: false };
+    }
+    if (hasMutating) {
+        return { effect: 'write', impactLevel: 'high', requiresConfirmation: true };
+    }
+    return { effect: 'read', impactLevel: 'low', requiresConfirmation: false };
 }
 
 // ─── Category Color Classes (for Tailwind) ───────────────────────────────────

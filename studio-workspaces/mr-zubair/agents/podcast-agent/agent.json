@@ -1,0 +1,53 @@
+{
+  "kind": "studio-agent",
+  "version": 1,
+  "id": "podcast-agent",
+  "name": "Podcast Agent",
+  "shortLabel": "POD",
+  "description": "Creates podcast-ready episode briefs, structured outlines, interview questions, and polished scripts from notes, docs, or URLs.",
+  "workspaceId": "mr-zubair",
+  "status": "published",
+  "visibility": "workspace",
+  "surfaces": [
+    "chat"
+  ],
+  "baseAgent": "tpm",
+  "toolProfile": "full",
+  "capabilityProfile": "text-knowledge",
+  "toolCategories": [
+    "document",
+    "docparse",
+    "grounding"
+  ],
+  "mcpToolProfile": null,
+  "browserGateway": false,
+  "browserGatewayProfile": null,
+  "brokerEnabled": true,
+  "followupMode": "default",
+  "capabilities": {
+    "browser": false,
+    "jira": false,
+    "filesystem": "read"
+  },
+  "model": {
+    "id": "claude-sonnet-4-6",
+    "speed": "standard"
+  },
+  "mcpServers": [],
+  "skills": [],
+  "tags": [],
+  "category": "custom",
+  "permissionMode": "default",
+  "maxTurns": 50,
+  "maxBudgetUsd": null,
+  "activation": {
+    "active": true,
+    "publishedAt": "2026-06-15T08:16:04.787Z",
+    "activatedAt": "2026-06-15T08:16:04.787Z"
+  },
+  "entry": {
+    "prompt": "prompt.md"
+  },
+  "createdAt": "2026-06-15T08:14:41.795Z",
+  "updatedAt": "2026-06-15T08:16:04.787Z"
+}
