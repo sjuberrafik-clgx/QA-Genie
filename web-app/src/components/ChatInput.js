@@ -14,7 +14,7 @@ const MAX_DOC_SIZE = LIMITS.MAX_DOC_SIZE_BYTES;
 const MAX_VIDEOS = LIMITS.MAX_VIDEOS_PER_MESSAGE;
 const MAX_VIDEO_SIZE = LIMITS.MAX_VIDEO_SIZE_BYTES;
 
-export default function ChatInput({ onSend, onAbort, isProcessing, disabled, placeholder: customPlaceholder, prefillText, supportsImages = true }) {
+export default function ChatInput({ onSend, onAbort, isProcessing, disabled, placeholder: customPlaceholder, prefillText, history = [], supportsImages = true }) {
     const [input, setInput] = useState('');
     const [attachments, setAttachments] = useState([]); // images: [{ id, name, type, size, dataUrl, base64, kind:'image' }]
     const [docAttachments, setDocAttachments] = useState([]); // [{ id, name, mimeType, size, base64, extension, kind:'document' }]
@@ -24,11 +24,17 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
     const textareaRef = useRef(null);
     const fileInputRef = useRef(null);
     const dragCounterRef = useRef(0);
+    // Command-history navigation (Up/Down arrows recall previously sent messages).
+    // historyIndex === null means "not browsing history"; draftRef holds the
+    // in-progress text so Down can return the user to what they were typing.
+    const [historyIndex, setHistoryIndex] = useState(null);
+    const draftRef = useRef('');
 
     // Accept external prefill text — populate input and focus the textarea
     useEffect(() => {
         if (prefillText && prefillText !== input) {
             setInput(prefillText);
+            setHistoryIndex(null);
             // Focus + place cursor at end after a tick (so the value is set first)
             setTimeout(() => {
                 const ta = textareaRef.current;
@@ -343,12 +349,81 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
         setDocAttachments([]);
         setVideoAttachments([]);
         setImageError(null);
+        setHistoryIndex(null);
+        draftRef.current = '';
+    };
+
+    // Place the caret at the end of the textarea after a programmatic value
+    // change (mirrors the prefill effect — waits a tick so the value is set).
+    const focusCaretToEnd = () => {
+        setTimeout(() => {
+            const ta = textareaRef.current;
+            if (ta) {
+                ta.selectionStart = ta.selectionEnd = ta.value.length;
+            }
+        }, 0);
+    };
+
+    // Typing exits history-browsing so the next Up arrow starts a fresh walk.
+    const handleChange = (e) => {
+        setInput(e.target.value);
+        if (historyIndex !== null) setHistoryIndex(null);
+    };
+
+    // Recall an older message (Up) — only when the caret sits in the first
+    // visual line, so multi-line editing keeps working normally.
+    const recallPrevious = () => {
+        if (history.length === 0) return false;
+        const ta = textareaRef.current;
+        const caret = ta ? ta.selectionStart : 0;
+        const caretInFirstLine = input.slice(0, caret).indexOf('\n') === -1;
+        if (!caretInFirstLine) return false;
+        let nextIndex;
+        if (historyIndex === null) {
+            draftRef.current = input;
+            nextIndex = history.length - 1;
+        } else {
+            nextIndex = Math.max(0, historyIndex - 1);
+        }
+        setHistoryIndex(nextIndex);
+        setInput(history[nextIndex]);
+        focusCaretToEnd();
+        return true;
+    };
+
+    // Move toward newer messages (Down); past the newest, restore the draft —
+    // only when the caret sits in the last visual line.
+    const recallNext = () => {
+        if (historyIndex === null) return false;
+        const ta = textareaRef.current;
+        const caret = ta ? ta.selectionEnd : input.length;
+        const caretInLastLine = input.slice(caret).indexOf('\n') === -1;
+        if (!caretInLastLine) return false;
+        if (historyIndex < history.length - 1) {
+            const nextIndex = historyIndex + 1;
+            setHistoryIndex(nextIndex);
+            setInput(history[nextIndex]);
+        } else {
+            setHistoryIndex(null);
+            setInput(draftRef.current);
+        }
+        focusCaretToEnd();
+        return true;
     };
 
     const handleKeyDown = (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             handleSubmit(e);
+            return;
+        }
+        if (e.nativeEvent.isComposing) return;
+        if (e.key === 'ArrowUp') {
+            if (recallPrevious()) e.preventDefault();
+            return;
+        }
+        if (e.key === 'ArrowDown') {
+            if (recallNext()) e.preventDefault();
         }
     };
 
@@ -415,7 +490,7 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
                             <textarea
                                 ref={textareaRef}
                                 value={input}
-                                onChange={(e) => setInput(e.target.value)}
+                                onChange={handleChange}
                                 onKeyDown={handleKeyDown}
                                 onPaste={handlePaste}
                                 placeholder={isProcessing ? 'AI is thinking...' : (customPlaceholder || 'Message AI Assistant...')}

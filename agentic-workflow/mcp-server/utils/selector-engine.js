@@ -679,6 +679,35 @@ const FINGERPRINT_PRIMITIVES_SOURCE = `
         return { tag, tagLower, role, isInteractive, capture };
     }
 
+    // Classify an element's INTERACTION AFFORDANCE — what kind of control it is.
+    // Cheap and layout-free (tag/role/type/className only), so it runs for every
+    // captured node. This is the "what is clickable, and of what kind" signal:
+    // buttons, links, clickable cards, maps, inputs, CTAs, tabs, media, headings.
+    function __cbrAffordance(node, tag, role, isInteractive) {
+        const T = (tag || '').toUpperCase();
+        const r = (role || '').toLowerCase();
+        const type = (node.type || '').toLowerCase();
+        if (T === 'BUTTON' || r === 'button' || (T === 'INPUT' && (type === 'button' || type === 'submit' || type === 'reset' || type === 'image'))) return 'button';
+        if (r === 'tab') return 'tab';
+        if (r === 'menuitem' || r === 'menuitemcheckbox' || r === 'menuitemradio') return 'menuitem';
+        if ((T === 'A' && node.getAttribute('href') != null) || r === 'link') return 'link';
+        if ((T === 'INPUT' && type === 'checkbox') || r === 'checkbox') return 'checkbox';
+        if ((T === 'INPUT' && type === 'radio') || r === 'radio') return 'radio';
+        if (r === 'switch') return 'switch';
+        if (T === 'SELECT' || r === 'combobox' || r === 'listbox') return 'select';
+        if (T === 'INPUT' || T === 'TEXTAREA' || r === 'textbox' || r === 'searchbox') return 'input';
+        if (T === 'LABEL') return 'label';
+        // Map / canvas surfaces (Google Maps, Mapbox, Leaflet, MapLibre).
+        const cls = typeof node.className === 'string' ? node.className : '';
+        if (T === 'CANVAS' || /gm-style|mapboxgl|leaflet|maplibregl/i.test(cls)) return 'map';
+        if (T === 'IMG' || T === 'VIDEO' || T === 'SVG') return 'media';
+        if (T.length === 2 && T[0] === 'H' && T[1] >= '1' && T[1] <= '6') return 'heading';
+        // A non-standard interactive container (div/li/article with onclick / tabindex /
+        // a button-ish role) is a "clickable card" — the OneHome property-card pattern.
+        if (isInteractive) return 'card';
+        return 'text';
+    }
+
     function __cbrFingerprint(node, ref, parentRef, classify) {
         const c = classify || __cbrClassify(node);
         const tag = c.tag;
@@ -726,6 +755,18 @@ const FINGERPRINT_PRIMITIVES_SOURCE = `
             inputType = node.type || 'text';
         }
 
+        // ── Affordance / interactability (CBR) ────────────────────────────────
+        // Semantic control kind + a viewport check, both derived from data already
+        // in hand (tag/role/type + the rect computed above). This lets the resolver
+        // and the agent tell what is clickable and whether it is on screen RIGHT NOW
+        // — defeating hidden responsive duplicates and off-viewport copies without a
+        // second browser round-trip.
+        const affordance = __cbrAffordance(node, tag, role, c.isInteractive);
+        const __vw = window.innerWidth || document.documentElement.clientWidth || 0;
+        const __vh = window.innerHeight || document.documentElement.clientHeight || 0;
+        const inViewport = rect.width > 0 && rect.height > 0 &&
+            rect.bottom > 0 && rect.right > 0 && rect.top < __vh && rect.left < __vw;
+
         return {
             ref,
             tag: tagLower,
@@ -754,6 +795,8 @@ const FINGERPRINT_PRIMITIVES_SOURCE = `
             nthIndex,
             parentRef: parentRef || undefined,
             isInteractive: c.isInteractive,
+            affordance,
+            inViewport,
         };
     }
 `;

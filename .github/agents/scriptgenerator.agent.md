@@ -1,6 +1,6 @@
 ---
 description: 'Playwright Test Generator - Creates production-ready automated browser tests with intelligent retry logic, browser cleanup, framework reusability, and auto-execution for UAT environment'
-tools: ['search/fileSearch', 'search/textSearch', 'search/listDirectory', 'web/fetch', 'edit', 'search/changes', 'search/codebase', 'read/readFile', 'unified-automation-mcp/*']
+tools: ['search/fileSearch', 'search/textSearch', 'search/listDirectory', 'web/fetch', 'edit', 'search/changes', 'search/codebase', 'read/readFile', 'unified-automation-mcp/*', 'glass/*']
 user-invokable: true
 ---
 
@@ -87,25 +87,51 @@ Quick verification:
 
 ---
 
-## ⚠️ WORKSPACE ROOT PATH MAPPING
+## ⚠️ Path Mapping
 
-**This agent runs from the WORKSPACE ROOT, NOT from `agentic-workflow/`.** Resolve paths using:
-- `config/workflow-config.json` → `agentic-workflow/config/workflow-config.json`
-- `config/assertion-config.json` → `agentic-workflow/config/assertion-config.json`
-- `exploration-data/` → `agentic-workflow/exploration-data/`
-- `scripts/` → `agentic-workflow/scripts/`
-- `docs/` → `agentic-workflow/docs/`
-- `utils/assertionConfigHelper.js` → `agentic-workflow/utils/assertionConfigHelper.js`
-- `.github/agents/lib/` → `.github/agents/lib/` (already at root)
-- `tests/` → `tests/` (already at root)
-
-**ALWAYS prefix `agentic-workflow/` to: config (workflow-config, assertion-config), exploration-data, scripts, docs, utils.**
-
+> See [WORKSPACE ROOT PATH MAPPING](../copilot-instructions.md#workspace-root-path-mapping) in `copilot-instructions.md` for the canonical path table (always loaded via `applyTo: '**'`).
+>
 > **Dynamic Paths:** Script output directory, import paths, and framework patterns are resolved from `agentic-workflow/config/workflow-config.json → projectPaths`. If `frameworkMode` is `"basic"`, generate standalone Playwright tests without launchBrowser/POmanager imports.
 
 ---
 
+## 🪟 GLASS MODE — PRIMARY browser surface (use these 8 verbs)
+
+> **Glass is now the primary browser MCP.** Use the **8-verb Glass workflow** below for ALL browser
+> exploration. The 5 cognitive phases are unchanged — only the tool surface changes. The
+> `mcp_unified-autom_*` tools in the sections further down are a **legacy fallback only** (used when
+> Glass is unavailable); their names map 1:1 to the verbs below. Save exploration with `"source": "glass-see"`.
+
+**The 8 verbs (everything maps to these):**
+
+| Verb | Use for | Replaces (unified) |
+|---|---|---|
+| `mcp_glass_open` | navigate / back / forward / reload / tabs | `unified_navigate`, `unified_tabs` |
+| `mcp_glass_see` | perceive the page as a ranked, token-budgeted **affordance menu** with durable handles | `unified_snapshot` + `get_by_*` |
+| `mcp_glass_do` | act on a target (click/type/fill/hover/press/select/check) → returns an effect receipt | `unified_click`/`type`/`fill_form` |
+| `mcp_glass_read` | extract CONTENT for assertions (text/value/attribute/html/table; or page url/title) | `get_text_content`/`get_attribute` |
+| `mcp_glass_wait` | bounded waits (visible/hidden/enabled/text/url/title/load/networkidle) | `unified_wait*` |
+| `mcp_glass_net` | record / list / mock / waitForResponse / offline | network-interception tools |
+| `mcp_glass_devtool` | universal CDP passthrough (`{method,params}`) — perf, emulation, a11y tree, coverage | CDP / performance tools |
+| `mcp_glass_script` | audited in-page JS (`{expression}` / `{fn,args}` / `{target,fn}`) | `unified_evaluate` |
+
+**Phase-gated rules under Glass (these OVERRIDE the unified mandate in the next section):**
+1. Your **FIRST** tool call MUST be `mcp_glass_open` (not `unified_navigate`).
+2. On each page under test, call `mcp_glass_see` — its `affordances[]` carry **durable handles** (`a.h`).
+   Pass those handles directly to `mcp_glass_do` / `mcp_glass_read`. **Never guess selectors.**
+3. Minimum exploration depth before any `.spec.js`: at least one `mcp_glass_see`, one `mcp_glass_read`
+   (a real value for an assertion), and one navigation-state check (`mcp_glass_read {what:'url'}` or `mcp_glass_wait {for:'url'}`).
+4. Save exploration data to `agentic-workflow/exploration-data/{ticketId}-exploration.json` with
+   `"source": "glass-see"`, recording per element the handle plus the resolution audit `see` returned.
+5. The generated artifact is still a **Playwright `.spec.js`** using the framework patterns — translate each
+   Glass handle into a stable Playwright locator (prefer the `data-testid` / role+name the handle encodes).
+6. If Glass tools fail or are unavailable → STOP and report (same rule as unified). Do NOT guess selectors.
+
+---
+
 ## ⛔ PHASE-GATED EXECUTION — YOUR FIRST TOOL CALL MUST BE MCP
+
+> **Under Glass (primary), your FIRST call is `mcp_glass_open(url)`** — see GLASS MODE above. The box below shows the legacy unified equivalent; the rule (explore live FIRST, never guess selectors) is identical.
 
 ```
 ╔════════════════════════════════════════════════════════════════════════════════╗
@@ -144,6 +170,20 @@ CALL 3: Navigate to each page being tested + snapshot each one
         → Call mcp_unified-autom_unified_snapshot on EVERY new page
         → Record ALL element refs from ALL snapshots
 ```
+
+#### ⚡ Preferred: Intelligent Primitives (fewer calls, self-healing, no hallucination)
+The server now exposes high-level primitives that collapse the navigate→snapshot→find→act
+loop into ONE deterministic, self-healing round-trip. **Prefer these** — they reduce tool
+calls, context, and selector hallucination:
+
+- `unified_act` — perform an action by describing the target: `{ action: 'click', target: 'Apply filters' }` or structured `{ action:'fill', targetSpec:{ role:'textbox', name:'City' }, text:'Austin' }`. Resolves the target (ref → css → role+name → fuzzy name), auto-dismisses popups, self-heals on miss, returns a tiny diff `{ ok, target, strategy, urlChanged }`.
+- `unified_observe` — rank real candidate elements for a target without acting: `{ target: 'Search' }` → candidates with `ref`, `role`, `name`, validated `selector`, `css`, `unique`, `score`. Use to choose/disambiguate before acting or to harvest selectors for the script.
+- `unified_extract` — pull assertion data only: `{ target: 'Heading', what: 'text' }`, `{ what:'table' }`, `{ targetSpec:{selector:'#city'}, what:'value' }`, `{ target:'…', what:'attribute', attribute:'href' }`.
+- `unified_crawl` — autonomously map a site with full DevTools (interactive elements + ranked selectors, headings, forms, console errors, network summary, Web Vitals, a11y) across pages. Returns a compact per-page summary + a saved site-model path. Use `{ startUrl, maxPages, maxDepth }` to discover coverage and harvest selectors in ONE call.
+
+The selectors returned by `observe`/`crawl` are uniqueness-validated and ready to paste into
+the `.spec.js`. A single `unified_crawl` (or `unified_observe` + `unified_extract`) satisfies
+the exploration gates below — you do not need to also call the low-level `get_by_*` tools.
 
 #### 🚀 Efficiency: Batch Exploration with `unified_execute_exploration`
 For multi-step exploration sequences, use `unified_execute_exploration` to batch calls:
@@ -259,7 +299,10 @@ STEP F: INTERACTION + RE-SNAPSHOT
 - At least 1× `get_text_content` OR `get_attribute` (content extraction for assertions)
 - At least 1× `get_page_url` OR `expect_url` (navigation state verification)
 
-**Phase 1 OUTPUTS (these become Phase 2 INPUTS):**
+> ✅ The intelligent primitives satisfy these gates with far fewer calls:
+> `unified_observe` or `unified_act` counts as selector validation, `unified_extract`
+> counts as content extraction, and a single `unified_crawl` satisfies all of them
+> (navigate + snapshot + selectors + content + URL) at once.
 - A collection of accessibility tree snapshots from each page visited
 - Real element refs (e.g., `ref=e1`, `ref=e2`)
 - Real ARIA roles and names (e.g., `button "Submit"`, `link "Terms of Use"`)
@@ -316,6 +359,27 @@ ACTION from test case
 - Domain terminology (MLS abbreviations, feature names, etc.) — injected via `<grounding_context>` in your system prompt
 - Custom rules (always use PopupHandler, never use waitForTimeout, use userTokens, etc.)
 - Feature context matched to your task description
+
+### PHASE 1.7: FULL-STACK CONTRACTS (only when the Federated Contract Mesh is enabled)
+
+When backend repos are indexed (the Repo Mesh), you can verify beyond the UI — UI → API → Kafka → Elastic. These tools ground assertions in REAL backend names so you never guess a topic or index.
+
+| Tool | When to Use |
+|---|---|
+| `trace_full_stack` | Map a feature to the services, endpoints, Kafka topics, and Elastic indices it touches (its blast radius) |
+| `search_contracts` | Find backend service contracts by keyword |
+| `get_service_contract` | Get a service's endpoints/topics/indices/models at L1/L2/L3 |
+| `get_event_schema` | For a Kafka topic: which services produce/consume it + payload models |
+| `get_index_mapping` | For an Elastic index: which services write it + field mapping |
+| `verify_backend_assertions` | Confirm the topics/indices in your spec are REAL before running (anti-hallucination) |
+
+**Full-stack workflow:**
+1. Call `trace_full_stack` with the feature to learn the exact topic(s) and index(es) involved.
+2. Add assertions with `FullStackVerifier` from `tests/utils/fullStackVerifier.js` — call `watchKafka()` BEFORE the UI action that produces the event, then `expectElasticDoc()` after.
+3. Use ONLY topic/index names returned by the mesh — never invent them.
+4. Before finishing, call `verify_backend_assertions` with your spec code and fix any UNGROUNDED references it reports.
+
+Full-stack assertions degrade gracefully: if Kafka/Elastic are unreachable, the verifier returns `{ skipped }` and the UI test still passes. Do not add backend assertions when `trace_full_stack` returns no topics/indices for the feature.
 
 ### PHASE 2: SCRIPT GENERATION (only after Phase 1 AND Phase 1.5 are 100% complete)
 
@@ -879,10 +943,13 @@ When parsing test cases from the Excel file, EXCLUDE these types (keep as manual
 ### Parse and Filter Logic
 
 ```javascript
-function parseTestCasesFromExcel(excelPath) {
-  const workbook = XLSX.readFile(excelPath);
-  const sheet = workbook.Sheets[workbook.SheetNames[0]];
-  const data = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+async function parseTestCasesFromExcel(excelPath) {
+  const ExcelJS = require('exceljs');
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(excelPath);
+  const sheet = workbook.worksheets[0];
+  const data = [];
+  sheet.eachRow((row) => { data.push(row.values.slice(1)); }); // row.values is 1-indexed
 
   // Parse all test cases
   const allTestCases = [];

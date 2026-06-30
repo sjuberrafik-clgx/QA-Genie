@@ -1,0 +1,27 @@
+diff --git a/node_modules/node-pty/lib/conpty_console_list_agent.js b/node_modules/node-pty/lib/conpty_console_list_agent.js
+index 8c4fca9..61054cc 100644
+--- a/node_modules/node-pty/lib/conpty_console_list_agent.js
++++ b/node_modules/node-pty/lib/conpty_console_list_agent.js
+@@ -10,7 +10,19 @@ Object.defineProperty(exports, "__esModule", { value: true });
+ var utils_1 = require("./utils");
+ var getConsoleProcessList = utils_1.loadNativeModule('conpty_console_list').module.getConsoleProcessList;
+ var shellPid = parseInt(process.argv[2], 10);
+-var consoleProcessList = getConsoleProcessList(shellPid);
+-process.send({ consoleProcessList: consoleProcessList });
++var consoleProcessList;
++try {
++    consoleProcessList = getConsoleProcessList(shellPid);
++}
++catch (err) {
++    // AttachConsole can fail on Windows when the target PID has no attachable
++    // console (e.g. a child GUI/browser process is present in the process tree).
++    // Degrade gracefully with a conservative list instead of crashing the agent.
++    consoleProcessList = [shellPid];
++}
++try {
++    process.send({ consoleProcessList: consoleProcessList });
++}
++catch (err) { /* parent already exited */ }
+ process.exit(0);
+ //# sourceMappingURL=conpty_console_list_agent.js.map
+\ No newline at end of file

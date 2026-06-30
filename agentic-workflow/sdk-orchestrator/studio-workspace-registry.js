@@ -9,6 +9,7 @@ const WORKSPACE_FOLDERS = ['agents', 'skills', 'mcp-servers', 'files', 'notes'];
 const TREE_IGNORED = new Set(['.git', '.next', 'build', 'dist', 'node_modules']);
 const ASSET_TYPES = new Set(['agent', 'skill', 'mcp-server', 'file']);
 const AGENT_TOOL_PROFILES = new Set(['full', 'testgenie', 'scriptgenerator', 'buggenie', 'taskgenie', 'filegenie', 'docgenie', 'codereviewer']);
+const { getCapabilityProfile } = require('./capability-profiles');
 
 function createStatusError(message, status = 400, code = null) {
     const error = new Error(message);
@@ -159,6 +160,7 @@ function buildAgentPromptTemplate(name, description) {
         '## Runtime Notes',
         '- Adjust `toolProfile` in `agent.json` to inherit a core execution profile.',
         '- Publish and activate the agent from Studio once the prompt and manifest are ready.',
+        '- Mutation guardrail: every write/update/delete tool call (including any custom MCP tools) is automatically gated and shows the user an Approve/Cancel prompt before it runs. This is enforced for all agents and cannot be disabled per-agent.',
     ].join('\n');
 }
 
@@ -444,6 +446,26 @@ function normalizeCapabilities(value, toolProfile) {
         jira: typeof source.jira === 'boolean' ? source.jira : defaults.jira,
         filesystem: normalizedFilesystem,
     };
+}
+
+function buildCapabilityDefaults(profileId = 'text-knowledge') {
+    const profile = getCapabilityProfile(profileId) || getCapabilityProfile('text-knowledge');
+    return {
+        capabilityProfile: profile.id,
+        capabilities: { ...profile.capabilities },
+        toolCategories: [...profile.categories],
+        mcpToolProfile: profile.mcpProfile || null,
+        browserGateway: false,
+        browserGatewayProfile: null,
+        brokerEnabled: profile.brokerEnabled !== false,
+    };
+}
+
+function normalizeStringList(value) {
+    if (!Array.isArray(value)) return [];
+    return value
+        .map(item => String(item || '').trim())
+        .filter(Boolean);
 }
 
 function buildFileRef(rootDir, absolutePath, label = null) {
@@ -991,6 +1013,7 @@ class StudioWorkspaceRegistry {
             const assetId = await ensureUniqueDirectoryName(paths.agents, slugify(displayName, 'agent'));
             const assetDir = path.join(paths.agents, assetId);
             const toolProfile = 'full';
+            const capabilityDefaults = buildCapabilityDefaults('text-knowledge');
             const assetManifest = {
                 kind: 'studio-agent',
                 version: 1,
@@ -1004,8 +1027,14 @@ class StudioWorkspaceRegistry {
                 surfaces: ['chat'],
                 baseAgent: 'tpm',
                 toolProfile,
+                capabilityProfile: capabilityDefaults.capabilityProfile,
+                toolCategories: capabilityDefaults.toolCategories,
+                mcpToolProfile: capabilityDefaults.mcpToolProfile,
+                browserGateway: capabilityDefaults.browserGateway,
+                browserGatewayProfile: capabilityDefaults.browserGatewayProfile,
+                brokerEnabled: capabilityDefaults.brokerEnabled,
                 followupMode: 'default',
-                capabilities: normalizeCapabilities({}, toolProfile),
+                capabilities: capabilityDefaults.capabilities,
                 model: { id: 'claude-sonnet-4-6', speed: 'standard' },
                 mcpServers: [],
                 skills: [],
@@ -1358,6 +1387,12 @@ class StudioWorkspaceRegistry {
             baseAgent: manifest.baseAgent || null,
             followupMode: type === 'agent' ? normalizeFollowupMode(manifest.followupMode, toolProfile) : null,
             capabilities,
+            capabilityProfile: type === 'agent' && typeof manifest.capabilityProfile === 'string' ? manifest.capabilityProfile.trim() || null : null,
+            toolCategories: type === 'agent' ? normalizeStringList(manifest.toolCategories) : [],
+            mcpToolProfile: type === 'agent' && typeof manifest.mcpToolProfile === 'string' ? manifest.mcpToolProfile.trim() || null : null,
+            browserGateway: type === 'agent' ? manifest.browserGateway === true : false,
+            browserGatewayProfile: type === 'agent' && typeof manifest.browserGatewayProfile === 'string' ? manifest.browserGatewayProfile.trim() || null : null,
+            brokerEnabled: type === 'agent' && typeof manifest.brokerEnabled === 'boolean' ? manifest.brokerEnabled : null,
             surfaces: Array.isArray(manifest.surfaces) ? manifest.surfaces : [],
             isActive: activation.active === true,
             publishedAt: activation.publishedAt || null,

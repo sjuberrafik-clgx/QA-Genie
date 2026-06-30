@@ -3,6 +3,10 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+// Perf: scope xterm CSS to this component so it only loads when the terminal
+// is actually rendered (was previously imported in root layout, shipping to
+// every page).
+import '@xterm/xterm/css/xterm.css';
 
 const THEME_PRESETS = {
     midnight: {

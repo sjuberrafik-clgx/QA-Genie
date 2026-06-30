@@ -2,15 +2,7 @@
 const { defineConfig, devices } = require('@playwright/test');
 const os = require('os');
 require('dotenv').config();
-
-/**
- * Local helper — formats date/time in IST.
- * Replaces the external import from tests/utils/general so this config
- * is self-contained within the agentic-workflow folder.
- */
-function getDateAndTimeIST() {
-  return new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
-}
+const { getDateAndTimeIST } = require('./utils/date-time');
 
 
 

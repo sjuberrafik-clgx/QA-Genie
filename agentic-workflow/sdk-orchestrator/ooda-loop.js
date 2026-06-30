@@ -385,7 +385,7 @@ class EnvironmentHealthCheck {
     _httpRequest(url, method, timeout, headers = {}) {
         return new Promise((resolve, reject) => {
             const lib = url.startsWith('https') ? https : http;
-            const req = lib.request(url, { method, timeout, headers, rejectUnauthorized: false }, (res) => {
+            const req = lib.request(url, { method, timeout, headers }, (res) => {
                 // Consume response data to free up memory
                 res.resume();
                 resolve(res.statusCode);
@@ -506,6 +506,11 @@ class ExplorationQualityAnalyzer {
             }
         }
 
+        // Glass `see` output is an affordance menu, not an a11y dump — score it directly.
+        if (payload && Array.isArray(payload.affordances)) {
+            return this._observeGlassAffordances(payload);
+        }
+
         const blocker = payload?.blockerState?.blocker || null;
         const blockerClassification = blocker?.classification || null;
         const text = typeof snapshotResult === 'string'
@@ -572,6 +577,38 @@ class ExplorationQualityAnalyzer {
                 focusTrap: blocker?.focusTrap === true,
                 targetOccluded: Boolean(blocker?.occlusion?.pointsBlocked),
             },
+        };
+    }
+
+    // ─── OBSERVE (Glass): score an affordance menu from the `see` verb ──
+    _observeGlassAffordances(payload) {
+        const affs = Array.isArray(payload.affordances) ? payload.affordances : [];
+        const roleOf = (a) => String(a.role || a.kind || '').toLowerCase();
+        const uniqueRoles = new Set(affs.map(roleOf).filter(Boolean));
+        const INTERACTIVE = new Set(['button', 'link', 'field', 'textbox', 'toggle', 'checkbox',
+            'radio', 'switch', 'select', 'combobox', 'option', 'tab', 'menu', 'menuitem', 'slider']);
+        const interactiveElements = affs.filter((a) => INTERACTIVE.has(roleOf(a))).length;
+        const nameText = affs.map((a) => String(a.name || '')).join(' ').toLowerCase();
+        const hasLoadingIndicator = /\b(loading|spinner|skeleton|please wait|fetching|initializing)\b/.test(nameText);
+        const popupTerms = affs.filter((a) =>
+            /\b(modal|dialog|overlay|popup|backdrop|dismiss|got it|welcome|tour)\b/.test(String(a.name || '').toLowerCase()) ||
+            /dialog|modal/.test(String(a.region || '').toLowerCase())
+        ).length;
+        const elementCount = affs.length;
+        return {
+            length: JSON.stringify(payload || '').length,
+            elementCount,
+            roleDiversity: uniqueRoles.size,
+            uniqueRoles: [...uniqueRoles],
+            hasLoadingIndicator,
+            loadingTerms: hasLoadingIndicator ? 1 : 0,
+            isEmpty: elementCount === 0,
+            isSparse: elementCount > 0 && elementCount < 3,
+            popupDominance: elementCount > 0 ? Math.round((popupTerms / elementCount) * 100) : 0,
+            popupTerms,
+            dynamicIdCount: 0,
+            interactiveElements,
+            blocker: { present: false, kind: null, category: null, severity: null, autoRecoverable: false, focusTrap: false, targetOccluded: false },
         };
     }
 

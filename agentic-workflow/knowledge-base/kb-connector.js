@@ -70,6 +70,10 @@ function createProvider(providerConfig) {
             const { CustomProvider } = require('./custom-provider');
             return new CustomProvider(providerConfig);
         }
+        case 'repo-mesh': {
+            const { RepoMeshProvider } = require('./repo-mesh-provider');
+            return new RepoMeshProvider(providerConfig);
+        }
         default:
             throw new Error(`Unknown KB provider type: "${providerConfig.type}". Supported: confluence, notion, sharepoint, custom`);
     }

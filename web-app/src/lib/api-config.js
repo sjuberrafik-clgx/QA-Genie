@@ -4,6 +4,20 @@
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3100';
 
+/**
+ * Resolve a server-relative path (e.g. an attachment URL returned in chat
+ * history/SSE) to an absolute URL against the backend origin. Pass-through for
+ * already-absolute URLs (http/https/data/blob) and empty values. Used so chat
+ * image attachments — now served on demand instead of inlined as base64 — load
+ * from the backend regardless of the browser origin.
+ */
+export function resolveBackendUrl(p) {
+    if (typeof p !== 'string' || p.length === 0) return p;
+    if (/^(https?:|data:|blob:)/i.test(p)) return p;
+    if (p.startsWith('/')) return `${BACKEND_URL}${p}`;
+    return p;
+}
+
 export const API_CONFIG = {
     baseUrl: BACKEND_URL,
     endpoints: {
@@ -67,6 +81,7 @@ export const API_CONFIG = {
         studioWorkspaceMcpDelete: (workspaceId, mcpId) => `/api/studio/workspaces/${workspaceId}/mcp-servers/${mcpId}`,
         studioWorkspaceFileDelete: (id) => `/api/studio/workspaces/${id}/file`,
         studioGenerateDescription: '/api/studio/generate-description',
+        studioCapabilityProfiles: '/api/studio/capability-profiles',
 
         // Studio — Templates
         studioTemplates: '/api/studio/templates',

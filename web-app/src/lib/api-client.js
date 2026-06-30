@@ -495,6 +495,10 @@ class ApiClient {
         });
     }
 
+    async listStudioCapabilityProfiles() {
+        return this._fetch(EP.studioCapabilityProfiles, { retries: 0 });
+    }
+
     async publishStudioAgent(workspaceId, agentId, options = {}) {
         return this._fetch(EP.studioWorkspaceAgentPublish(workspaceId, agentId), {
             method: 'POST',

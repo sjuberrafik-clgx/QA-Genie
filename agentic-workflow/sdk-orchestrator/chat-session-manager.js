@@ -28,7 +28,102 @@ const { extractAtlassianUrlContext } = require('./atlassian-url-utils');
 const { getGeneratedArtifactRoots, isGeneratedArtifactPath } = require('./generated-artifact-policy');
 const { AgentCatalogService, buildCoreAgentId, toPublicAgentDescriptor } = require('./agent-catalog');
 const { ToolBroker, createBrokerMetaTools } = require('./tool-broker');
+const { applyCapabilityProfile, getCapabilityProfile } = require('./capability-profiles');
+const { AgentIntentRouter } = require('./agent-intent-router');
+const { runAgentStep } = require('./delegation-runner');
+const { createDelegationTools } = require('./delegation-tools');
 const { buildProjectSkillRoutingHint, buildProjectSkillActivationGuide } = require('./project-skills-catalog');
+const { approveAllPermissions } = require('./permission-response');
+
+const MAX_APPROVAL_DISPLAY_CHARS = 2000;
+const MAX_APPROVAL_LONG_TEXT_CHARS = 4000;
+const MAX_APPROVAL_CHANGES = 24;
+const MAX_APPROVAL_NOTES = 16;
+const MAX_APPROVAL_PREVIEW_BYTES = 48 * 1024;
+const MAX_SSE_EVENT_BYTES = 256 * 1024;
+const DELEGATED_USER_INPUT_TIMEOUT_MS = 30 * 60 * 1000;
+
+// ─── Chat Utilities (extracted) ─────────────────────────────────────────────
+const {
+    // Constants
+    CHAT_EVENTS,
+    MAX_ASSISTANT_IMAGE_BYTES,
+    MAX_SSE_REPLAY_MESSAGES,
+    MAX_REPLAY_CONTENT_CHARS,
+    MAX_REPLAY_REASONING_CHARS,
+    SSE_DELTA_COALESCE_MS,
+    PROJECT_ROOT,
+    USER_INPUT_TIMEOUT_MS,
+    RECOVERY_HISTORY_LIMIT,
+    MAX_RECOVERY_TRANSCRIPT_CHARS,
+    SESSION_TITLE_MAX_LENGTH,
+    SESSION_TITLE_TRUNCATED_LENGTH,
+    MAX_PERSISTED_SESSION_ATTACHMENTS,
+    MAX_PERSISTED_SESSION_ATTACHMENT_BYTES,
+    MAX_SESSION_ATTACHMENT_STORE_BYTES,
+    MAX_HISTORY_MESSAGES,
+    MAX_PERSISTED_VIDEO_CONTEXT_ITEMS,
+    MAX_PERSISTED_VIDEO_FRAMES_PER_ITEM,
+    GENERIC_SESSION_TITLES,
+    SESSION_RUNTIME_STATES,
+    SESSION_EXECUTION_STATES,
+    USER_INPUT_UUID_RE,
+    USER_INPUT_REQUEST_ID_RE,
+    CHAT_SHELL_TOOL_PATTERNS,
+    // Shared helpers
+    isNonEmptyString,
+    toPositiveInt,
+    // Prompt utilities
+    extractCriticalInstructions,
+    stripVSCodeToolPrefix,
+    buildAtlassianRoutingHint,
+    isShellLikeToolName,
+    // Session title utilities
+    normalizeSessionTitleText,
+    stripSessionTitleLeadIn,
+    truncateSessionTitle,
+    capitalizeSessionTitle,
+    isUuidLikeTitle,
+    isFallbackSessionTitle,
+    buildSessionTitleCandidate,
+    // User input utilities
+    isOpaqueUserInputValue,
+    getDefaultUserInputQuestion,
+    normalizeUserInputRequestPayload,
+    normalizeUserInputHistoryMessage,
+    // Session persistence utilities
+    isExistingFilePath,
+    sanitizeSessionContextForHistory,
+    sanitizeSessionAttachmentForHistory,
+    sanitizeSessionAttachmentsForHistory,
+    sanitizeVideoMetadataForHistory,
+    sanitizeVideoFrameForHistory,
+    sanitizeVideoContextItemForHistory,
+    sanitizeVideoContextForHistory,
+    collectVideoTempFilesFromEvidence,
+    collectDocumentTempFilesFromEvidence,
+} = require('./chat-utils');
+
+// ─── Atlassian MCP Read-Only Allowlist ──────────────────────────────────────
+// Canonical list of Atlassian remote MCP tools that are safe to expose to chat
+// sessions. ALL write operations (create/edit/delete issues, comments,
+// transitions, Confluence writes) are deliberately omitted because they would
+// bypass the global Jira approval guardrail (requireJiraMutationApproval).
+// Writes must go through the gated SDK custom tools defined in
+// custom-tools.js + tools/mutation-helpers.js.
+const ATLASSIAN_MCP_READONLY_TOOLS = Object.freeze([
+    'getJiraIssue',
+    'searchJiraIssuesUsingJql',
+    'getTransitionsForJiraIssue',
+    'lookupJiraAccountId',
+    'getVisibleJiraProjects',
+    'atlassianUserInfo',
+    'atl_search',
+    'atl_fetch',
+    'getConfluencePage',
+    'searchConfluenceUsingCql',
+    'getConfluenceSpaces',
+]);
 
 // ─── Grounding System (lazy-loaded) ─────────────────────────────────────────
 let _groundingModule;
@@ -39,109 +134,6 @@ function _getGroundingModule() {
     return _groundingModule;
 }
 
-// ─── Instruction Extraction Helper ──────────────────────────────────────────
-
-/**
- * Extract critical sections from copilot-instructions.md instead of blind
- * truncation.  Returns a combined string containing only the sections the
- * agent actually needs (framework patterns, import order, popup handling,
- * selector strategy, code quality targets, terminology).
- *
- * If the file changes its heading structure, the function gracefully falls
- * back to the first 12 000 characters so nothing is silently lost.
- */
-function extractCriticalInstructions(fullText) {
-    // Extract ONLY the compact, rule-focused sections the agent needs.
-    // Deliberately EXCLUDES the giant MCP tool reference table (the pipeline
-    // prompt already lists the tools it needs).  The parent heading
-    // "## Automation Script Generation" is skipped because its child ###
-    // sections are captured individually below — avoids pulling in the full
-    // MCP table which alone is ~20 KB.
-    const SECTION_HEADINGS = [
-        '### Import Order',
-        '### Framework Pattern',
-        '### File Header Template',
-        '### Selector Strategy',
-        '### Popup Handling',
-        '### Automation Scope',
-        '### Code Quality Targets',
-        '## Naming Conventions',
-        '## Terminology',
-    ];
-
-    const MAX_SECTION_CHARS = 1500; // cap any single section to prevent bloat
-    const sections = [];
-    for (const heading of SECTION_HEADINGS) {
-        const idx = fullText.indexOf(heading);
-        if (idx === -1) continue;
-        const level = heading.startsWith('###') ? '###' : '##';
-        const rest = fullText.substring(idx + heading.length);
-        const escapedLevel = level.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const nextHeading = rest.search(new RegExp(`^${escapedLevel} `, 'm'));
-        let sectionText = nextHeading === -1
-            ? fullText.substring(idx)
-            : fullText.substring(idx, idx + heading.length + nextHeading);
-        sectionText = sectionText.trim();
-        if (sectionText.length > MAX_SECTION_CHARS) {
-            sectionText = sectionText.substring(0, MAX_SECTION_CHARS) + '\n… (truncated)';
-        }
-        sections.push(sectionText);
-    }
-
-    if (sections.length === 0) {
-        return fullText.substring(0, 6000);
-    }
-    return sections.join('\n\n');
-}
-
-/**
- * When running inside the SDK (web app / pipeline), MCP tool names use the
- * RAW format: unified_navigate.  The .agent.md files use the VS Code format:
- * mcp_unified-autom_unified_navigate.  Strip the prefix so the LLM calls the
- * correct tool name.
- */
-function stripVSCodeToolPrefix(text) {
-    return text.replace(/mcp_unified-autom_unified_/g, 'unified_');
-}
-
-function buildAtlassianRoutingHint(urlContext) {
-    if (!urlContext || urlContext.atlassianUrls.length === 0) return '';
-
-    const lines = [
-        '[INTERNAL ROUTING HINT]',
-        'The user message contains Atlassian URLs. Resolve them with Jira/KB tools before answering.',
-    ];
-
-    for (const jiraIssue of urlContext.jiraIssues) {
-        lines.push(`- Jira issue URL detected: use fetch_jira_ticket with "${jiraIssue.issueKey}" or the full URL.`);
-    }
-
-    for (const confluencePage of urlContext.confluencePages) {
-        lines.push(`- Confluence page URL detected: use get_knowledge_base_page with "${confluencePage.pageId}" or the full URL.`);
-        lines.push('- Do not claim the page requires browser login when KB connector or Atlassian MCP tools are available.');
-    }
-
-    lines.push('Fetch the referenced Jira or Confluence content first, then summarize only the requested portion.');
-    return lines.join('\n');
-}
-
-const CHAT_SHELL_TOOL_PATTERNS = [
-    'runinterminal',
-    'run_in_terminal',
-    'powershell',
-    'terminal',
-    'bash',
-    'cmd',
-    'shell',
-    'execute_command',
-];
-
-function isShellLikeToolName(toolName) {
-    const normalized = String(toolName || '').toLowerCase();
-    if (!normalized) return false;
-    return CHAT_SHELL_TOOL_PATTERNS.some(pattern => normalized.includes(pattern));
-}
-
 // Load .env for Jira credentials (Atlassian MCP auth)
 // Uses override:true so updated tokens are picked up without server restart
 try {
@@ -150,451 +142,6 @@ try {
         require('dotenv').config({ path: envPath, override: true });
     }
 } catch { /* dotenv not critical — Atlassian MCP simply won't be configured */ }
-
-// ─── Chat Event Types ───────────────────────────────────────────────────────
-
-const CHAT_EVENTS = {
-    DELTA: 'chat_delta',
-    MESSAGE: 'chat_message',
-    TOOL_START: 'chat_tool_start',
-    TOOL_COMPLETE: 'chat_tool_complete',
-    TOOL_PROGRESS: 'chat_tool_progress',
-    REASONING: 'chat_reasoning',
-    IDLE: 'chat_idle',
-    ERROR: 'chat_error',
-    FOLLOWUP: 'chat_followup',
-    USER_INPUT_REQUEST: 'chat_user_input_request',
-    USER_INPUT_COMPLETE: 'chat_user_input_complete',
-};
-
-const MAX_ASSISTANT_IMAGE_BYTES = 6 * 1024 * 1024;
-const PROJECT_ROOT = path.join(__dirname, '..', '..');
-
-// Default timeout for user-input requests (5 minutes).
-// If the user doesn't respond within this window, the agent receives
-// an auto-generated fallback answer so it doesn't hang forever.
-const USER_INPUT_TIMEOUT_MS = 5 * 60 * 1000;
-const RECOVERY_HISTORY_LIMIT = 20;
-const MAX_RECOVERY_TRANSCRIPT_CHARS = 8000;
-const SESSION_TITLE_MAX_LENGTH = 72;
-const SESSION_TITLE_TRUNCATED_LENGTH = 69;
-const MAX_PERSISTED_SESSION_ATTACHMENTS = 30;
-const MAX_PERSISTED_VIDEO_CONTEXT_ITEMS = 12;
-const MAX_PERSISTED_VIDEO_FRAMES_PER_ITEM = 120;
-const GENERIC_SESSION_TITLES = new Set([
-    'hi',
-    'hello',
-    'hey',
-    'help',
-    'start',
-    'new chat',
-    'chat',
-    'session',
-]);
-
-const SESSION_RUNTIME_STATES = {
-    QUEUED: 'queued',
-    INITIALIZING: 'initializing',
-    ACTIVE: 'active',
-    RESUME_REQUIRED: 'resume_required',
-    RECOVERING: 'recovering',
-    FAILED: 'failed',
-    ARCHIVED: 'archived',
-};
-
-const SESSION_EXECUTION_STATES = {
-    IDLE: 'idle',
-    RUNNING: 'running',
-    WAITING_FOR_INPUT: 'waiting_for_input',
-    ERROR: 'error',
-};
-
-function toPositiveInt(value, fallback) {
-    const parsed = Number.parseInt(value, 10);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-const USER_INPUT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const USER_INPUT_REQUEST_ID_RE = /^uir_[a-z0-9_\-]+$/i;
-
-function isNonEmptyString(value) {
-    return typeof value === 'string' && value.trim().length > 0;
-}
-
-function isOpaqueUserInputValue(value) {
-    if (!isNonEmptyString(value)) return false;
-    const trimmed = value.trim();
-    return USER_INPUT_UUID_RE.test(trimmed) || USER_INPUT_REQUEST_ID_RE.test(trimmed);
-}
-
-function getDefaultUserInputQuestion(inputType = 'default') {
-    if (inputType === 'credentials') return 'The agent needs your username and password to continue.';
-    if (inputType === 'password') return 'The agent needs your password to continue.';
-    if (inputType === 'confirmation') return 'The agent needs your confirmation to continue.';
-    return 'The agent needs your input to continue.';
-}
-
-function normalizeUserInputRequestPayload(rawRequest, fallbackType = 'default') {
-    const requestObject = rawRequest && typeof rawRequest === 'object' && !Array.isArray(rawRequest)
-        ? rawRequest
-        : {};
-    const nestedPayload = requestObject.options && typeof requestObject.options === 'object' && !Array.isArray(requestObject.options)
-        ? requestObject.options
-        : null;
-
-    const explicitType = [
-        requestObject.type,
-        requestObject.meta?.type,
-        requestObject.meta?.inputType,
-    ].find(isNonEmptyString) || null;
-    const nestedType = [
-        nestedPayload?.type,
-        nestedPayload?.meta?.type,
-    ].find(isNonEmptyString) || null;
-    const inputType = explicitType && explicitType !== 'default'
-        ? explicitType
-        : (nestedType || explicitType || fallbackType || 'default');
-
-    const rawOptions = Array.isArray(requestObject.options)
-        ? requestObject.options
-        : Array.isArray(nestedPayload?.options)
-            ? nestedPayload.options
-            : [];
-
-    const rawMeta = {
-        ...(nestedPayload?.meta && typeof nestedPayload.meta === 'object' ? nestedPayload.meta : {}),
-        ...(requestObject.meta && typeof requestObject.meta === 'object' ? requestObject.meta : {}),
-        type: inputType,
-    };
-
-    const candidates = [
-        typeof rawRequest === 'string' ? rawRequest : null,
-        requestObject.question,
-        requestObject.message,
-        requestObject.content,
-        requestObject.prompt,
-        nestedPayload?.question,
-        nestedPayload?.message,
-        nestedPayload?.content,
-        nestedPayload?.prompt,
-    ].filter(isNonEmptyString).map(value => value.trim());
-
-    let fallbackCandidate = '';
-    let question = '';
-    for (const candidate of candidates) {
-        if (!fallbackCandidate) fallbackCandidate = candidate;
-        if (!isOpaqueUserInputValue(candidate)) {
-            question = candidate;
-            break;
-        }
-    }
-
-    if (!question) {
-        question = isOpaqueUserInputValue(fallbackCandidate)
-            ? getDefaultUserInputQuestion(inputType)
-            : (fallbackCandidate || getDefaultUserInputQuestion(inputType));
-    }
-
-    return {
-        question,
-        options: rawOptions,
-        type: inputType,
-        meta: rawMeta,
-        usedFallbackQuestion: question === getDefaultUserInputQuestion(inputType),
-        nestedPayloadDetected: !!nestedPayload,
-    };
-}
-
-function normalizeUserInputHistoryMessage(message) {
-    if (!message || message.role !== 'user_input_request') return message;
-
-    const normalized = normalizeUserInputRequestPayload({
-        content: message.content,
-        options: message.options,
-        type: message.type,
-        meta: message.meta,
-    }, message.type || 'default');
-
-    return {
-        ...message,
-        content: normalized.question,
-        options: normalized.options,
-        type: normalized.type,
-        meta: normalized.meta,
-    };
-}
-
-function normalizeSessionTitleText(value) {
-    if (!isNonEmptyString(value)) return '';
-
-    return value
-        .replace(/```[\s\S]*?```/g, ' ')
-        .replace(/`([^`]+)`/g, '$1')
-        .replace(/[*_~>#-]+/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-}
-
-function stripSessionTitleLeadIn(value) {
-    if (!isNonEmptyString(value)) return '';
-
-    const leadInPatterns = [
-        /^please\s+/i,
-        /^can you\s+/i,
-        /^could you\s+/i,
-        /^would you\s+/i,
-        /^i need (?:you )?to\s+/i,
-        /^help me\s+/i,
-        /^let'?s\s+/i,
-    ];
-
-    let result = value.trim();
-    for (const pattern of leadInPatterns) {
-        result = result.replace(pattern, '');
-    }
-    return result.trim();
-}
-
-function truncateSessionTitle(value, max = SESSION_TITLE_MAX_LENGTH) {
-    if (!isNonEmptyString(value) || value.length <= max) return value || '';
-
-    const candidate = value.substring(0, SESSION_TITLE_TRUNCATED_LENGTH);
-    const lastSpace = candidate.lastIndexOf(' ');
-    const trimmed = lastSpace >= 32 ? candidate.substring(0, lastSpace) : candidate;
-    return `${trimmed.trim()}...`;
-}
-
-function capitalizeSessionTitle(value) {
-    if (!isNonEmptyString(value)) return '';
-    return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-function isUuidLikeTitle(value) {
-    if (!isNonEmptyString(value)) return false;
-    return USER_INPUT_UUID_RE.test(value.trim());
-}
-
-function isFallbackSessionTitle(value) {
-    if (!isNonEmptyString(value)) return true;
-
-    const normalized = value.trim().toLowerCase();
-    if (GENERIC_SESSION_TITLES.has(normalized)) return true;
-    if (isUuidLikeTitle(normalized)) return true;
-    if (/^(chat|session)\s+[0-9a-f]{6,}$/i.test(normalized)) return true;
-    return normalized.length < 4;
-}
-
-function buildSessionTitleCandidate(content) {
-    const normalized = normalizeSessionTitleText(content);
-    if (!normalized) return '';
-
-    const firstSentence = normalized.split(/(?<=[.!?])\s+/)[0] || normalized;
-    const stripped = stripSessionTitleLeadIn(firstSentence) || stripSessionTitleLeadIn(normalized) || normalized;
-    const title = capitalizeSessionTitle(truncateSessionTitle(stripped));
-    return title;
-}
-
-function isExistingFilePath(value) {
-    if (!isNonEmptyString(value)) return false;
-    try {
-        return fs.existsSync(value) && fs.statSync(value).isFile();
-    } catch {
-        return false;
-    }
-}
-
-function sanitizeSessionContextForHistory(sessionId, sessionContext = {}) {
-    return {
-        sessionId,
-        latestUserMessageId: isNonEmptyString(sessionContext?.latestUserMessageId)
-            ? sessionContext.latestUserMessageId.trim()
-            : null,
-        latestUserMessageTimestamp: isNonEmptyString(sessionContext?.latestUserMessageTimestamp)
-            ? sessionContext.latestUserMessageTimestamp.trim()
-            : null,
-        activeEvidenceMessageId: isNonEmptyString(sessionContext?.activeEvidenceMessageId)
-            ? sessionContext.activeEvidenceMessageId.trim()
-            : null,
-        activeEvidenceTimestamp: isNonEmptyString(sessionContext?.activeEvidenceTimestamp)
-            ? sessionContext.activeEvidenceTimestamp.trim()
-            : null,
-    };
-}
-
-function sanitizeSessionAttachmentForHistory(attachment) {
-    if (!attachment || typeof attachment !== 'object') return null;
-
-    const type = isNonEmptyString(attachment.type) ? attachment.type.trim() : '';
-    if (!type) return null;
-
-    const base = {
-        type,
-        media_type: isNonEmptyString(attachment.media_type) ? attachment.media_type.trim() : undefined,
-        filename: isNonEmptyString(attachment.filename) ? attachment.filename.trim() : undefined,
-        messageId: isNonEmptyString(attachment.messageId) ? attachment.messageId.trim() : undefined,
-        timestamp: isNonEmptyString(attachment.timestamp) ? attachment.timestamp : undefined,
-    };
-
-    if (type === 'image') {
-        const hasData = isNonEmptyString(attachment.data);
-        const hasPath = isExistingFilePath(attachment.path);
-        if (!hasData && !hasPath) return null;
-        return {
-            ...base,
-            data: hasData ? attachment.data : undefined,
-            path: hasPath ? attachment.path : undefined,
-        };
-    }
-
-    if (type === 'video') {
-        const tempPath = isExistingFilePath(attachment.tempPath) ? attachment.tempPath : '';
-        if (!tempPath) return null;
-        return {
-            ...base,
-            tempPath,
-            size: Number.isFinite(attachment.size) ? attachment.size : undefined,
-        };
-    }
-
-    if (type === 'video_link') {
-        if (!isNonEmptyString(attachment.url)) return null;
-        return {
-            ...base,
-            url: attachment.url.trim(),
-            provider: isNonEmptyString(attachment.provider) ? attachment.provider.trim() : undefined,
-        };
-    }
-
-    if (type === 'document') {
-        const docPath = isExistingFilePath(attachment.path) ? attachment.path : '';
-        if (!docPath) return null;
-        return {
-            ...base,
-            path: docPath,
-            size: Number.isFinite(attachment.size) ? attachment.size : undefined,
-        };
-    }
-
-    return null;
-}
-
-function sanitizeSessionAttachmentsForHistory(attachments) {
-    if (!Array.isArray(attachments) || attachments.length === 0) return [];
-
-    return attachments
-        .slice(-MAX_PERSISTED_SESSION_ATTACHMENTS)
-        .map(sanitizeSessionAttachmentForHistory)
-        .filter(Boolean);
-}
-
-function sanitizeVideoMetadataForHistory(metadata) {
-    if (!metadata || typeof metadata !== 'object') return null;
-    const safe = {};
-    if (Number.isFinite(metadata.width)) safe.width = metadata.width;
-    if (Number.isFinite(metadata.height)) safe.height = metadata.height;
-    if (Number.isFinite(metadata.duration)) safe.duration = metadata.duration;
-    if (Number.isFinite(metadata.fps)) safe.fps = metadata.fps;
-    if (isNonEmptyString(metadata.codec)) safe.codec = metadata.codec.trim();
-    if (Number.isFinite(metadata.fileSize)) safe.fileSize = metadata.fileSize;
-    return Object.keys(safe).length > 0 ? safe : null;
-}
-
-function sanitizeVideoFrameForHistory(frame) {
-    if (!frame || typeof frame !== 'object') return null;
-    if (!isExistingFilePath(frame.path)) return null;
-
-    return {
-        path: frame.path,
-        timestamp: Number.isFinite(frame.timestamp) ? frame.timestamp : 0,
-    };
-}
-
-function sanitizeVideoContextItemForHistory(videoItem) {
-    if (!videoItem || typeof videoItem !== 'object') return null;
-
-    const videoPath = isExistingFilePath(videoItem.videoPath) ? videoItem.videoPath : '';
-    const frames = Array.isArray(videoItem.frames)
-        ? videoItem.frames
-            .map(sanitizeVideoFrameForHistory)
-            .filter(Boolean)
-            .slice(0, MAX_PERSISTED_VIDEO_FRAMES_PER_ITEM)
-        : [];
-
-    if (!videoPath && frames.length === 0) return null;
-
-    return {
-        messageId: isNonEmptyString(videoItem.messageId) ? videoItem.messageId.trim() : undefined,
-        timestamp: isNonEmptyString(videoItem.timestamp) ? videoItem.timestamp : undefined,
-        videoPath: videoPath || undefined,
-        filename: isNonEmptyString(videoItem.filename) ? videoItem.filename.trim() : undefined,
-        duration: Number.isFinite(videoItem.duration) ? videoItem.duration : undefined,
-        frameCount: Number.isFinite(videoItem.frameCount)
-            ? videoItem.frameCount
-            : (frames.length > 0 ? frames.length : undefined),
-        frames,
-        metadata: sanitizeVideoMetadataForHistory(videoItem.metadata),
-    };
-}
-
-function sanitizeVideoContextForHistory(videoContext) {
-    if (!Array.isArray(videoContext) || videoContext.length === 0) return [];
-
-    return videoContext
-        .slice(-MAX_PERSISTED_VIDEO_CONTEXT_ITEMS)
-        .map(sanitizeVideoContextItemForHistory)
-        .filter(Boolean);
-}
-
-function collectVideoTempFilesFromEvidence(sessionAttachments, videoContext) {
-    const paths = [];
-    const seen = new Set();
-
-    const addPath = (candidate) => {
-        if (!isExistingFilePath(candidate)) return;
-        if (seen.has(candidate)) return;
-        seen.add(candidate);
-        paths.push(candidate);
-    };
-
-    if (Array.isArray(sessionAttachments)) {
-        for (const attachment of sessionAttachments) {
-            if (attachment?.type === 'video') {
-                addPath(attachment.tempPath);
-            }
-        }
-    }
-
-    if (Array.isArray(videoContext)) {
-        for (const item of videoContext) {
-            addPath(item?.videoPath);
-            if (Array.isArray(item?.frames)) {
-                for (const frame of item.frames) {
-                    addPath(frame?.path);
-                }
-            }
-        }
-    }
-
-    return paths;
-}
-
-function collectDocumentTempFilesFromEvidence(sessionAttachments) {
-    if (!Array.isArray(sessionAttachments) || sessionAttachments.length === 0) {
-        return [];
-    }
-
-    const paths = [];
-    const seen = new Set();
-    for (const attachment of sessionAttachments) {
-        if (attachment?.type !== 'document') continue;
-        if (!isExistingFilePath(attachment.path)) continue;
-        if (seen.has(attachment.path)) continue;
-        seen.add(attachment.path);
-        paths.push(attachment.path);
-    }
-
-    return paths;
-}
 
 // ─── Chat Session Manager ───────────────────────────────────────────────────
 
@@ -658,14 +205,195 @@ class ChatSessionManager extends EventEmitter {
             console.warn(`[ChatManager] ⚠️ ToolBroker registry build failed: ${err.message}`);
         }
 
+        // ── Agent Orchestration: semantic intent router (recall + guard) ──
+        const routingCfg = this.config?.orchestration?.routing || {};
+        this._intentRouter = new AgentIntentRouter({
+            shortlistK: routingCfg.shortlistK,
+            confidenceThreshold: routingCfg.confidenceThreshold,
+            marginRatio: routingCfg.marginRatio,
+            cacheTtlMs: routingCfg.decisionCacheTtlMs,
+        });
+        this._delegationTargetsCache = null;
+        this._delegationTargetsCacheAt = 0;
+        this._delegationFactory = null;
+        this._delegationFactoryModel = null;
+        this._latestUserMessage = new Map();
+        this._delegatedWriteLocks = new Map();
+
         // ── Chat history persistence ──
         this._historyPath = options.historyPath || path.join(
             __dirname, '..', 'test-artifacts', 'chat-history.json'
+        );
+        // On-disk store for inline transcript attachments (assistant images).
+        // Bytes live here, served on demand via the attachment endpoint, so the
+        // browser never has to hold the full base64 set in the renderer heap.
+        this._attachmentStoreDir = options.attachmentStoreDir || path.join(
+            path.dirname(this._historyPath), 'chat-attachments'
         );
         this._loadHistory();
 
         // Cache default system prompt (used when agentMode is null)
         this._defaultSystemPrompt = this._buildSystemPrompt(null);
+    }
+
+    static _jsonByteLength(value) {
+        try { return Buffer.byteLength(JSON.stringify(value), 'utf8'); } catch { return 0; }
+    }
+
+    static _capText(value, max = MAX_APPROVAL_DISPLAY_CHARS) {
+        if (value === undefined || value === null) return undefined;
+        const text = String(value);
+        if (!max || text.length <= max) return text;
+        return `${text.slice(0, max)}\n...[truncated ${text.length - max} chars for renderer safety]`;
+    }
+
+    static _compactGuardrail(guardrail) {
+        if (!guardrail || typeof guardrail !== 'object' || Array.isArray(guardrail)) return undefined;
+        return {
+            provider: ChatSessionManager._capText(guardrail.provider, 80),
+            resourceType: ChatSessionManager._capText(guardrail.resourceType, 80),
+            effect: ChatSessionManager._capText(guardrail.effect, 80),
+            impactLevel: ChatSessionManager._capText(guardrail.impactLevel, 80),
+            requiresApproval: guardrail.requiresApproval === true,
+            actionLabel: ChatSessionManager._capText(guardrail.actionLabel, 240),
+        };
+    }
+
+    static _compactMutationPreview(preview) {
+        if (!preview || typeof preview !== 'object' || Array.isArray(preview)) return null;
+
+        const compactChanges = Array.isArray(preview.changes)
+            ? preview.changes.slice(0, MAX_APPROVAL_CHANGES).map((change) => {
+                if (!change || typeof change !== 'object') return null;
+                const rawWasStripped = change.beforeRaw !== undefined || change.afterRaw !== undefined
+                    || change.raw !== undefined || change.data !== undefined || change.base64 !== undefined || change.dataUrl !== undefined;
+                return {
+                    field: ChatSessionManager._capText(change.field || 'value', 120),
+                    label: ChatSessionManager._capText(change.label || change.field || 'Value', 160),
+                    changeType: ChatSessionManager._capText(change.changeType || 'replace', 40),
+                    beforeDisplay: ChatSessionManager._capText(change.beforeDisplay ?? change.before ?? '(empty)', MAX_APPROVAL_DISPLAY_CHARS),
+                    afterDisplay: ChatSessionManager._capText(change.afterDisplay ?? change.after ?? '(empty)', MAX_APPROVAL_DISPLAY_CHARS),
+                    beforeKind: ChatSessionManager._capText(change.beforeKind || 'text', 40),
+                    afterKind: ChatSessionManager._capText(change.afterKind || 'text', 40),
+                    beforeLineCount: Number.isFinite(change.beforeLineCount) ? change.beforeLineCount : undefined,
+                    afterLineCount: Number.isFinite(change.afterLineCount) ? change.afterLineCount : undefined,
+                    isLongText: Boolean(change.isLongText || rawWasStripped),
+                    rawStripped: rawWasStripped || undefined,
+                    importance: ChatSessionManager._capText(change.importance, 40),
+                    group: ChatSessionManager._capText(change.group, 40),
+                };
+            }).filter(Boolean)
+            : [];
+
+        const compact = {
+            displayVersion: preview.displayVersion || 2,
+            kind: ChatSessionManager._capText(preview.kind || 'mutation-preview', 80),
+            provider: ChatSessionManager._capText(preview.provider || 'jira', 80),
+            resourceType: ChatSessionManager._capText(preview.resourceType || 'ticket', 80),
+            effect: ChatSessionManager._capText(preview.effect || 'write', 80),
+            operationKind: ChatSessionManager._capText(preview.operationKind || 'update', 80),
+            impactLevel: ChatSessionManager._capText(preview.impactLevel || 'high', 80),
+            actionLabel: ChatSessionManager._capText(preview.actionLabel || 'apply a mutation', 240),
+            title: ChatSessionManager._capText(preview.title || 'Approval required', 240),
+            subject: preview.subject && typeof preview.subject === 'object'
+                ? {
+                    id: ChatSessionManager._capText(preview.subject.id, 160),
+                    url: ChatSessionManager._capText(preview.subject.url, 600),
+                    title: ChatSessionManager._capText(preview.subject.title, 300),
+                    label: ChatSessionManager._capText(preview.subject.label, 300),
+                }
+                : undefined,
+            changes: compactChanges,
+            notes: Array.isArray(preview.notes)
+                ? preview.notes.slice(0, MAX_APPROVAL_NOTES).map(note => ChatSessionManager._capText(note, MAX_APPROVAL_LONG_TEXT_CHARS)).filter(Boolean)
+                : [],
+            consequence: ChatSessionManager._capText(preview.consequence, MAX_APPROVAL_LONG_TEXT_CHARS),
+        };
+
+        if (Array.isArray(preview.changes) && preview.changes.length > MAX_APPROVAL_CHANGES) {
+            compact.truncatedChanges = preview.changes.length - MAX_APPROVAL_CHANGES;
+        }
+        if (Array.isArray(preview.notes) && preview.notes.length > MAX_APPROVAL_NOTES) {
+            compact.truncatedNotes = preview.notes.length - MAX_APPROVAL_NOTES;
+        }
+        if (ChatSessionManager._jsonByteLength(compact) <= MAX_APPROVAL_PREVIEW_BYTES) return compact;
+
+        // Second-pass shrink for pathological previews: keep the review useful,
+        // but guarantee a small SSE/history payload.
+        compact.changes = compact.changes.slice(0, 12).map(change => ({
+            ...change,
+            beforeDisplay: ChatSessionManager._capText(change.beforeDisplay, 800),
+            afterDisplay: ChatSessionManager._capText(change.afterDisplay, 800),
+            rawStripped: true,
+        }));
+        compact.notes = compact.notes.slice(0, 6).map(note => ChatSessionManager._capText(note, 1000));
+        compact.consequence = ChatSessionManager._capText(compact.consequence, 1000);
+        compact.payloadCompacted = true;
+        return compact;
+    }
+
+    _sanitizeUserInputRequestMeta(meta) {
+        if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return {};
+        const sourcePreview = meta.mutationPreview && typeof meta.mutationPreview === 'object'
+            ? meta.mutationPreview
+            : (meta.preview && typeof meta.preview === 'object' ? meta.preview : null);
+        const safe = {};
+        if (meta.type !== undefined) safe.type = ChatSessionManager._capText(meta.type, 80);
+        if (meta.sessionId !== undefined) safe.sessionId = ChatSessionManager._capText(meta.sessionId, 160);
+        if (meta.expectedApproval !== undefined) safe.expectedApproval = ChatSessionManager._capText(meta.expectedApproval, 240);
+        const guardrail = ChatSessionManager._compactGuardrail(meta.guardrail);
+        if (guardrail) safe.guardrail = guardrail;
+        const preview = ChatSessionManager._compactMutationPreview(sourcePreview);
+        if (preview) {
+            safe.mutationPreview = preview;
+            if (meta.preview || meta.mutationPreview) safe.previewStripped = true;
+        }
+
+        // Preserve small primitive metadata from custom prompts, but never nested
+        // payloads. Approval previews are already represented by mutationPreview.
+        for (const [key, value] of Object.entries(meta)) {
+            if (['type', 'sessionId', 'expectedApproval', 'guardrail', 'mutationPreview', 'preview'].includes(key)) continue;
+            if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
+                safe[key] = typeof value === 'string' ? ChatSessionManager._capText(value, 1000) : value;
+            }
+        }
+        return safe;
+    }
+
+    _sanitizeUserInputRequestData(data) {
+        if (!data || typeof data !== 'object') return data;
+        return {
+            ...data,
+            question: ChatSessionManager._capText(data.question, MAX_REPLAY_CONTENT_CHARS),
+            meta: this._sanitizeUserInputRequestMeta(data.meta),
+        };
+    }
+
+    static _stripOversizePayloads(value, state = { depth: 0, seen: new WeakSet() }) {
+        if (value === null || value === undefined) return value;
+        if (typeof value === 'string') return ChatSessionManager._capText(value, 8000);
+        if (typeof value !== 'object') return value;
+        if (state.seen.has(value)) return '[circular]';
+        if (state.depth > 6) return '[nested payload stripped]';
+        state.seen.add(value);
+        if (Array.isArray(value)) {
+            const out = value.slice(0, 50).map(item => ChatSessionManager._stripOversizePayloads(item, { depth: state.depth + 1, seen: state.seen }));
+            if (value.length > 50) out.push(`[${value.length - 50} items stripped]`);
+            return out;
+        }
+        const out = {};
+        for (const [key, item] of Object.entries(value)) {
+            if (/^(dataUrl|base64|beforeRaw|afterRaw|raw)$/i.test(key)) {
+                out[`${key}Stripped`] = true;
+                continue;
+            }
+            if (/^data$/i.test(key) && (typeof item === 'string' || (item && typeof item === 'object'))) {
+                out.dataStripped = true;
+                continue;
+            }
+            out[key] = ChatSessionManager._stripOversizePayloads(item, { depth: state.depth + 1, seen: state.seen });
+        }
+        return out;
     }
 
     // ─── Valid agent modes ──────────────────────────────────────────────────
@@ -1274,6 +1002,22 @@ class ChatSessionManager extends EventEmitter {
             parts.push('<skills>', skillsGuide, '</skills>');
         }
 
+        // Teach workspace agents about the Tool Broker dynamic-delegation escape hatch.
+        // Workspace agents are loaded with a narrow, intent-inferred native tool set
+        // (see _buildCustomAgentTools) — when the user prompt drifts into a domain
+        // outside that set, the agent should discover and invoke the missing tool
+        // via the broker rather than refusing or hallucinating.
+        parts.push(
+            '<dynamic_tool_delegation>',
+            'Your native tools are intentionally focused on your declared purpose. When a user request needs a capability you do not see in your tool list (for example: a pasted Jira/Confluence URL, a request to fetch a ticket, generate a PPT/PDF/Excel, run a Playwright test, attach evidence to a ticket), do this:',
+            '  1. Call `list_delegatable_tools` (optionally with `{ "category": "jira"|"document"|"framework"|"evidence"|"grounding"|"pipeline" }`) to discover tools you can borrow.',
+            '  2. Call `cross_agent_delegate` with `{ "toolName": "<discovered tool>", "parameters": { ... } }` to execute it.',
+            '  3. The approval flow, permissions, and progress broadcasts are preserved transparently. Do NOT ask the user for permission yourself — the broker handles it.',
+            '  4. If `cross_agent_delegate` returns a permission-denied error, relay it to the user verbatim and stop — do not retry.',
+            'Never invent tool names or pretend a missing capability exists. Discovery via `list_delegatable_tools` is mandatory before delegation.',
+            '</dynamic_tool_delegation>'
+        );
+
         parts.push('<base_execution_profile>', basePrompt, '</base_execution_profile>');
         return stripVSCodeToolPrefix(parts.join('\n\n'));
     }
@@ -1282,10 +1026,374 @@ class ChatSessionManager extends EventEmitter {
         if (agentSelection?.source === 'workspace') {
             return this._buildWorkspaceAgentPrompt(agentSelection);
         }
+        if (agentSelection?.agentMode) {
+            return this._buildSystemPrompt(agentSelection.agentMode);
+        }
+        // Default merged profile (TPM) — the master/orchestrator. Append the routing
+        // policy so it prefers delegating to a matching specialist over self-serving.
+        return `${this._defaultSystemPrompt}\n\n${this._buildMasterRoutingPolicy()}`;
+    }
 
-        return agentSelection?.agentMode
-            ? this._buildSystemPrompt(agentSelection.agentMode)
-            : this._defaultSystemPrompt;
+    // ════════════════════════════════════════════════════════════════════════
+    // AGENT ORCHESTRATION — master routing + agent-to-agent delegation
+    // ════════════════════════════════════════════════════════════════════════
+
+    /** True when this selection is the default merged "master" (TPM) profile. */
+    _isMasterSelection(agentSelection = null) {
+        return !agentSelection?.agentMode && agentSelection?.source !== 'workspace';
+    }
+
+    /** Static routing policy injected into the master (TPM) system prompt. */
+    _buildMasterRoutingPolicy() {
+        return [
+            '<master_routing_policy>',
+            'You are the master agent (TPM) and the ORCHESTRATOR for a team of specialist agents.',
+            'Before doing a task yourself, decide whether a published specialist agent matches the user\'s intent:',
+            '- If a specialist clearly matches, you MUST delegate to it via the `delegate_to_specialist` tool instead of doing the work yourself. Delegate the GOAL and raw context — not a pre-written final deliverable — so the specialist applies its own craft.',
+            '- When you delegate, briefly tell the user which specialist you are handing the task to (e.g. "Handing this to CommentGenie…"). Do NOT imply you are doing the work yourself or "through the ticket workflow".',
+            '- Delegate ONCE. Approvals (e.g. Jira writes) are shown automatically by the platform — do NOT add your own approval step (ask_user) and do NOT re-delegate "to post after approval".',
+            '- After delegation, NEVER post/update Jira yourself for that same delegated task. If the specialist returns a draft or asks for info/approval, summarize that state and wait for the user/specialist flow. Do not call `update_jira_ticket` or any Jira write tool as a fallback unless the delegate tool explicitly reports failure and the user asks YOU to take over.',
+            '- If NO specialist matches, do it yourself. For irreversible actions the platform shows a single approval automatically.',
+            'Each turn you may receive an <intent_routing> hint with the live specialist roster and the best match. Follow it.',
+            '</master_routing_policy>',
+        ].join('\n');
+    }
+
+    /**
+     * Lazily construct an AgentSessionFactory for delegated sub-sessions, using the
+     * CURRENT session's model (not the manager default) so the specialist runs on
+     * the same — available — model the user selected. Cached per model.
+     */
+    _getDelegationFactory(model) {
+        const useModel = model || this.model;
+        if (typeof this.defineTool !== 'function') {
+            throw new Error('Cannot create delegated agent session: defineTool is not available on ChatSessionManager');
+        }
+        if (this._delegationFactory && this._delegationFactoryModel === useModel) {
+            return this._delegationFactory;
+        }
+        const { AgentSessionFactory } = require('./agent-sessions');
+        this._delegationFactory = new AgentSessionFactory({
+            client: this.client,
+            defineTool: this.defineTool,
+            model: useModel,
+            config: this.config,
+            learningStore: this.learningStore,
+            verbose: false,
+        });
+        this._delegationFactoryModel = useModel;
+        return this._delegationFactory;
+    }
+
+    /** Published delegation targets (core specialists + custom agents) minus the master. Cached 30s. */
+    async _getDelegationTargets() {
+        const now = Date.now();
+        if (this._delegationTargetsCache && now - this._delegationTargetsCacheAt < 30000) {
+            return this._delegationTargetsCache;
+        }
+        let agents = [];
+        try {
+            agents = await this._agentCatalog.listChatAgents({ includeDraft: false, includeInactive: false });
+        } catch (err) {
+            console.warn(`[ChatManager] ⚠️ Delegation target listing failed: ${err.message}`);
+            agents = [];
+        }
+        const masterId = buildCoreAgentId(null);
+        this._delegationTargetsCache = (agents || []).filter(a => a && a.id !== masterId);
+        this._delegationTargetsCacheAt = now;
+        return this._delegationTargetsCache;
+    }
+
+    /** Resolve a delegation target by id, label, or core mode. */
+    async resolveDelegationTarget(nameOrId) {
+        const wanted = String(nameOrId || '').trim();
+        if (!wanted) return { ok: false };
+        const targets = await this._getDelegationTargets();
+        const lower = wanted.toLowerCase();
+        const squash = (s) => String(s || '').toLowerCase().replace(/\s+/g, '');
+        // 1) Identify WHICH agent from the lightweight roster (by id / label / mode).
+        const match =
+            targets.find(a => a.id === wanted) ||
+            targets.find(a => (a.label || '').toLowerCase() === lower) ||
+            targets.find(a => (a.agentMode || '').toLowerCase() === lower) ||
+            targets.find(a => squash(a.label) === squash(wanted));
+        const resolvedId = match?.id
+            || ((wanted.startsWith('workspace:') || wanted.startsWith('core:')) ? wanted : null);
+
+        // 2) Resolve the CANONICAL FULL descriptor — the SAME object a DIRECT chat
+        // session uses. CRITICAL: listChatAgents() returns a PUBLIC descriptor that
+        // STRIPS `promptPath`; building a workspace session from it drops the agent's
+        // custom instructions, so the delegated specialist behaves generically (posts
+        // verbatim instead of applying its skills). resolveAgentSelection() returns
+        // the full descriptor WITH promptPath → true direct-session parity.
+        let sel = null;
+        if (resolvedId) {
+            try {
+                const full = await this._agentCatalog.resolveAgentSelection({ agentId: resolvedId });
+                if (full && full.id !== buildCoreAgentId(null)) sel = full;
+            } catch { /* fall through to roster match */ }
+        }
+        // Core agents load their prompt from .agent.md by role (no promptPath needed),
+        // so the roster match is a safe fallback when full resolution is unavailable.
+        if (!sel) sel = match || null;
+        if (!sel) return { ok: false };
+
+        if (sel.capabilityProfile) { try { sel = applyCapabilityProfile(sel); } catch { /* ignore */ } }
+        const kind = sel.source === 'workspace' ? 'workspace' : 'core';
+        return {
+            ok: true,
+            selection: sel,
+            label: sel.label || sel.id,
+            target: { id: sel.id, kind, role: kind === 'core' ? (sel.agentMode || null) : null, label: sel.label || sel.id },
+        };
+    }
+
+    /** Tool deps for a delegated sub-session (routes approvals to this chat). */
+    _buildDelegationToolOpts(sessionId) {
+        return {
+            learningStore: this.learningStore,
+            config: this.config,
+            groundingStore: this._groundingStore || null,
+            chatManager: this,
+            sessionContext: { sessionId, delegatedAgent: true },
+            getSessionId: () => sessionId,
+        };
+    }
+
+    shouldBlockMasterWriteAfterDelegation(sessionContext, toolName, params = {}) {
+        const sessionId = sessionContext?.sessionId || null;
+        if (!sessionId || sessionContext?.delegatedAgent === true) return { blocked: false };
+        const lock = this._delegatedWriteLocks.get(sessionId);
+        if (!lock) return { blocked: false };
+        if (Date.now() > lock.expiresAt) {
+            this._delegatedWriteLocks.delete(sessionId);
+            return { blocked: false };
+        }
+        const isCommentWrite = toolName === 'update_jira_ticket' && typeof params.comment === 'string' && params.comment.trim();
+        if (!isCommentWrite) return { blocked: false };
+        return {
+            blocked: true,
+            message:
+                `This Jira comment task was delegated to ${lock.agentLabel}. ` +
+                'Do not post a fallback comment from TPM; let the specialist complete its approval/write flow or ask the user what to do next.',
+        };
+    }
+
+    /**
+     * Build a `createSession` adapter (for runAgentStep) that constructs the
+     * specialist session with DIRECT-SESSION PARITY:
+     *   - core   → factory.createAgentSession(role)  (role .agent.md prompt + role tools)
+     *   - custom → the SAME prompt + tool bundle a direct chat session would build
+     * Approvals route to this chat via chatManager + sessionContext.
+     */
+    buildDelegationCreateSession(selection, sessionId) {
+        const sessionModel = this._sessions.get(sessionId)?.model || this.model;
+        const factory = this._getDelegationFactory(sessionModel);
+        const isWorkspace = selection.source === 'workspace';
+        return async (target, sessionOpts = {}) => {
+            let ctx;
+            if (isWorkspace) {
+                const toolOpts = this._buildDelegationToolOpts(sessionId);
+                const systemPrompt = this._buildWorkspaceAgentPrompt(selection);
+                const hasCustomInstructions = systemPrompt.includes('<workspace_agent_instructions>');
+                console.log(`[ChatManager] 🤝 Workspace delegation '${selection.label}' — promptPath: ${selection.promptPath ? 'present' : 'MISSING'}, customInstructions: ${hasCustomInstructions ? 'LOADED' : 'NONE (will be generic!)'}, prompt ${systemPrompt.length} chars`);
+                const categories = this._inferToolCategoriesForAgent(selection);
+                const tools = this._buildCustomAgentTools(categories, toolOpts);
+                ctx = {
+                    systemPromptOverride: systemPrompt,
+                    rawSystemPrompt: true,
+                    toolsOverride: tools,
+                    disableBroker: true,
+                    ticketContext: sessionOpts.ticketContext || '',
+                    runId: sessionId,
+                    chatManager: this,
+                    sessionContext: { sessionId },
+                };
+            } else {
+                ctx = {
+                    ticketContext: sessionOpts.ticketContext || '',
+                    runId: sessionId,
+                    chatManager: this,
+                    sessionContext: { sessionId },
+                };
+            }
+            const agentName = isWorkspace ? selection.id : (selection.agentMode || null);
+            const { session, sessionId: sid } = await factory.createAgentSession(agentName, ctx);
+            return {
+                sessionId: sid,
+                sendAndWait: (prompt, opts) => factory.sendAndWait(session, prompt, opts),
+                destroy: () => factory.destroySession(sid).catch(() => {}),
+            };
+        };
+    }
+
+    /** Semantic routing recommendation over the live specialist roster. */
+    async recommendDelegationForMessage(message) {
+        const targets = await this._getDelegationTargets();
+        const roster = targets.map(a => ({ id: a.id, label: a.label, description: a.description, keywords: a.keywords || [] }));
+        const routingCfg = this.config?.orchestration?.routing || {};
+        const rec = this._intentRouter.recommend(message, roster, {
+            shortlistK: routingCfg.shortlistK,
+            confidenceThreshold: routingCfg.confidenceThreshold,
+            marginRatio: routingCfg.marginRatio,
+        });
+        return { rec, targets };
+    }
+
+    /** Latest user message text for a session (direct-parity handoff). */
+    getLatestUserMessageText(sessionId) {
+        const msg = this._latestUserMessage.get(sessionId);
+        return isNonEmptyString(msg) ? msg : null;
+    }
+
+    /**
+     * Execute a delegation: resolve target → build parity session → run the
+     * specialist on the user's ORIGINAL message → return its result to the master.
+     * Called by the delegate_to_specialist tool.
+     */
+    async runDelegation({ agentName, task, sessionId }) {
+        const resolved = await this.resolveDelegationTarget(agentName);
+        if (!resolved.ok) {
+            const targets = await this._getDelegationTargets();
+            const names = targets.map(t => t.label).join(', ');
+            return JSON.stringify({ success: false, error: `No specialist matches "${agentName}". Available: ${names || '(none)'}. If none fit, handle it yourself.` });
+        }
+        const cfg = this.config?.orchestration?.delegation || {};
+        const delegationId = `deleg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const streamEnabled = cfg.streamDeltas !== false;
+        const originalMsg = this.getLatestUserMessageText(sessionId);
+        const input = originalMsg || task || '';
+        const delegationContext = [
+            'You are running as a delegated specialist inside the current chat.',
+            'The user message you receive is authoritative. Apply your own custom instructions, skills, formatting rules, and workflow exactly as you would in a direct chat session.',
+            'The master-agent task, if present, is only a routing note. Do not treat it as final wording or exact content unless the user explicitly asked for verbatim posting in their own message.',
+            'If your custom instructions require user approval before posting, use the actual interactive user-input mechanism (`ask_user` / `ask_questions`) so the user can approve in chat. Do NOT merely write "Approval request:" as plain assistant text and stop.',
+            'If the user approves, YOU must call your gated Jira write tool (for example `update_jira_ticket` with `comment`) yourself. The master agent must not post on your behalf.',
+        ].join('\n');
+
+        // Announce the sub-thread so the UI renders a nested specialist view.
+        this._broadcastToSSE(sessionId, CHAT_EVENTS.DELEGATION_START, {
+            delegationId,
+            agentLabel: resolved.label,
+            agentId: resolved.target.id,
+            task: originalMsg || task || '',
+        });
+
+        // Throttle the specialist's per-token deltas (the backend already coalesces
+        // main-chat deltas; do the same here to avoid flooding the SSE channel).
+        let deltaBuf = '';
+        let streamedChars = 0;
+        let flushTimer = null;
+        const maxStreamed = cfg.maxStreamedChars ?? 24000;
+        const flushDelta = () => {
+            if (!deltaBuf) return;
+            const chunk = deltaBuf;
+            deltaBuf = '';
+            this._broadcastToSSE(sessionId, CHAT_EVENTS.DELEGATION_DELTA, { delegationId, deltaContent: chunk });
+        };
+
+        const createSession = this.buildDelegationCreateSession(resolved.selection, sessionId);
+        const delegatedTools = [];
+        const delegatedWriteTools = new Set([
+            'update_jira_ticket',
+            'add_comment_with_images',
+            'add_comment_with_media',
+            'edit_jira_comment',
+            'delete_jira_comment',
+            'attach_file_to_jira',
+        ]);
+
+        const res = await runAgentStep({
+            target: resolved.target,
+            input,
+            deps: { createSession },
+            context: {
+                runId: sessionId,
+                depth: 0,
+                maxDepth: cfg.maxDepth ?? 1,
+                timeoutMs: cfg.subAgentTimeoutMs ?? 300000,
+                chatManager: this,
+                sessionId,
+                ticketContext: delegationContext,
+                onDelta: streamEnabled
+                    ? (text) => {
+                        if (!text || streamedChars >= maxStreamed) return;
+                        streamedChars += text.length;
+                        deltaBuf += text;
+                        if (!flushTimer) {
+                            flushTimer = setTimeout(() => { flushTimer = null; flushDelta(); }, cfg.deltaFlushMs ?? 120);
+                        }
+                    }
+                    : undefined,
+                onToolStart: (toolName) => {
+                    delegatedTools.push(toolName);
+                    this._broadcastToSSE(sessionId, CHAT_EVENTS.DELEGATION_TOOL_START, { delegationId, toolName });
+                },
+                onToolEnd: (toolName, success) => this._broadcastToSSE(sessionId, CHAT_EVENTS.DELEGATION_TOOL_COMPLETE, { delegationId, toolName, success }),
+            },
+        });
+
+        if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+        flushDelta();
+
+        this._broadcastToSSE(sessionId, CHAT_EVENTS.DELEGATION_COMPLETE, {
+            delegationId,
+            success: res.ok,
+            agentLabel: resolved.label,
+            output: res.ok ? res.output : '',
+            error: res.ok ? null : (res.error || 'delegation failed'),
+        });
+
+        if (!res.ok) {
+            return JSON.stringify({ success: false, agent: resolved.label, error: res.error || 'delegation failed' });
+        }
+        const writePerformed = delegatedTools.some(toolName => delegatedWriteTools.has(toolName));
+        if (writePerformed) {
+            this._delegatedWriteLocks.delete(sessionId);
+        } else {
+            this._delegatedWriteLocks.set(sessionId, {
+                agentLabel: resolved.label,
+                agentId: resolved.target.id,
+                expiresAt: Date.now() + 5 * 60 * 1000,
+            });
+        }
+        console.log(`[ChatManager] 🤝 Delegated to ${resolved.label} (${resolved.target.id}) → ${res.output ? res.output.length : 0} chars`);
+        return JSON.stringify({
+            success: true,
+            agent: resolved.label,
+            agentId: resolved.target.id,
+            writePerformed,
+            output: res.output,
+            masterInstruction: writePerformed
+                ? 'The specialist already performed the gated Jira write. Summarize the result only; do not perform another Jira write.'
+                : 'The specialist did not perform a Jira write. Do NOT post or update Jira yourself as a fallback. If the specialist drafted or asked for approval/info, wait for that specialist/user flow or ask the user what they want next.',
+        });
+    }
+
+    /** Per-turn intent-routing hint for the master (TPM). Async — lists the live roster. */
+    async _buildMasterIntentHint(message) {
+        try {
+            const { rec, targets } = await this.recommendDelegationForMessage(message);
+            if (!targets.length) return null;
+            const roster = targets.slice(0, 12)
+                .map(t => `- ${t.label} (${t.id})${t.description ? ` — ${t.description}` : ''}`)
+                .join('\n');
+            const lines = ['<intent_routing>', 'Specialists you can delegate to via delegate_to_specialist:', roster, ''];
+            if (rec.decision === 'route' && rec.top) {
+                const best = targets.find(t => t.id === rec.top.agent.id);
+                lines.push(`Best match for THIS request: ${best ? best.label : rec.top.agent.id} (${rec.top.agent.id}). Strongly prefer delegating to it via delegate_to_specialist unless it clearly does not fit.`);
+            } else if (rec.decision === 'ambiguous' && rec.shortlist?.length) {
+                const names = rec.shortlist.slice(0, 3).map(s => s.label).join(', ');
+                lines.push(`Possible matches: ${names}. If one clearly fits the user's intent, delegate to it; otherwise handle it yourself with human-in-the-loop confirmation for irreversible actions.`);
+            } else {
+                lines.push('No specialist clearly matches. Handle it yourself; for irreversible actions the platform shows a single approval automatically.');
+            }
+            lines.push('</intent_routing>');
+            return lines.join('\n');
+        } catch (err) {
+            console.warn(`[ChatManager] ⚠️ Master intent hint failed (non-blocking): ${err.message}`);
+            return null;
+        }
     }
 
     _resolveEntryAgent(entry) {
@@ -1296,6 +1404,35 @@ class ChatSessionManager extends EventEmitter {
             return entry.agent;
         }
         return toPublicAgentDescriptor(this._agentCatalog.getCoreAgentByMode(entry?.agentMode || null));
+    }
+
+    async _refreshEntryAgentSelection(entry) {
+        if (!entry) return null;
+
+        const candidateAgentId = entry.agentSelection?.id || entry.agentId || entry.agent?.id || null;
+        if (!isNonEmptyString(candidateAgentId) || !candidateAgentId.startsWith('workspace:')) {
+            return entry.agentSelection || null;
+        }
+
+        try {
+            let currentSelection = await this._agentCatalog.resolveAgentSelection({
+                agentId: candidateAgentId,
+                agentMode: entry.agentMode || null,
+            });
+
+            if (currentSelection?.capabilityProfile) {
+                currentSelection = applyCapabilityProfile(currentSelection);
+            }
+
+            entry.agentSelection = currentSelection;
+            entry.agentId = currentSelection.id;
+            entry.agentMode = currentSelection.agentMode || null;
+            entry.agent = toPublicAgentDescriptor(currentSelection);
+            return currentSelection;
+        } catch (error) {
+            console.warn(`[ChatManager] ⚠️ Could not refresh workspace agent ${candidateAgentId}; using persisted descriptor. ${error.message}`);
+            return entry.agentSelection || null;
+        }
     }
 
     /**
@@ -1320,6 +1457,7 @@ class ChatSessionManager extends EventEmitter {
             const toolProfile = this._getAgentToolProfile(agentSelection);
             const filesystemAccess = this._getFilesystemAccess(agentSelection);
             const roleName = toolProfile === 'full' ? null : toolProfile;
+            const isWorkspaceAgent = agentSelection?.source === 'workspace';
 
             let tools;
             if (roleName && (ChatSessionManager.VALID_AGENTS.includes(roleName) || roleName === 'codereviewer')) {
@@ -1331,8 +1469,16 @@ class ChatSessionManager extends EventEmitter {
                     tools.push(...createCustomTools(this.defineTool, 'codereviewer', toolOpts));
                 }
                 console.log(`[ChatManager] Loaded tools for profile: ${roleName}`);
+            } else if (isWorkspaceAgent) {
+                // Workspace/custom agents: infer tool categories from prompt+description+label,
+                // then load ONLY tools that match the inferred categories + always-on essentials.
+                // The Tool Broker meta-tools (injected below) cover the long tail when the
+                // agent needs something outside its inferred set.
+                const inferredCategories = this._inferToolCategoriesForAgent(agentSelection);
+                tools = this._buildCustomAgentTools(inferredCategories, toolOpts);
+                console.log(`[ChatManager] 🧭 Workspace agent ${agentSelection?.label || agentSelection?.id || 'custom'} → inferred categories: [${inferredCategories.join(', ')}] (${tools.length} native tools)`);
             } else {
-                // Default: all agent tools merged
+                // Default (core TPM, no agent selected): all agent tools merged
                 tools = [
                     ...createCustomTools(this.defineTool, 'scriptgenerator', toolOpts),
                     ...createCustomTools(this.defineTool, 'codereviewer', toolOpts),
@@ -1352,27 +1498,297 @@ class ChatSessionManager extends EventEmitter {
                 }
             }
 
-            // Inject tool broker meta-tools for single-agent modes (TPM already merges all tools)
-            if (roleName && this._toolBroker?.enabled) {
+            // ── Browser Tool Gateway (L2B) ────────────────────────────────
+            // For workspace/custom agents that need occasional browser tasks
+            // but don't want the 35–141-tool tax of attaching unified-automation
+            // MCP directly. Opt-in via agentSelection.browserGateway === true
+            // (set by Studio when the user picks a non-browser profile that
+            // still benefits from one-shot navigation, e.g. Summarizer that
+            // sometimes needs to look at a live page). Costs only 3 tool slots.
+            if (isWorkspaceAgent && agentSelection?.browserGateway === true && !agentSelection?.capabilities?.browser) {
+                try {
+                    const { createBrowserGatewayTools } = require('./browser-gateway');
+                    const gatewayTools = createBrowserGatewayTools(this.defineTool, {
+                        profile: agentSelection.browserGatewayProfile || 'dryrun',
+                    });
+                    tools.push(...gatewayTools);
+                    console.log(`[ChatManager] 🌐 Injected ${gatewayTools.length} browser-gateway tools (profile=${agentSelection.browserGatewayProfile || 'dryrun'})`);
+                } catch (gwErr) {
+                    console.warn(`[ChatManager] Browser gateway unavailable: ${gwErr.message}`);
+                }
+            }
+
+            // Inject tool broker meta-tools for:
+            //  • single-agent modes (e.g. buggenie, testgenie) — broker covers cross-domain needs
+            //  • workspace/custom agents — broker is the dynamic escape hatch (e.g. Summarizer
+            //    asked to summarise a pasted Jira URL → delegate to fetch_jira_ticket)
+            // TPM (no agent selected, toolProfile='full', not workspace) already merges everything
+            // and intentionally skips broker meta-tools.
+            const brokerCaller = roleName || (isWorkspaceAgent ? 'workspace' : null);
+            const brokerExplicitlyDisabled = agentSelection?.brokerEnabled === false;
+            if (brokerCaller && this._toolBroker?.enabled && !brokerExplicitlyDisabled) {
                 const nativeToolNames = tools.map(t => t.name || t.definition?.name || '').filter(Boolean);
-                const metaTools = createBrokerMetaTools(this.defineTool, this._toolBroker, roleName, nativeToolNames, toolOpts);
+                const metaTools = createBrokerMetaTools(this.defineTool, this._toolBroker, brokerCaller, nativeToolNames, toolOpts);
                 tools.push(...metaTools);
                 if (metaTools.length > 0) {
-                    console.log(`[ChatManager] 🔀 Injected ${metaTools.length} broker meta-tools for ${roleName}`);
+                    console.log(`[ChatManager] 🔀 Injected ${metaTools.length} broker meta-tools for ${brokerCaller}`);
+                }
+            }
+
+            // ── Master orchestration: inject delegate_to_specialist for the TPM ──
+            // Lets the master hand a focused sub-task to a core or custom specialist.
+            // UNSHIFT so it survives CAPI tool-count truncation (which slices the tail).
+            const isMasterProfile = !roleName && !isWorkspaceAgent;
+            if (isMasterProfile && this.config?.orchestration?.delegation?.enabled !== false) {
+                try {
+                    // Warm the targets cache for subsequent turns (fire-and-forget).
+                    this._getDelegationTargets().catch(() => {});
+                    const customTargets = (this._delegationTargetsCache || [])
+                        .filter(a => a && a.source === 'workspace')
+                        .map(a => ({ id: a.id, label: a.label, description: a.description }));
+                    const delegationTools = createDelegationTools(this.defineTool, {
+                        chatManager: this,
+                        getSessionId: () => sessionContext?.sessionId || null,
+                        customTargets,
+                    });
+                    tools.unshift(...delegationTools);
+                    console.log(`[ChatManager] 🤝 Injected delegate_to_specialist for master (TPM); ${customTargets.length} custom target(s) advertised`);
+                } catch (delErr) {
+                    console.warn(`[ChatManager] ⚠️ delegate tool injection failed: ${delErr.message}`);
                 }
             }
 
             // Deduplicate by tool name
             const seen = new Set();
-            return tools.filter(t => {
+            const deduped = tools.filter(t => {
                 const name = t.name || t.definition?.name || '';
-                if (seen.has(name)) return false;
+                if (!name || seen.has(name)) return false;
                 seen.add(name);
                 return true;
             });
+
+            // ── CAPI TOOL-COUNT GUARDRAIL ──────────────────────────────────────
+            // CAPI rejects requests with > 128 tools ("Invalid 'tools': array too
+            // long"). The MCP servers attached later add ~65 (core) – 141 (full)
+            // additional tools the SDK auto-injects, so we must reserve headroom.
+            // We cap the *custom* tools array here. Reserve 80 slots for MCP +
+            // Atlassian (worst case ~76 MCP core + ~11 Atlassian read-only).
+            // Effective custom-tool budget: 128 - 80 = 48. We leave a slightly
+            // larger budget (60) for single-agent profiles where MCP is leaner
+            // and bump to 90 for filegenie/no-browser agents.
+            const CAPI_TOOL_LIMIT = 128;
+            const reservedForMcp = (this._estimateAttachedMcpToolCount?.(agentSelection) ?? null);
+            const reserved = (typeof reservedForMcp === 'number' && reservedForMcp >= 0)
+                ? reservedForMcp
+                : 80;
+            const safeBudget = Math.max(20, CAPI_TOOL_LIMIT - reserved - 4 /* safety margin */);
+            // Early-warning observability: log when we get close to the CAPI cap
+            // even if still under the safe budget. Helps catch growth before the
+            // next 128-tool incident.
+            const EARLY_WARN_AT = 110;
+            const projectedTotal = deduped.length + reserved;
+            if (projectedTotal > EARLY_WARN_AT) {
+                console.warn(`[ChatManager] \u26A0\uFE0F Projected tool total ${projectedTotal} (custom=${deduped.length} + mcp=${reserved}) approaching CAPI cap ${CAPI_TOOL_LIMIT}. profile=${toolProfile} workspace=${isWorkspaceAgent}`);
+            } else {
+                console.log(`[ChatManager] \uD83D\uDD0D Tool inventory: custom=${deduped.length}, mcpEst=${reserved}, projectedTotal=${projectedTotal} (cap=${CAPI_TOOL_LIMIT})`);
+            }
+            if (deduped.length > safeBudget) {
+                console.warn(`[ChatManager] ⚠️ Tool count ${deduped.length} exceeds safe budget ${safeBudget} (CAPI cap=${CAPI_TOOL_LIMIT}, reservedMCP=${reserved}). Truncating custom tools for profile=${toolProfile}.`);
+                return deduped.slice(0, safeBudget);
+            }
+            return deduped;
         } catch (error) {
             console.warn(`[ChatManager] Failed to load custom tools: ${error.message}`);
             return [];
+        }
+    }
+
+    /**
+     * Build a transient per-turn hint guiding a workspace/custom agent to use
+     * the Tool Broker for cross-domain capabilities detected in the user message.
+     * Returns null when no actionable signals are present.
+     *
+     * Pure regex; no LLM cost. Hint is prepended to the user message only, not
+     * persisted to history or the system prompt.
+     */
+    _buildWorkspaceDelegationHint(userMessage) {
+        if (!userMessage || typeof userMessage !== 'string') return null;
+        const text = userMessage;
+        const lower = text.toLowerCase();
+        const triggered = new Set();
+
+        // Detection patterns → broker category
+        const SIGNALS = [
+            { cat: 'jira', pat: /\b(?:jira|ticket|bug|defect|story|epic|fix\s*version|transition|assign\b|create\s*bug|raise\s*defect|log\s*work)\b/i },
+            { cat: 'jira', pat: /https?:\/\/[^\s]*\.atlassian\.net\/browse\//i },
+            { cat: 'grounding', pat: /https?:\/\/[^\s]*\.atlassian\.net\/wiki\//i },
+            { cat: 'grounding', pat: /\b(?:knowledge\s*base|confluence|kb\s*page|search\s*the\s*kb)\b/i },
+            { cat: 'framework', pat: /\b(?:run\s*test|execute\s*spec|playwright|sanity|smoke|run\s*sanity|spec\.js|test\s*case)\b/i },
+            { cat: 'document', pat: /\b(?:generate|create|build|export)\s+(?:a\s+|an\s+|the\s+)?(?:ppt|pptx|deck|pdf|docx|word|excel|xlsx|report|chart|infographic)\b/i },
+            { cat: 'evidence', pat: /\b(?:attach|upload|add)\s+(?:screenshot|evidence|recording|video|frame)/i },
+        ];
+        for (const { cat, pat } of SIGNALS) {
+            if (pat.test(text) || pat.test(lower)) triggered.add(cat);
+        }
+        if (triggered.size === 0) return null;
+
+        const cats = [...triggered];
+        const examples = {
+            jira: '`fetch_jira_ticket`, `create_jira_ticket`, `update_jira_ticket`',
+            grounding: '`search_knowledge_base`, `get_confluence_page_details`',
+            framework: '`find_test_files`, `execute_test`, `get_test_results`',
+            document: '`generate_pptx`, `generate_pdf`, `generate_docx`, `generate_excel_report`',
+            evidence: '`attach_session_evidence_to_jira`, `add_comment_with_images`',
+        };
+        const lines = cats.map(c => `- Category \`${c}\`: e.g. ${examples[c] || 'see list_delegatable_tools'}`);
+        return [
+            '<delegation_hint>',
+            'This user request touches capabilities outside your declared native tool set. If you do not have the right tool natively, call `list_delegatable_tools` (filter by category below) then `cross_agent_delegate`:',
+            ...lines,
+            '</delegation_hint>',
+        ].join('\n');
+    }
+
+    /**
+     * Infer the most likely tool categories for a workspace/custom agent based on
+     * its label, description, and bound prompt text (if loadable). Returns an
+     * array of category names from tool-broker.js TOOL_CATEGORIES. Falls back to
+     * `['pipeline', 'grounding']` (always-on essentials) when nothing matches.
+     *
+     * Cheap, deterministic, zero LLM calls.
+     */
+    _inferToolCategoriesForAgent(agentSelection) {
+        const ALWAYS_ON = ['pipeline', 'grounding'];
+        if (!agentSelection) return ALWAYS_ON;
+
+        // Highest priority: explicit categories (e.g. from a Capability Profile or
+        // Studio config). Skip inference entirely when present so the profile's
+        // envelope is honoured exactly.
+        if (Array.isArray(agentSelection.toolCategories) && agentSelection.toolCategories.length > 0) {
+            const explicit = new Set(agentSelection.toolCategories);
+            for (const c of ALWAYS_ON) explicit.add(c);
+            return [...explicit];
+        }
+
+        // Gather text signal sources
+        const signals = [];
+        signals.push(agentSelection.label || '');
+        signals.push(agentSelection.id || '');
+        signals.push(agentSelection.description || '');
+        if (agentSelection.promptPath) {
+            try {
+                const promptFile = path.join(PROJECT_ROOT, agentSelection.promptPath);
+                if (fs.existsSync(promptFile)) {
+                    // Read first 8KB only — enough to capture purpose statement
+                    const buf = fs.readFileSync(promptFile, 'utf-8');
+                    signals.push(buf.length > 8192 ? buf.slice(0, 8192) : buf);
+                }
+            } catch { /* non-critical */ }
+        }
+        const blob = signals.join(' ').toLowerCase();
+
+        // Keyword → category mapping. Multiple categories may match.
+        const KEYWORD_TO_CATEGORY = [
+            { cats: ['jira'], pat: /\b(jira|ticket|bug|defect|epic|sprint|backlog|story|task|story\s*points|fix\s*version|assignee|transition|comment)\b/ },
+            { cats: ['evidence'], pat: /\b(screenshot|evidence|attach|recording|video|frame|media|image)\b/ },
+            { cats: ['document'], pat: /\b(ppt|pptx|powerpoint|deck|pdf|docx|word|excel|xlsx|report|chart|diagram|infographic|markdown|html\s*report)\b/ },
+            { cats: ['framework'], pat: /\b(test|spec|playwright|sanity|smoke|automation|run\s*test|execute|failure|assertion|popup|exploration)\b/ },
+            { cats: ['grounding'], pat: /\b(grounding|knowledge|kb|confluence|page\s*objects|selector|feature\s*map|context|search.*project|search.*kb)\b/ },
+            { cats: ['testcase'], pat: /\b(test\s*case|test\s*scenario|excel\s*template|test\s*plan)\b/ },
+            { cats: ['docparse'], pat: /\b(parse\s*document|document\s*parse|extract\s*from\s*pdf|read\s*excel|excel\s*ingest)\b/ },
+        ];
+
+        const matched = new Set();
+        for (const { cats, pat } of KEYWORD_TO_CATEGORY) {
+            if (pat.test(blob)) cats.forEach(c => matched.add(c));
+        }
+        for (const c of ALWAYS_ON) matched.add(c);
+        return [...matched];
+    }
+
+    /**
+     * Build the native tool array for a workspace/custom agent restricted to the
+     * given category set. Pulls from each core agent's tool set, then filters by
+     * the broker's TOOL_CATEGORIES → category map. Keeps always-on essentials.
+     */
+    _buildCustomAgentTools(categories, toolOpts) {
+        try {
+            const { createCustomTools } = require('./custom-tools');
+            const { TOOL_CATEGORIES } = require('./tool-broker');
+            const allowedNames = new Set();
+            for (const cat of categories) {
+                const names = TOOL_CATEGORIES[cat];
+                if (Array.isArray(names)) names.forEach(n => allowedNames.add(n));
+            }
+            // Always-on essentials regardless of category match (small chat utilities)
+            const ESSENTIALS = [
+                'write_shared_context', 'read_shared_context', 'answer_question',
+                'write_agent_note', 'get_agent_notes', 'publish_image_to_chat',
+                'search_project_context', 'check_existing_coverage',
+            ];
+            ESSENTIALS.forEach(n => allowedNames.add(n));
+
+            // Pull tools from every core agent, then filter
+            const allAgentTools = [
+                ...createCustomTools(this.defineTool, 'scriptgenerator', toolOpts),
+                ...createCustomTools(this.defineTool, 'codereviewer', toolOpts),
+                ...createCustomTools(this.defineTool, 'testgenie', toolOpts),
+                ...createCustomTools(this.defineTool, 'buggenie', toolOpts),
+                ...createCustomTools(this.defineTool, 'taskgenie', toolOpts),
+                ...createCustomTools(this.defineTool, 'docgenie', toolOpts),
+            ];
+            const filtered = allAgentTools.filter(t => {
+                const name = t.name || t.definition?.name || '';
+                return name && allowedNames.has(name);
+            });
+            if (filtered.length === 0) {
+                // Defensive fallback: at least give the agent essentials so it isn't crippled
+                console.warn('[ChatManager] _buildCustomAgentTools produced 0 tools — returning unfiltered scriptgenerator set as fallback');
+                return [...createCustomTools(this.defineTool, 'scriptgenerator', toolOpts)];
+            }
+            return filtered;
+        } catch (err) {
+            console.warn(`[ChatManager] _buildCustomAgentTools failed: ${err.message}`);
+            return [];
+        }
+    }
+
+    /**
+     * Estimate how many tools the SDK will auto-attach from MCP servers for the
+     * given agent selection. Used by _buildChatTools to compute a safe local
+     * custom-tool budget that keeps the *combined* tools array under CAPI's
+     * hard 128-tool limit.
+     *
+     * Returns null when uncertain (caller falls back to a conservative reserve).
+     */
+    _estimateAttachedMcpToolCount(agentSelection) {
+        try {
+            const capabilities = this._getAgentCapabilities(agentSelection);
+            const toolProfile = this._getAgentToolProfile(agentSelection);
+            const explorationEnabled = process.env.MCP_EXPLORATION_ENABLED !== 'false';
+
+            let total = 0;
+            if (explorationEnabled && capabilities.browser === true) {
+                if (process.env.GLASS_MCP_ENABLED !== 'false') {
+                    total += 8; // Glass = 8-verb surface (open/see/do/read/wait/net/devtool/script)
+                } else {
+                    const AGENT_PROFILES = { scriptgenerator: 'intelligent', testgenie: 'intelligent', buggenie: 'intelligent', codereviewer: 'intelligent', taskgenie: 'intelligent' };
+                    // Capability-profile / agentSelection override wins so the
+                    // estimator matches what the MCP attach block will actually use.
+                    const mcpToolProfile = agentSelection?.mcpToolProfile
+                        || AGENT_PROFILES[toolProfile]
+                        || 'intelligent'; // custom/full agents → lean primitives surface
+                    // Approximate per-profile counts from mcp-server/config/tool-profiles.js.
+                    const PROFILE_COUNTS = { intelligent: 13, core: 76, advanced: 110, full: 141, 'explorer-nav': 35, 'explorer-interact': 25, dryrun: 15, deferred: 25 };
+                    total += PROFILE_COUNTS[mcpToolProfile] ?? 76;
+                }
+            }
+            if (capabilities.jira === true && process.env.JIRA_EMAIL && process.env.JIRA_API_TOKEN) {
+                total += 11; // ATLASSIAN_MCP_READONLY_TOOLS length
+            }
+            return total;
+        } catch {
+            return null;
         }
     }
 
@@ -1479,11 +1895,12 @@ class ChatSessionManager extends EventEmitter {
 
         Promise.resolve()
             .then(async () => {
+                const agentSelection = await this._refreshEntryAgentSelection(entry);
                 const { session, sessionContext } = await this._createRuntimeSession({
                     appSessionId: sessionId,
                     model: entry.model,
                     agentMode: entry.agentMode,
-                    agentSelection: entry.agentSelection,
+                    agentSelection,
                     existingContext: entry.sessionContext,
                 });
 
@@ -1733,6 +2150,28 @@ class ChatSessionManager extends EventEmitter {
         ].join('\n\n');
     }
 
+    _markRecoveryContextDelivered(entry) {
+        if (!entry) return;
+        entry.needsRecoveryContextInjection = false;
+        entry.recoveryContextRuntimeId = null;
+    }
+
+    _getAutoUserInputResolution(inputType = 'default', reason = 'auto') {
+        const normalizedType = String(inputType || 'default').toLowerCase();
+        if (normalizedType === 'credentials' || normalizedType === 'password') {
+            return { answer: 'skip', wasFreeform: true, auto: true, reason };
+        }
+        if (normalizedType === 'confirmation') {
+            return { answer: 'Cancel', wasFreeform: false, auto: true, reason };
+        }
+        return {
+            answer: 'Continue with the best approach based on available context.',
+            wasFreeform: true,
+            auto: true,
+            reason,
+        };
+    }
+
     _isRecoverableRuntimeError(error) {
         const message = String(error?.message || '').toLowerCase();
         return (
@@ -1766,7 +2205,14 @@ class ChatSessionManager extends EventEmitter {
             ...(existingContext && typeof existingContext === 'object' ? existingContext : {}),
             sessionId: appSessionId,
         };
-        const resolvedSelection = agentSelection || this._agentCatalog.getCoreAgentByMode(agentMode || null);
+        let resolvedSelection = agentSelection || this._agentCatalog.getCoreAgentByMode(agentMode || null);
+        // Apply capability profile (Studio-time template) BEFORE tool/MCP/prompt building.
+        // Non-destructive: agentSelection's explicit fields always win over profile defaults.
+        if (resolvedSelection?.capabilityProfile) {
+            const before = { hasCaps: !!resolvedSelection.capabilities, hasCats: Array.isArray(resolvedSelection.toolCategories) };
+            resolvedSelection = applyCapabilityProfile(resolvedSelection);
+            console.log(`[ChatManager] \uD83C\uDFAF Capability profile '${resolvedSelection._capabilityProfileResolved}' applied (overrides: caps=${!before.hasCaps}, cats=${!before.hasCats})`);
+        }
         const tools = this._buildChatTools(resolvedSelection, sessionContext);
         const systemPrompt = this._buildSystemPromptForSelection(resolvedSelection);
         const toolProfile = this._getAgentToolProfile(resolvedSelection);
@@ -1781,18 +2227,19 @@ class ChatSessionManager extends EventEmitter {
             tools,
             systemMessage: { content: systemPrompt },
             streaming: true,
-            onPermissionRequest: async () => ({ kind: 'approved' }),
+            onPermissionRequest: async () => approveAllPermissions(),
             onUserInputRequest: async (request) => {
                 const normalizedRequest = normalizeUserInputRequestPayload(request);
                 const { question, options, type: inputType, meta: requestMeta, usedFallbackQuestion, nestedPayloadDetected } = normalizedRequest;
+                const safeMeta = this._sanitizeUserInputRequestMeta(requestMeta);
                 if (usedFallbackQuestion || nestedPayloadDetected) {
                     console.warn('[ChatManager] onUserInputRequest received a malformed payload; normalized before broadcasting');
                 }
 
                 const sessionEntry = this._findEntryBySession(session);
                 if (!sessionEntry) {
-                    console.warn('[ChatManager] onUserInputRequest: could not locate session — auto-answering');
-                    return { answer: 'Continue with the best approach based on available context.' };
+                    console.warn('[ChatManager] onUserInputRequest: could not locate session — resolving fail-closed');
+                    return this._getAutoUserInputResolution(inputType, 'missing_session');
                 }
                 const { sid, entry } = sessionEntry;
 
@@ -1804,16 +2251,18 @@ class ChatSessionManager extends EventEmitter {
                         if (entry.pendingInputRequests.has(requestId)) {
                             console.log(`[ChatManager] ⏱️ User input timed out (${requestId}) — auto-resolving`);
                             entry.pendingInputRequests.delete(requestId);
+                            const timeoutResolution = this._getAutoUserInputResolution(inputType, 'timeout');
                             this._broadcastToSSE(sid, CHAT_EVENTS.USER_INPUT_COMPLETE, {
                                 requestId,
-                                answer: 'Continue with the best approach based on available context.',
+                                answer: timeoutResolution.answer,
                                 auto: true,
+                                reason: timeoutResolution.reason,
                             });
-                            resolve({ answer: 'Continue with the best approach based on available context.', wasFreeform: true });
+                            resolve(timeoutResolution);
                         }
                     }, USER_INPUT_TIMEOUT_MS);
 
-                    entry.pendingInputRequests.set(requestId, { resolve, question, options, timer, meta: requestMeta, type: inputType });
+                    entry.pendingInputRequests.set(requestId, { resolve, question, options, timer, meta: safeMeta, type: inputType });
 
                     entry.messages.push({
                         role: 'user_input_request',
@@ -1821,7 +2270,7 @@ class ChatSessionManager extends EventEmitter {
                         requestId,
                         options,
                         type: inputType,
-                        meta: requestMeta,
+                        meta: safeMeta,
                         timestamp: new Date().toISOString(),
                     });
 
@@ -1830,7 +2279,7 @@ class ChatSessionManager extends EventEmitter {
                         question,
                         options,
                         type: inputType,
-                        meta: requestMeta,
+                        meta: safeMeta,
                     });
 
                     this._persistHistory();
@@ -1861,10 +2310,38 @@ class ChatSessionManager extends EventEmitter {
             }
 
             if (needsBrowser) {
+                // Glass is the DEFAULT browser MCP (8-verb surface). Set GLASS_MCP_ENABLED=false
+                // to fall back to the legacy unified-automation server.
+                const glassEnabled = process.env.GLASS_MCP_ENABLED !== 'false';
+                const glassServerPath = path.join(__dirname, '..', '..', 'glass-mcp', 'src', 'server.js');
+                if (glassEnabled && fs.existsSync(glassServerPath)) {
+                    // Glass — lean standalone 8-verb browser MCP (migration target):
+                    // open/see/do/read/wait/net/devtool/script. Skips unified-automation
+                    // for this session to avoid double-loading the browser surface.
+                    mcpServers['glass'] = {
+                        type: 'local',
+                        command: 'node',
+                        args: [glassServerPath],
+                        tools: ['*'],
+                        env: { GLASS_HEADLESS: process.env.MCP_HEADLESS || 'true' },
+                    };
+                    console.log('[ChatManager] 🪟 Glass MCP enabled (8-verb surface) — unified-automation skipped for this session');
+                }
                 const mcpServerPath = path.join(__dirname, '..', 'mcp-server', 'server.js');
-                if (fs.existsSync(mcpServerPath)) {
-                    const AGENT_PROFILES = { scriptgenerator: 'core', testgenie: 'core', buggenie: 'core', codereviewer: 'core', taskgenie: 'core' };
-                    const mcpToolProfile = AGENT_PROFILES[toolProfile] || 'full';
+                if (!mcpServers['glass'] && fs.existsSync(mcpServerPath)) {
+                    const AGENT_PROFILES = { scriptgenerator: 'intelligent', testgenie: 'intelligent', buggenie: 'intelligent', codereviewer: 'intelligent', taskgenie: 'intelligent' };
+                    // Default to the lean primitives-first 'intelligent' surface
+                    // (~13 listed tools: act / observe / extract / crawl +
+                    // navigate / snapshot / screenshot / wait / get_page_url /
+                    // browser_close + tool_search + execute_exploration). Every
+                    // other low-level tool stays callable and is discoverable via
+                    // unified_tool_search, so this gives maximum CAPI 128-tool
+                    // headroom for merged custom tools while keeping full power.
+                    // Capability-profile override (e.g. browser-sanity → explorer-nav)
+                    // takes top priority when set on agentSelection.
+                    const mcpToolProfile = agentSelection?.mcpToolProfile
+                        || AGENT_PROFILES[toolProfile]
+                        || 'intelligent';
                     mcpServers['unified-automation'] = {
                         type: 'local',
                         command: 'node',
@@ -1891,9 +2368,16 @@ class ChatSessionManager extends EventEmitter {
                         type: 'http',
                         url: 'https://mcp.atlassian.com/v1/sse',
                         headers: { authorization: `Basic ${basicAuth}` },
-                        tools: ['*'],
+                        // ⚠️ APPROVAL GUARDRAIL: Read-only Atlassian MCP tools only.
+                        // All Jira/Confluence writes (create/edit/delete issues, comments,
+                        // transitions, page writes) MUST route through gated SDK custom
+                        // tools that call requireJiraMutationApproval(). Exposing the
+                        // Atlassian MCP write tools (e.g. addCommentToJiraIssue,
+                        // editJiraIssue, transitionJiraIssue) would bypass the global
+                        // approval prompt and is intentionally blocked here.
+                        tools: ATLASSIAN_MCP_READONLY_TOOLS,
                     };
-                    console.log(`[ChatManager] 🔗 Atlassian MCP enabled for ${resolvedSelection?.id || agentMode || 'default'} (JIRA_EMAIL + JIRA_API_TOKEN)`);
+                    console.log(`[ChatManager] 🔗 Atlassian MCP enabled for ${resolvedSelection?.id || agentMode || 'default'} (read-only allowlist; writes route through gated SDK tools)`);
                 } else {
                     console.warn(`[ChatManager] ⚠️ Atlassian MCP NOT configured for ${resolvedSelection?.id || agentMode || 'default'} — JIRA_EMAIL or JIRA_API_TOKEN missing. Agent will rely on fetch_jira_ticket / create_jira_ticket custom tools (REST API fallback).`);
                 }
@@ -1964,11 +2448,12 @@ class ChatSessionManager extends EventEmitter {
             entry.session = null;
             entry.runtimeSessionId = null;
 
+            const agentSelection = await this._refreshEntryAgentSelection(entry);
             const { session, sessionContext } = await this._createRuntimeSession({
                 appSessionId: sessionId,
                 model: entry.model,
                 agentMode: entry.agentMode,
-                agentSelection: entry.agentSelection,
+                agentSelection,
                 existingContext: entry.sessionContext,
             });
 
@@ -1978,6 +2463,8 @@ class ChatSessionManager extends EventEmitter {
             entry.runtimeState = SESSION_RUNTIME_STATES.ACTIVE;
             entry.recoveredFromRuntimeFailure = true;
             entry.recoveryCount = (entry.recoveryCount || 0) + 1;
+            entry.needsRecoveryContextInjection = true;
+            entry.recoveryContextRuntimeId = session.sessionId;
             entry.lastRecoveredAt = new Date().toISOString();
             this._setExecutionState(entry, SESSION_EXECUTION_STATES.IDLE, {
                 activeToolCount: 0,
@@ -2037,8 +2524,10 @@ class ChatSessionManager extends EventEmitter {
                 // Skip double-injection if sendMessage() already prepended recovery context
                 const recoveredOptions = messageOptions._hasRecoveryContext
                     ? messageOptions
-                    : { ...messageOptions, prompt: this._buildRecoveredPrompt(entry, messageOptions.prompt) };
-                return sendCurrentRuntime(recoveredOptions);
+                    : { ...messageOptions, prompt: this._buildRecoveredPrompt(entry, messageOptions.prompt), _hasRecoveryContext: true };
+                const result = await sendCurrentRuntime(recoveredOptions);
+                if (recoveredOptions._hasRecoveryContext) this._markRecoveryContextDelivered(entry);
+                return result;
             }
 
             if (allowRecovery && !entry.archived && this._isModelBadRequestError(error)) {
@@ -2055,8 +2544,10 @@ class ChatSessionManager extends EventEmitter {
                         // Skip double-injection if sendMessage() already prepended recovery context
                         const recoveredOptions = messageOptions._hasRecoveryContext
                             ? messageOptions
-                            : { ...messageOptions, prompt: this._buildRecoveredPrompt(entry, messageOptions.prompt) };
-                        return sendCurrentRuntime(recoveredOptions);
+                            : { ...messageOptions, prompt: this._buildRecoveredPrompt(entry, messageOptions.prompt), _hasRecoveryContext: true };
+                        const result = await sendCurrentRuntime(recoveredOptions);
+                        if (recoveredOptions._hasRecoveryContext) this._markRecoveryContextDelivered(entry);
+                        return result;
                     } catch (fallbackError) {
                         entry.model = previousModel;
                         throw fallbackError;
@@ -2174,6 +2665,8 @@ class ChatSessionManager extends EventEmitter {
             lastError: null,
             recoveryCount: 0,
             recoveredFromRuntimeFailure: false,
+            needsRecoveryContextInjection: false,
+            recoveryContextRuntimeId: null,
             pendingInputRequests: new Map(),  // requestId → { resolve, question, options, timer }
             sessionAttachments: [],
             videoContext: [],
@@ -2410,19 +2903,120 @@ class ChatSessionManager extends EventEmitter {
         const entry = this._sessions.get(sessionId);
         if (!entry) return;
 
+        // Coalesce high-frequency per-token DELTA/REASONING events into ~50ms
+        // batches (see SSE_DELTA_COALESCE_MS). Forwarding each token as its own SSE
+        // frame floods the browser EventSource parser and starves the renderer
+        // (Chrome STATUS_BREAKPOINT). Accumulation is transparent to the client,
+        // which simply concatenates deltaContent.
+        if (type === CHAT_EVENTS.DELTA || type === CHAT_EVENTS.REASONING) {
+            this._enqueueCoalescedDelta(entry, sessionId, type, data);
+            return;
+        }
+
+        // Any non-delta event must flush pending deltas first so ordering is
+        // preserved (e.g. the final MESSAGE arrives after all its DELTAs).
+        this._flushCoalescedDeltas(sessionId);
+        this._rawBroadcastToSSE(sessionId, type, data);
+    }
+
+    /**
+     * Accumulate a per-token DELTA/REASONING event for coalesced delivery.
+     * @private
+     */
+    _enqueueCoalescedDelta(entry, sessionId, type, data) {
+        if (!entry._sseCoalesce) {
+            entry._sseCoalesce = {
+                timer: null,
+                delta: { content: '', messageId: '' },
+                reasoning: { content: '', reasoningId: '' },
+            };
+        }
+        const buf = entry._sseCoalesce;
+        const deltaContent = data?.deltaContent || '';
+        if (type === CHAT_EVENTS.DELTA) {
+            buf.delta.content += deltaContent;
+            if (data?.messageId) buf.delta.messageId = data.messageId;
+        } else {
+            buf.reasoning.content += deltaContent;
+            if (data?.reasoningId) buf.reasoning.reasoningId = data.reasoningId;
+        }
+        if (!buf.timer) {
+            buf.timer = setTimeout(() => this._flushCoalescedDeltas(sessionId), SSE_DELTA_COALESCE_MS);
+        }
+    }
+
+    /**
+     * Flush any accumulated DELTA/REASONING content as single coalesced frames.
+     * Safe to call repeatedly and when nothing is buffered. Reasoning and content
+     * target separate client buffers, so their relative order is irrelevant; order
+     * WITHIN each type is preserved by concatenation.
+     * @private
+     */
+    _flushCoalescedDeltas(sessionId) {
+        const entry = this._sessions.get(sessionId);
+        if (!entry || !entry._sseCoalesce) return;
+        const buf = entry._sseCoalesce;
+        if (buf.timer) {
+            clearTimeout(buf.timer);
+            buf.timer = null;
+        }
+        if (buf.reasoning.content) {
+            const { content, reasoningId } = buf.reasoning;
+            buf.reasoning = { content: '', reasoningId: '' };
+            this._rawBroadcastToSSE(sessionId, CHAT_EVENTS.REASONING, { deltaContent: content, reasoningId });
+        }
+        if (buf.delta.content) {
+            const { content, messageId } = buf.delta;
+            buf.delta = { content: '', messageId: '' };
+            this._rawBroadcastToSSE(sessionId, CHAT_EVENTS.DELTA, { deltaContent: content, messageId });
+        }
+    }
+
+    /**
+     * Write an event to all SSE clients of a session (no coalescing). Strips
+     * inline base64 from attachments on the live path.
+     * @private
+     */
+    _rawBroadcastToSSE(sessionId, type, data) {
+        const entry = this._sessions.get(sessionId);
+        if (!entry) return;
+
+        // Never put inline base64 on the LIVE SSE path. Any attachment carrying
+        // inline bytes is migrated to the on-disk store and replaced with a URL
+        // reference so multi-MB frames can't flood (and crash) the renderer.
+        let outData = data;
+        if (type === CHAT_EVENTS.USER_INPUT_REQUEST) {
+            outData = this._sanitizeUserInputRequestData(data);
+        }
+        if ((type === CHAT_EVENTS.MESSAGE || type === CHAT_EVENTS.TOOL_COMPLETE)
+            && data && Array.isArray(data.attachments) && data.attachments.length > 0) {
+            outData = {
+                ...data,
+                attachments: data.attachments.map(att => this._toClientAttachment(sessionId, att)),
+            };
+        }
+
         const event = {
             type,
             sessionId,
             timestamp: new Date().toISOString(),
-            data,
+            data: outData,
         };
+
+        let eventJson = JSON.stringify(event);
+        if (Buffer.byteLength(eventJson, 'utf8') > MAX_SSE_EVENT_BYTES) {
+            console.warn(`[ChatManager] Oversized SSE event stripped before send: type=${type}, bytes=${Buffer.byteLength(eventJson, 'utf8')}`);
+            event.data = ChatSessionManager._stripOversizePayloads(outData);
+            event.data.payloadStrippedForSse = true;
+            eventJson = JSON.stringify(event);
+        }
 
         // Emit to EventEmitter listeners
         this.emit('event', event);
         this.emit(`event:${sessionId}`, event);
 
         // Write to SSE response objects
-        const ssePayload = `event: ${type}\ndata: ${JSON.stringify(event)}\n\n`;
+        const ssePayload = `event: ${type}\ndata: ${eventJson}\n\n`;
         for (const client of entry.sseClients) {
             try {
                 client.write(ssePayload);
@@ -2491,10 +3085,295 @@ class ChatSessionManager extends EventEmitter {
         }
     }
 
+    // ─── Inline Attachment Store (on-disk, served on demand) ─────────────────
+    // Assistant images are persisted to disk and referenced by URL in the
+    // transcript instead of being inlined as base64 in history/SSE/persisted
+    // JSON. The browser fetches each image via <img src=url>, so bytes are
+    // decoded off the JS heap and garbage-collected when unmounted. This is the
+    // root-cause fix for the Chrome STATUS_BREAKPOINT renderer crash that
+    // recurred whenever many screenshots accumulated in one long-lived session.
+
+    /** Strict ID/path-segment validation to prevent traversal on the public endpoint. */
+    static _ATTACHMENT_ID_RE = /^[a-zA-Z0-9_-]+$/;
+
+    /** Lazy-loaded optional `sharp` image engine: undefined = untried, null = unavailable. */
+    static _sharpModule = undefined;
+
+    /** Absolute directory holding a session's stored attachment files. */
+    _sessionAttachmentDir(sessionId) {
+        return path.join(this._attachmentStoreDir, String(sessionId));
+    }
+
+    /** Public URL the browser uses to fetch a stored attachment on demand. */
+    _attachmentUrl(sessionId, attachmentId) {
+        return `/api/chat/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`;
+    }
+
+    /**
+     * Persist raw image bytes to the per-session store and return a lightweight
+     * reference (no inline base64). Enforces the per-session byte budget.
+     * @returns {Object} attachment reference { id, name, type, size, kind, url, alt? }
+     */
+    _storeAttachmentBytes(sessionId, buffer, options = {}) {
+        const mimeType = options.mimeType || 'image/png';
+        const ext = ChatSessionManager._IMAGE_EXTENSIONS[mimeType]
+            || ChatSessionManager._DOC_EXTENSIONS[mimeType]
+            || '.bin';
+        const attId = `att_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+        const dir = this._sessionAttachmentDir(sessionId);
+        fs.mkdirSync(dir, { recursive: true });
+        const filePath = path.join(dir, `${attId}${ext}`);
+        fs.writeFileSync(filePath, buffer);
+        this._enforceSessionAttachmentBudget(sessionId);
+
+        const ref = {
+            id: attId,
+            name: options.name || `${attId}${ext}`,
+            type: mimeType,
+            size: buffer.length,
+            kind: options.kind || 'image',
+            url: this._attachmentUrl(sessionId, attId),
+        };
+        const alt = String(options.alt || '').trim();
+        if (alt) ref.alt = alt;
+        return ref;
+    }
+
+    /** Persist an existing on-disk file into the store and return a reference. */
+    _storeAttachmentFromFile(sessionId, filePath, options = {}) {
+        const buffer = fs.readFileSync(filePath);
+        return this._storeAttachmentBytes(sessionId, buffer, {
+            mimeType: options.mimeType,
+            name: options.name || path.basename(filePath),
+            kind: options.kind || 'image',
+            alt: options.alt,
+        });
+    }
+
+    /**
+     * Evict oldest stored files (by mtime) once a session's store exceeds the
+     * byte budget. Bytes are recreatable only while the source exists; an evicted
+     * URL simply 404s and the UI shows a lightweight placeholder.
+     */
+    _enforceSessionAttachmentBudget(sessionId) {
+        const dir = this._sessionAttachmentDir(sessionId);
+        let entries;
+        try {
+            entries = fs.readdirSync(dir).map((name) => {
+                const full = path.join(dir, name);
+                const stat = fs.statSync(full);
+                return { full, size: stat.size, mtime: stat.mtimeMs, isFile: stat.isFile() };
+            }).filter((e) => e.isFile); // skip the thumbs/ subdir — only originals count toward the budget
+        } catch {
+            return;
+        }
+        let total = entries.reduce((sum, e) => sum + e.size, 0);
+        if (total <= MAX_SESSION_ATTACHMENT_STORE_BYTES) return;
+        entries.sort((a, b) => a.mtime - b.mtime); // oldest first
+        for (const e of entries) {
+            if (total <= MAX_SESSION_ATTACHMENT_STORE_BYTES) break;
+            try {
+                fs.unlinkSync(e.full);
+                total -= e.size;
+            } catch { /* best-effort */ }
+        }
+    }
+
+    /**
+     * Resolve a stored attachment for the public endpoint. Filesystem-only (works
+     * even when the session isn't loaded in memory). Path-traversal safe.
+     * @returns {{ path: string, mimeType: string, size: number } | null}
+     */
+    getStoredAttachment(sessionId, attachmentId) {
+        if (!ChatSessionManager._ATTACHMENT_ID_RE.test(String(sessionId || ''))) return null;
+        if (!ChatSessionManager._ATTACHMENT_ID_RE.test(String(attachmentId || ''))) return null;
+        const dir = this._sessionAttachmentDir(sessionId);
+        let files;
+        try {
+            files = fs.readdirSync(dir);
+        } catch {
+            return null;
+        }
+        const match = files.find(f => f === attachmentId || f.startsWith(`${attachmentId}.`));
+        if (!match) return null;
+
+        let real;
+        let rootReal;
+        try {
+            real = fs.realpathSync(path.join(dir, match));
+            rootReal = fs.realpathSync(this._attachmentStoreDir);
+        } catch {
+            return null;
+        }
+        if (real !== rootReal && !real.startsWith(rootReal + path.sep)) return null;
+
+        const ext = path.extname(real).toLowerCase();
+        const mimeType = ChatSessionManager._IMAGE_MIME_BY_EXT[ext]
+            || ChatSessionManager._DOC_MIME_BY_EXT[ext]
+            || 'application/octet-stream';
+        let size = 0;
+        try { size = fs.statSync(real).size; } catch { /* ignore */ }
+        return { path: real, mimeType, size };
+    }
+
+    /**
+     * Lazily load the optional `sharp` image engine. Cached across calls. Returns
+     * the module, or null when it is not installed — the server stays fully
+     * functional without it (thumbnails simply fall back to full-resolution).
+     */
+    static _loadSharp() {
+        if (ChatSessionManager._sharpModule !== undefined) return ChatSessionManager._sharpModule;
+        try {
+            // eslint-disable-next-line global-require
+            ChatSessionManager._sharpModule = require('sharp');
+        } catch {
+            ChatSessionManager._sharpModule = null;
+            console.warn('[ChatManager] Optional dependency "sharp" not installed — serving full-resolution images (no thumbnails). Renderer memory is still bounded by the client-side render-window cap + memory guard.');
+        }
+        return ChatSessionManager._sharpModule;
+    }
+
+    /**
+     * Resolve a downscaled thumbnail of a stored image, generating + disk-caching
+     * it on first request. Chat tiles render at ~240px but the browser decodes the
+     * FULL-resolution bitmap (width*height*4 bytes); across many screenshots in one
+     * session that decoded-bitmap pool dominates renderer memory and triggers the
+     * Chrome STATUS_BREAKPOINT crash. A small thumbnail keeps the decoded pool tiny.
+     * Gracefully falls back to the original bytes for animated GIFs, unsupported
+     * formats, oversized inputs, or when `sharp` is unavailable.
+     * @returns {Promise<{ path: string, mimeType: string, size: number } | null>}
+     */
+    async getStoredAttachmentThumbnail(sessionId, attachmentId, width) {
+        const original = this.getStoredAttachment(sessionId, attachmentId);
+        if (!original) return null;
+
+        // Only raster still-images benefit. Animated GIFs and non-images pass through.
+        if (!/^image\//.test(original.mimeType) || original.mimeType === 'image/gif') {
+            return original;
+        }
+        const w = Math.max(64, Math.min(1024, Math.floor(Number(width) || 0)));
+        if (!w) return original;
+
+        const sharp = ChatSessionManager._loadSharp();
+        if (!sharp) return original; // graceful degradation — no resize engine present
+
+        const thumbsDir = path.join(this._sessionAttachmentDir(sessionId), 'thumbs');
+        const ext = path.extname(original.path).toLowerCase() || '.png';
+        const thumbPath = path.join(thumbsDir, `${attachmentId}.${w}${ext}`);
+
+        // Serve a cached thumbnail when it exists and is at least as new as the source.
+        try {
+            const ts = fs.statSync(thumbPath);
+            const os = fs.statSync(original.path);
+            if (ts.size > 0 && ts.mtimeMs >= os.mtimeMs) {
+                return { path: thumbPath, mimeType: original.mimeType, size: ts.size };
+            }
+        } catch { /* not generated yet */ }
+
+        try {
+            fs.mkdirSync(thumbsDir, { recursive: true });
+            const input = fs.readFileSync(original.path);
+            let pipeline = sharp(input, { failOn: 'none', limitInputPixels: 268402689 })
+                .rotate()
+                .resize({ width: w, withoutEnlargement: true });
+            if (ext === '.png') pipeline = pipeline.png({ compressionLevel: 8 });
+            else if (ext === '.jpg' || ext === '.jpeg') pipeline = pipeline.jpeg({ quality: 72 });
+            else if (ext === '.webp') pipeline = pipeline.webp({ quality: 72 });
+            const out = await pipeline.toBuffer();
+            // Only adopt the thumbnail when it is actually smaller than the source.
+            if (out.length > 0 && out.length < original.size) {
+                fs.writeFileSync(thumbPath, out);
+                return { path: thumbPath, mimeType: original.mimeType, size: out.length };
+            }
+        } catch {
+            // fall through to the original on any decode/encode failure
+        }
+        return original;
+    }
+
+    /** Recursively remove a session's attachment store directory. */
+    _cleanupSessionAttachmentStore(sessionId) {
+        const dir = this._sessionAttachmentDir(sessionId);
+        try {
+            if (fs.existsSync(dir)) {
+                fs.rmSync(dir, { recursive: true, force: true });
+            }
+        } catch { /* non-critical */ }
+    }
+
+    /**
+     * Convert an attachment to an outbound (SSE/history) form with NO inline
+     * base64. References (url) and non-inline descriptors (artifact path / doc /
+     * video) pass through unchanged (minus any stray inline bytes). Inline base64
+     * is migrated into the on-disk store and replaced with a URL reference. On any
+     * failure the inline bytes are dropped and an `evicted` placeholder returned —
+     * never propagate base64 to the browser.
+     */
+    _toClientAttachment(sessionId, att) {
+        if (!att || typeof att !== 'object') return att;
+
+        // Already lightweight (url reference) or a non-inline descriptor
+        // (artifact has path/relativePath; doc/video carry their own fields).
+        if (att.url || att.relativePath || att.path) {
+            if (att.dataUrl || att.data || att.base64) {
+                const { dataUrl, data, base64, ...rest } = att;
+                return rest;
+            }
+            return att;
+        }
+
+        const hasInline = !!(att.dataUrl || att.data || att.base64);
+        if (!hasInline) return att;
+
+        try {
+            let mimeType = att.type || att.media_type;
+            let b64 = att.base64 || att.data;
+            if (!b64 && typeof att.dataUrl === 'string') {
+                const m = att.dataUrl.match(/^data:([^;]+);base64,(.*)$/s);
+                if (m) {
+                    mimeType = mimeType || m[1];
+                    b64 = m[2];
+                }
+            }
+            if (!b64) {
+                const { dataUrl, data, base64, ...rest } = att;
+                return { ...rest, kind: rest.kind || 'image', evicted: true };
+            }
+            const buffer = Buffer.from(b64, 'base64');
+            return this._storeAttachmentBytes(sessionId, buffer, {
+                mimeType: mimeType || 'image/png',
+                name: att.name,
+                kind: att.kind || 'image',
+                alt: att.alt,
+            });
+        } catch {
+            const { dataUrl, data, base64, ...rest } = att;
+            return { ...rest, kind: rest.kind || 'image', evicted: true };
+        }
+    }
+
+    /**
+     * Strip inline base64 from an attachment before it is persisted to disk, but
+     * ONLY when a durable reference already exists (url/path/relativePath). Legacy
+     * inline-only attachments are left intact so they are not lost; they migrate to
+     * the store lazily the next time the session is opened (getHistory).
+     */
+    _stripPersistedAttachment(att) {
+        if (!att || typeof att !== 'object') return att;
+        const hasInline = !!(att.dataUrl || att.data || att.base64);
+        if (!hasInline) return att;
+        if (att.url || att.relativePath || att.path) {
+            const { dataUrl, data, base64, ...rest } = att;
+            return rest;
+        }
+        return att;
+    }
+
     /**
      * Publish a local image file into the chat transcript as an assistant message.
-     * The frontend already knows how to render message.attachments when provided
-     * with a data URL, so this bridges tool-generated screenshots back to chat.
+     * The image bytes are persisted to the on-disk attachment store and referenced
+     * by URL (NOT inlined as base64) so the renderer fetches them on demand and
+     * never accumulates the full set in heap.
      *
      * @param {string} sessionId
      * @param {Object} options
@@ -2522,16 +3401,14 @@ class ChatSessionManager extends EventEmitter {
             throw new Error(`Image exceeds ${Math.round(MAX_ASSISTANT_IMAGE_BYTES / (1024 * 1024))} MB limit for inline chat display.`);
         }
 
-        const buffer = fs.readFileSync(filePath);
-        const attachment = {
-            id: `assistant_img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        // Persist bytes to the on-disk store and reference by URL — no base64 in
+        // the transcript, SSE frame, or persisted history (renderer-heap safe).
+        const attachment = this._storeAttachmentFromFile(sessionId, filePath, {
+            mimeType,
             name: path.basename(filePath),
-            type: mimeType,
-            size: stat.size,
             kind: 'image',
             alt: String(options.altText || '').trim() || path.basename(filePath),
-            dataUrl: `data:${mimeType};base64,${buffer.toString('base64')}`,
-        };
+        });
 
         const message = {
             role: 'assistant',
@@ -3233,13 +4110,15 @@ class ChatSessionManager extends EventEmitter {
         const promptQuestion = normalizedRequest.question;
         const promptOptions = normalizedRequest.options;
         const inputType = normalizedRequest.type;
+        const safeMeta = this._sanitizeUserInputRequestMeta(meta);
 
-        // Find the best target session: prefer the most recent non-archived session with SSE clients
+        // Find the best target session. Prefer the explicit session, even when
+        // its SSE client is reconnecting, so approval prompts can replay later.
         let targetSid = null;
         let targetEntry = null;
         if (preferredSessionId) {
             const preferredEntry = this._sessions.get(preferredSessionId);
-            if (preferredEntry && !preferredEntry.archived && preferredEntry.sseClients.length > 0) {
+            if (preferredEntry && !preferredEntry.archived) {
                 targetSid = preferredSessionId;
                 targetEntry = preferredEntry;
             }
@@ -3254,33 +4133,44 @@ class ChatSessionManager extends EventEmitter {
             }
         }
         if (!targetSid || !targetEntry) {
-            console.warn('[ChatManager] requestUserInput: no active session with SSE clients — auto-answering');
-            return Promise.resolve({
-                answer: inputType === 'credentials' ? 'skip' : 'Continue with the best approach based on available context.',
-                wasFreeform: true,
-            });
+            for (const [sid, entry] of this._sessions) {
+                if (!entry.archived) {
+                    targetSid = sid;
+                    targetEntry = entry;
+                }
+            }
+        }
+        if (!targetSid || !targetEntry) {
+            console.warn('[ChatManager] requestUserInput: no active session available — resolving fail-closed');
+            return Promise.resolve(this._getAutoUserInputResolution(inputType, 'missing_session'));
         }
 
         const requestId = `uir_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        console.log(`[ChatManager] 💬 Programmatic user input requested (${requestId}, type=${inputType}): ${promptQuestion.slice(0, 120)}`);
+        const sseClientCount = targetEntry.sseClients?.length || 0;
+        console.log(`[ChatManager] 💬 Programmatic user input requested (${requestId}, type=${inputType}, session=${targetSid}, sseClients=${sseClientCount}): ${promptQuestion.slice(0, 120)}`);
+        if (sseClientCount === 0) {
+            console.warn(`[ChatManager] requestUserInput: session ${targetSid} has no SSE clients; prompt will replay on reconnect`);
+        }
 
         return new Promise((resolve) => {
+            const timeoutMs = (inputType === 'delegated_agent_input' || safeMeta.source)
+                ? Math.max(USER_INPUT_TIMEOUT_MS, DELEGATED_USER_INPUT_TIMEOUT_MS)
+                : USER_INPUT_TIMEOUT_MS;
             // Auto-resolve timer — prevents hanging forever
             const timer = setTimeout(() => {
                 if (targetEntry.pendingInputRequests.has(requestId)) {
                     console.log(`[ChatManager] ⏱️ Programmatic user input timed out (${requestId}) — auto-resolving`);
                     targetEntry.pendingInputRequests.delete(requestId);
+                    const timeoutResolution = this._getAutoUserInputResolution(inputType, 'timeout');
                     this._broadcastToSSE(targetSid, CHAT_EVENTS.USER_INPUT_COMPLETE, {
                         requestId,
-                        answer: inputType === 'credentials' ? 'skip' : 'Continue with the best approach based on available context.',
+                        answer: timeoutResolution.answer,
                         auto: true,
+                        reason: timeoutResolution.reason,
                     });
-                    resolve({
-                        answer: inputType === 'credentials' ? 'skip' : 'Continue with the best approach based on available context.',
-                        wasFreeform: true,
-                    });
+                    resolve(timeoutResolution);
                 }
-            }, USER_INPUT_TIMEOUT_MS);
+            }, timeoutMs);
 
             // Store the pending request (include meta for credential awareness in resolveUserInput)
             targetEntry.pendingInputRequests.set(requestId, {
@@ -3288,7 +4178,7 @@ class ChatSessionManager extends EventEmitter {
                 question: promptQuestion,
                 options: promptOptions,
                 timer,
-                meta,
+                meta: safeMeta,
                 type: inputType,
             });
 
@@ -3299,7 +4189,7 @@ class ChatSessionManager extends EventEmitter {
                 requestId,
                 options: promptOptions,
                 type: inputType,
-                meta,
+                meta: safeMeta,
                 timestamp: new Date().toISOString(),
             });
 
@@ -3309,7 +4199,7 @@ class ChatSessionManager extends EventEmitter {
                 question: promptQuestion,
                 options: promptOptions,
                 type: inputType,
-                meta,
+                meta: safeMeta,
             });
 
             this._persistHistory();
@@ -3381,15 +4271,42 @@ class ChatSessionManager extends EventEmitter {
 
         for (const [requestId, pending] of entry.pendingInputRequests) {
             if (pending.timer) clearTimeout(pending.timer);
+            const resolution = this._getAutoUserInputResolution(pending.type || pending.meta?.type || 'default', 'abort_or_destroy');
             this._broadcastToSSE(sessionId, CHAT_EVENTS.USER_INPUT_COMPLETE, {
                 requestId,
-                answer: 'Continue with the best approach based on available context.',
+                answer: resolution.answer,
                 auto: true,
+                reason: resolution.reason,
             });
-            pending.resolve({ answer: 'Continue with the best approach based on available context.', wasFreeform: true });
+            pending.resolve(resolution);
             console.log(`[ChatManager] ⏩ Auto-resolved pending input (${requestId}) due to abort/destroy`);
         }
         entry.pendingInputRequests.clear();
+    }
+
+    _tryResolvePendingInputFromChatText(sessionId, entry, content, attachments) {
+        if (!entry?.pendingInputRequests || entry.pendingInputRequests.size === 0) return { resolved: false };
+        if (!isNonEmptyString(content)) return { resolved: false };
+        if (Array.isArray(attachments) && attachments.length > 0) return { resolved: false };
+
+        const pendingEntries = Array.from(entry.pendingInputRequests.entries());
+        // Prefer the newest non-credential request. Credentials/password prompts
+        // must use the dedicated secure UI, never freeform chat text.
+        for (let idx = pendingEntries.length - 1; idx >= 0; idx--) {
+            const [requestId, pending] = pendingEntries[idx];
+            const pendingType = pending.meta?.type || pending.type || 'default';
+            if (pendingType === 'credentials' || pendingType === 'password') continue;
+            try {
+                this.resolveUserInput(sessionId, requestId, content.trim());
+                console.log(`[ChatManager] ↩️ Routed typed chat message to pending user input (${requestId}) instead of TPM send`);
+                return { resolved: true, requestId };
+            } catch (err) {
+                console.warn(`[ChatManager] ⚠️ Could not route typed answer to pending input ${requestId}: ${err.message}`);
+                return { resolved: false };
+            }
+        }
+
+        return { resolved: false };
     }
 
     /**
@@ -3413,6 +4330,16 @@ class ChatSessionManager extends EventEmitter {
                 409,
                 { runtimeState: SESSION_RUNTIME_STATES.ARCHIVED, recoverable: false }
             );
+        }
+
+        // If an approval/question tray is pending, a typed message like "approved",
+        // "cancel", "put NA", or a URL is usually the user's answer to THAT tray,
+        // not a new TPM prompt. Route it directly to the pending request so the
+        // delegated specialist keeps ownership instead of timing out and letting
+        // TPM start a fresh generic flow.
+        const pendingInputResolution = this._tryResolvePendingInputFromChatText(sessionId, entry, content, attachments);
+        if (pendingInputResolution?.resolved) {
+            return { messageId: `user_input_response_${pendingInputResolution.requestId}`, resolvedInput: true };
         }
 
         const normalizedModelOverride = isNonEmptyString(modelOverride) ? modelOverride.trim() : '';
@@ -3440,6 +4367,9 @@ class ChatSessionManager extends EventEmitter {
         }
 
         this._touchSession(entry);
+        // Capture the latest user message so delegated specialists can run on the
+        // user's ORIGINAL message (direct-session parity), not a reconstructed task.
+        try { this._latestUserMessage.set(sessionId, content); } catch { /* ignore */ }
         const atlassianUrlContext = extractAtlassianUrlContext(content);
         const userMessageTimestamp = new Date().toISOString();
         const userMessageId = `user_msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -3470,6 +4400,30 @@ class ChatSessionManager extends EventEmitter {
                 filename: att.filename || undefined,
                 size: Number.isFinite(att.size) ? att.size : (att.data ? Math.ceil(att.data.length * 0.75) : 0), // estimated decoded size
             }));
+
+            // Persist uploaded images to the on-disk attachment store and attach
+            // lightweight URL references to the history message. This lets the
+            // browser render user images on reload (served on demand) WITHOUT ever
+            // inlining base64 into history/SSE — the renderer-heap-safe path used
+            // for assistant images too.
+            const userAttachmentRefs = [];
+            for (const att of attachments) {
+                if (att.type === 'image' && isNonEmptyString(att.data)) {
+                    try {
+                        const buffer = Buffer.from(att.data, 'base64');
+                        userAttachmentRefs.push(this._storeAttachmentBytes(sessionId, buffer, {
+                            mimeType: att.media_type,
+                            name: att.filename,
+                            kind: 'image',
+                        }));
+                    } catch (err) {
+                        console.warn(`[ChatManager] Failed to store user image attachment: ${err.message}`);
+                    }
+                }
+            }
+            if (userAttachmentRefs.length > 0) {
+                historyMessage.attachments = userAttachmentRefs;
+            }
 
             // Persist attachment data in session for Jira ticket attachment forwarding
             // BugGenie may need these later when the user approves bug ticket creation
@@ -3523,8 +4477,25 @@ class ChatSessionManager extends EventEmitter {
                 }
             }
             // Cap retained attachments per session to prevent memory bloat while keeping recent uploads reusable.
-            if (entry.sessionAttachments.length > 30) {
-                entry.sessionAttachments = entry.sessionAttachments.slice(-30);
+            if (entry.sessionAttachments.length > MAX_PERSISTED_SESSION_ATTACHMENTS) {
+                entry.sessionAttachments = entry.sessionAttachments.slice(-MAX_PERSISTED_SESSION_ATTACHMENTS);
+            }
+            // Byte-budget eviction (defense-in-depth): the count cap alone can still
+            // retain hundreds of MB of inline screenshot base64 across a long session,
+            // which bloats server heap and SSE frames (Chrome STATUS_BREAKPOINT). Walk
+            // newest → oldest and drop the inline `data` of the oldest images once the
+            // running total exceeds the budget; the descriptor is kept so metadata
+            // remains available, only the heavy base64 is released.
+            let retainedBytes = 0;
+            for (let i = entry.sessionAttachments.length - 1; i >= 0; i--) {
+                const sa = entry.sessionAttachments[i];
+                if (!sa || sa.type !== 'image' || typeof sa.data !== 'string') continue;
+                if (retainedBytes + sa.data.length > MAX_PERSISTED_SESSION_ATTACHMENT_BYTES) {
+                    sa.data = undefined;
+                    sa.evicted = true;
+                } else {
+                    retainedBytes += sa.data.length;
+                }
             }
         }
         entry.messages.push(historyMessage);
@@ -3664,6 +4635,37 @@ class ChatSessionManager extends EventEmitter {
             promptContent = `${buildAtlassianRoutingHint(atlassianUrlContext)}\n\n${promptContent}`;
         }
 
+        // ── Workspace-agent dynamic delegation hint ──
+        // For workspace/custom agents (which run with an intent-narrowed native tool
+        // set), scan the user message for cross-domain signals and nudge the agent
+        // toward Tool Broker discovery + delegation. The agent already knows about
+        // the broker from its system prompt; this is a per-turn breadcrumb so it
+        // doesn't have to "remember" to use it.
+        try {
+            if (entry.agentSelection?.source === 'workspace' && this._toolBroker?.enabled) {
+                const hint = this._buildWorkspaceDelegationHint(content);
+                if (hint) {
+                    promptContent = `${hint}\n\n${promptContent}`;
+                }
+            }
+        } catch (err) {
+            console.warn(`[ChatManager] ⚠️ Workspace delegation hint failed (non-blocking): ${err.message}`);
+        }
+
+        // ── Master-agent semantic intent routing hint (TPM) ──
+        // For the default merged (master) profile, inject a per-turn hint with the
+        // live specialist roster + best match so the master delegates appropriately.
+        try {
+            if (this._isMasterSelection(entry.agentSelection) && this.config?.orchestration?.delegation?.enabled !== false) {
+                const masterHint = await this._buildMasterIntentHint(content);
+                if (masterHint) {
+                    promptContent = `${masterHint}\n\n${promptContent}`;
+                }
+            }
+        } catch (err) {
+            console.warn(`[ChatManager] ⚠️ Master intent hint failed (non-blocking): ${err.message}`);
+        }
+
         // ── Per-message skill routing ──
         // Detect which project skills are relevant for this user message
         // and inject routing hints so the agent auto-activates matching skills.
@@ -3686,7 +4688,8 @@ class ChatSessionManager extends EventEmitter {
         // When the runtime was recreated (server restart, manual resume, model switch),
         // the LLM has no memory of prior turns. Inject the recovery transcript so the
         // agent can understand what the user is referring to and maintain continuity.
-        if (entry.recoveredFromRuntimeFailure || entry.recoveryCount > 0) {
+        let injectedRecoveryContext = false;
+        if (entry.needsRecoveryContextInjection === true) {
             const transcript = this._buildRecoveryTranscript(entry);
             if (transcript) {
                 promptContent = [
@@ -3699,17 +4702,19 @@ class ChatSessionManager extends EventEmitter {
                     promptContent,
                     '</current_message>',
                 ].join('\n\n');
+                injectedRecoveryContext = true;
                 console.log(`[ChatManager] \u{1F504} Injected recovery context (${transcript.length} chars, recovery #${entry.recoveryCount || 1}) into resumed session ${sessionId}`);
             }
         }
 
-        const messageOptions = { prompt: promptContent, _hasRecoveryContext: !!(entry.recoveredFromRuntimeFailure || entry.recoveryCount > 0) };
+        const messageOptions = { prompt: promptContent, _hasRecoveryContext: injectedRecoveryContext };
         if (imageSDKAttachments.length > 0) {
             messageOptions.attachments = imageSDKAttachments;
             console.log(`[ChatManager] \u{1F4CE} Sending ${imageSDKAttachments.length} image(s) as file attachments to SDK`);
         }
 
         const messageId = await this._sendRuntimeMessage(sessionId, entry, messageOptions, true);
+        if (injectedRecoveryContext) this._markRecoveryContextDelivered(entry);
 
         // Broadcast skill activation event to SSE clients (non-blocking)
         if (skillRoutingResult && skillRoutingResult.activatedSkills.length > 0) {
@@ -3738,7 +4743,44 @@ class ChatSessionManager extends EventEmitter {
     async getHistory(sessionId) {
         const entry = this._sessions.get(sessionId);
         if (!entry) throw new Error(`Session ${sessionId} not found`);
-        return entry.messages.map(message => normalizeUserInputHistoryMessage(message));
+
+        // Backstop: only return the most recent messages. Attachments are
+        // lightweight references, so this bounds the JSON the browser parses on
+        // session open without affecting realistic session sizes.
+        const start = Math.max(0, entry.messages.length - MAX_HISTORY_MESSAGES);
+        const slice = entry.messages.slice(start);
+
+        // Migrate any legacy inline base64 attachments to the on-disk store and
+        // mutate the stored message in place so the heavy bytes are dropped from
+        // server memory and never re-persisted. The browser receives URL refs.
+        let migrated = false;
+        const out = slice.map((message) => {
+            const normalized = normalizeUserInputHistoryMessage(message);
+            if (normalized.role === 'user_input_request') {
+                const safeMeta = this._sanitizeUserInputRequestMeta(normalized.meta);
+                if (safeMeta !== normalized.meta && ChatSessionManager._jsonByteLength(safeMeta) !== ChatSessionManager._jsonByteLength(normalized.meta || {})) {
+                    message.meta = safeMeta;
+                    migrated = true;
+                }
+                return { ...normalized, meta: safeMeta };
+            }
+            if (Array.isArray(message.attachments) && message.attachments.length > 0) {
+                const converted = message.attachments.map(att => this._toClientAttachment(sessionId, att));
+                let changed = converted.length !== message.attachments.length;
+                for (let i = 0; i < converted.length && !changed; i++) {
+                    if (converted[i] !== message.attachments[i]) changed = true;
+                }
+                if (changed) {
+                    message.attachments = converted; // permanent migration in memory
+                    migrated = true;
+                }
+                return { ...normalized, attachments: converted };
+            }
+            return normalized;
+        });
+
+        if (migrated) this._persistHistory();
+        return out;
     }
 
     /**
@@ -3775,6 +4817,36 @@ class ChatSessionManager extends EventEmitter {
         this._autoResolveAllPendingInputs(sessionId);
 
         await entry.session.abort();
+
+        // Settle the SSE stream with a terminal idle event so the client stops
+        // processing immediately and does NOT enter an error-driven reconnect
+        // loop (each reconnect would otherwise replay recent messages). Keeping
+        // the stream open + idle avoids the new-chat/stop crash churn.
+        try {
+            if (entry.activeToolCallIds) entry.activeToolCallIds.clear();
+            this._setExecutionState(entry, SESSION_EXECUTION_STATES.IDLE, {
+                activeToolCount: 0,
+                lastError: null,
+            });
+            this._broadcastToSSE(sessionId, CHAT_EVENTS.IDLE, {});
+        } catch { /* idle settle is best-effort */ }
+    }
+
+    /**
+     * Build a lightweight replay version of message attachments. Strips heavy
+     * inline payloads (base64 dataUrl / raw data) so reconnect replay never
+     * floods the browser with multi-MB SSE frames. The client already has the
+     * full attachment bytes from the live stream or can fetch them via the
+     * /history endpoint; replay only needs the descriptor for rendering.
+     */
+    static _buildReplayAttachments(attachments) {
+        if (!Array.isArray(attachments) || attachments.length === 0) return [];
+        return attachments.map((att) => {
+            if (!att || typeof att !== 'object') return att;
+            const { dataUrl, data, base64, ...rest } = att;
+            const hadInline = !!(dataUrl || data || base64);
+            return hadInline ? { ...rest, replayStripped: true } : { ...rest };
+        });
     }
 
     /**
@@ -3787,7 +4859,7 @@ class ChatSessionManager extends EventEmitter {
         entry.sseClients.push(res);
 
         // Send recent messages as replay
-        for (const msg of entry.messages.slice(-20)) {
+        for (const msg of entry.messages.slice(-MAX_SSE_REPLAY_MESSAGES)) {
             // Map special roles to their dedicated event types
             let type;
             if (msg.role === 'user') {
@@ -3796,20 +4868,27 @@ class ChatSessionManager extends EventEmitter {
                 const normalizedMsg = normalizeUserInputHistoryMessage(msg);
                 // Replay the prompt — mark as resolved if no longer pending
                 const stillPending = entry.pendingInputRequests?.has(normalizedMsg.requestId);
+                const replayData = this._sanitizeUserInputRequestData({
+                    requestId: normalizedMsg.requestId,
+                    question: normalizedMsg.content,
+                    options: normalizedMsg.options || [],
+                    type: normalizedMsg.type || 'default',
+                    meta: normalizedMsg.meta || {},
+                    resolved: !stillPending,
+                });
                 const event = {
                     type: CHAT_EVENTS.USER_INPUT_REQUEST,
                     sessionId,
                     timestamp: normalizedMsg.timestamp,
-                    data: {
-                        requestId: normalizedMsg.requestId,
-                        question: normalizedMsg.content,
-                        options: normalizedMsg.options || [],
-                        type: normalizedMsg.type || 'default',
-                        meta: normalizedMsg.meta || {},
-                        resolved: !stillPending,
-                    },
+                    data: replayData,
                 };
-                try { res.write(`event: ${CHAT_EVENTS.USER_INPUT_REQUEST}\ndata: ${JSON.stringify(event)}\n\n`); } catch { /* ignore */ }
+                let eventJson = JSON.stringify(event);
+                if (Buffer.byteLength(eventJson, 'utf8') > MAX_SSE_EVENT_BYTES) {
+                    event.data = ChatSessionManager._stripOversizePayloads(replayData);
+                    event.data.payloadStrippedForSse = true;
+                    eventJson = JSON.stringify(event);
+                }
+                try { res.write(`event: ${CHAT_EVENTS.USER_INPUT_REQUEST}\ndata: ${eventJson}\n\n`); } catch { /* ignore */ }
                 continue;
             } else if (msg.role === 'user_input_response') {
                 const event = {
@@ -3827,9 +4906,20 @@ class ChatSessionManager extends EventEmitter {
             } else {
                 type = CHAT_EVENTS.MESSAGE;
             }
-            const data = { content: msg.content, role: msg.role };
-            if (msg.reasoning) data.reasoning = msg.reasoning;
-            if (Array.isArray(msg.attachments) && msg.attachments.length > 0) data.attachments = msg.attachments;
+            // Cap replayed text and strip heavy inline attachment payloads so a
+            // reconnect never ships multi-MB frames the renderer must parse at once.
+            const replayContent = typeof msg.content === 'string' && msg.content.length > MAX_REPLAY_CONTENT_CHARS
+                ? msg.content.slice(0, MAX_REPLAY_CONTENT_CHARS)
+                : msg.content;
+            const data = { content: replayContent, role: msg.role };
+            if (msg.reasoning) {
+                data.reasoning = msg.reasoning.length > MAX_REPLAY_REASONING_CHARS
+                    ? msg.reasoning.slice(0, MAX_REPLAY_REASONING_CHARS)
+                    : msg.reasoning;
+            }
+            if (Array.isArray(msg.attachments) && msg.attachments.length > 0) {
+                data.attachments = ChatSessionManager._buildReplayAttachments(msg.attachments);
+            }
             const event = { type, sessionId, timestamp: msg.timestamp, data };
             try {
                 res.write(`event: ${type}\ndata: ${JSON.stringify(event)}\n\n`);
@@ -3920,6 +5010,15 @@ class ChatSessionManager extends EventEmitter {
                 } catch { /* ignore individual file errors */ }
             }
         } catch { /* non-critical */ }
+
+        // Remove the session's on-disk inline attachment store
+        this._cleanupSessionAttachmentStore(sessionId);
+
+        // Cancel any pending coalesced-delta flush timer for this session
+        if (entry._sseCoalesce?.timer) {
+            clearTimeout(entry._sseCoalesce.timer);
+            entry._sseCoalesce.timer = null;
+        }
 
         // Clean up followup tracking for this session
         this._followupProvider.clearSession(sessionId);
@@ -4038,6 +5137,8 @@ class ChatSessionManager extends EventEmitter {
                         lastEventAt: saved.lastEventAt || saved.lastActivityAt || saved.createdAt,
                         recoveryCount: saved.recoveryCount || 0,
                         recoveredFromRuntimeFailure: !!saved.recoveredFromRuntimeFailure,
+                        needsRecoveryContextInjection: false,
+                        recoveryContextRuntimeId: null,
                         sessionContext: {
                             ...restoredSessionContext,
                             runtimeSessionId: null,
@@ -4106,7 +5207,18 @@ class ChatSessionManager extends EventEmitter {
                     sessionContext: persistedSessionContext,
                     sessionAttachments: persistedSessionAttachments,
                     videoContext: persistedVideoContext,
-                    messages: entry.messages.map(message => normalizeUserInputHistoryMessage(message)),
+                    messages: entry.messages.map((message) => {
+                        const normalized = normalizeUserInputHistoryMessage(message);
+                        if (!Array.isArray(message.attachments) || message.attachments.length === 0) {
+                            return normalized;
+                        }
+                        // Drop inline base64 from attachments that already have a
+                        // durable reference (url/path) so it never reaches disk.
+                        return {
+                            ...normalized,
+                            attachments: message.attachments.map(att => this._stripPersistedAttachment(att)),
+                        };
+                    }),
                 });
             }
 

@@ -1,5 +1,6 @@
 'use client';
 
+import { memo, useCallback } from 'react';
 import { AgentBadge } from '@/components/AgentSelect';
 import { ConversationIcon, ChevronDoubleLeftIcon, PlusIcon, EmptyChatIcon, ChatBubbleIcon, TrashIcon } from '@/components/Icons';
 import RobotMascotLogo from '@/components/RobotMascotLogo';
@@ -60,6 +61,68 @@ function getActiveSkillBadge(session) {
     };
 }
 
+/* ─────────── Memoized row ───────────
+   Perf: extracting the row into a React.memo'd component prevents the
+   whole conversation list from re-rendering when only the active id or
+   a single session's metadata changes. Equality is shallow over the
+   props below, which are all primitives or stable references. */
+const SessionItem = memo(function SessionItem({ session, isActive, onSelect, onDelete }) {
+    const statusBadge = getSessionStatusBadge(session);
+    const skillBadge = getActiveSkillBadge(session);
+    const handleSelect = useCallback(() => onSelect(session.sessionId), [onSelect, session.sessionId]);
+    const handleDelete = useCallback((e) => {
+        e.stopPropagation();
+        onDelete(session.sessionId);
+    }, [onDelete, session.sessionId]);
+
+    return (
+        <div
+            className={`group flex items-center gap-2.5 px-3 py-2.5 rounded-xl cursor-pointer transition-all duration-150 ${isActive
+                ? 'bg-brand-50/80 shadow-sm shadow-brand-100/50 border border-brand-200/50'
+                : 'border border-transparent hover:bg-surface-50 hover:border-surface-100'
+                }`}
+            onClick={handleSelect}
+        >
+            <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors ${isActive ? 'bg-brand-100' : 'bg-surface-100'}`}>
+                <ChatBubbleIcon className={`w-3.5 h-3.5 ${isActive ? 'text-brand-600' : 'text-surface-400'}`} />
+            </div>
+            <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1.5">
+                    <div className={`text-[12px] font-medium truncate leading-tight ${isActive ? 'text-brand-700' : 'text-surface-700'}`}>
+                        {session.title || `Chat ${session.sessionId.substring(0, 8)}`}
+                    </div>
+                    <AgentBadge agent={session.agent} agentMode={session.agentMode} size="xs" />
+                    {statusBadge && (
+                        <span className={`rounded-full border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.12em] ${statusBadge.className}`}>
+                            {statusBadge.label}
+                        </span>
+                    )}
+                </div>
+                <div className="mt-0.5 flex items-center gap-1.5">
+                    <div className="text-[10px] text-surface-400">
+                        {session.messageCount || 0} messages
+                    </div>
+                    {skillBadge && (
+                        <span
+                            title={skillBadge.title}
+                            className="rounded-full border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.12em] text-violet-700"
+                        >
+                            {skillBadge.label}
+                        </span>
+                    )}
+                </div>
+            </div>
+            <button
+                onClick={handleDelete}
+                className="opacity-0 group-hover:opacity-100 text-surface-300 hover:text-red-400 p-1 rounded-lg hover:bg-red-50 transition-all"
+                title="Delete"
+            >
+                <TrashIcon />
+            </button>
+        </div>
+    );
+});
+
 export default function SessionList({ sessions, activeSessionId, onSelect, onCreate, onDelete, isCreating = false, isOpen, onToggle }) {
     return (
         <div className={`relative z-10 h-full flex-shrink-0 overflow-hidden border-r bg-white transition-[width,border-color,box-shadow] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${isOpen ? 'w-[82vw] max-w-[260px] border-surface-200/80 shadow-[0_18px_40px_rgba(15,23,42,0.04)] sm:w-[256px] sm:max-w-none 2xl:w-[280px]' : 'w-0 border-transparent shadow-none'}`}>
@@ -115,62 +178,15 @@ export default function SessionList({ sessions, activeSessionId, onSelect, onCre
                             </div>
                         </div>
                     ) : (
-                        sessions.map((session) => {
-                            const isActive = session.sessionId === activeSessionId;
-                            const statusBadge = getSessionStatusBadge(session);
-                            const skillBadge = getActiveSkillBadge(session);
-                            return (
-                                <div
-                                    key={session.sessionId}
-                                    className={`group flex items-center gap-2.5 px-3 py-2.5 rounded-xl cursor-pointer transition-all duration-150 ${isActive
-                                        ? 'bg-brand-50/80 shadow-sm shadow-brand-100/50 border border-brand-200/50'
-                                        : 'border border-transparent hover:bg-surface-50 hover:border-surface-100'
-                                        }`}
-                                    onClick={() => onSelect(session.sessionId)}
-                                >
-                                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors ${isActive ? 'bg-brand-100' : 'bg-surface-100'
-                                        }`}>
-                                        <ChatBubbleIcon className={`w-3.5 h-3.5 ${isActive ? 'text-brand-600' : 'text-surface-400'}`} />
-                                    </div>
-                                    <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-1.5">
-                                            <div className={`text-[12px] font-medium truncate leading-tight ${isActive ? 'text-brand-700' : 'text-surface-700'}`}>
-                                                {session.title || `Chat ${session.sessionId.substring(0, 8)}`}
-                                            </div>
-                                            <AgentBadge agent={session.agent} agentMode={session.agentMode} size="xs" />
-                                            {statusBadge && (
-                                                <span className={`rounded-full border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.12em] ${statusBadge.className}`}>
-                                                    {statusBadge.label}
-                                                </span>
-                                            )}
-                                        </div>
-                                        <div className="mt-0.5 flex items-center gap-1.5">
-                                            <div className="text-[10px] text-surface-400">
-                                                {session.messageCount || 0} messages
-                                            </div>
-                                            {skillBadge && (
-                                                <span
-                                                    title={skillBadge.title}
-                                                    className="rounded-full border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.12em] text-violet-700"
-                                                >
-                                                    {skillBadge.label}
-                                                </span>
-                                            )}
-                                        </div>
-                                    </div>
-                                    <button
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            onDelete(session.sessionId);
-                                        }}
-                                        className="opacity-0 group-hover:opacity-100 text-surface-300 hover:text-red-400 p-1 rounded-lg hover:bg-red-50 transition-all"
-                                        title="Delete"
-                                    >
-                                        <TrashIcon />
-                                    </button>
-                                </div>
-                            );
-                        })
+                        sessions.map((session) => (
+                            <SessionItem
+                                key={session.sessionId}
+                                session={session}
+                                isActive={session.sessionId === activeSessionId}
+                                onSelect={onSelect}
+                                onDelete={onDelete}
+                            />
+                        ))
                     )}
                 </div>
 

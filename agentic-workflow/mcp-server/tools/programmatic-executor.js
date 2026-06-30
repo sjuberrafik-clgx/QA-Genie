@@ -243,13 +243,27 @@ export async function executeExploration({ script, templateName, templateArgs },
         });
 
         // Create a restricted context — NO Node globals
+        // CWE-94 hardening: freeze all exposed globals to prevent prototype chain escapes
+        // (e.g., JSON.constructor.constructor('return process')() )
+        const frozenJSON = Object.create(null);
+        frozenJSON.parse = JSON.parse.bind(JSON);
+        frozenJSON.stringify = JSON.stringify.bind(JSON);
+        Object.freeze(frozenJSON);
+
         const context = vm.createContext({
-            // Minimal safe globals
-            JSON,
+            // Minimal safe globals — frozen copies prevent prototype traversal
+            JSON: frozenJSON,
             Math,
             Date,
             Array,
-            Object,
+            Object: Object.freeze(Object.create(null, {
+                keys: { value: Object.keys },
+                values: { value: Object.values },
+                entries: { value: Object.entries },
+                assign: { value: Object.assign },
+                freeze: { value: Object.freeze },
+                fromEntries: { value: Object.fromEntries },
+            })),
             String,
             Number,
             Boolean,

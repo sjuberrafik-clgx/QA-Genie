@@ -37,6 +37,46 @@
 
 const { KBProvider, createExcerpt } = require('./kb-provider');
 
+/**
+ * CWE-918 fix: Validate that a URL does not point to private/internal networks (SSRF prevention).
+ */
+function _validateUrlNotPrivate(urlStr) {
+    let parsed;
+    try {
+        parsed = new URL(urlStr);
+    } catch {
+        throw new Error(`Invalid URL: ${urlStr}`);
+    }
+
+    const hostname = parsed.hostname.toLowerCase();
+
+    // Block obviously private/internal hostnames
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '0.0.0.0') {
+        throw new Error(`SSRF blocked: URL points to loopback address (${hostname})`);
+    }
+
+    // Block link-local, reserved, and private IP ranges
+    const privateRanges = [
+        /^10\./,                                    // 10.0.0.0/8
+        /^172\.(1[6-9]|2\d|3[01])\./,              // 172.16.0.0/12
+        /^192\.168\./,                              // 192.168.0.0/16
+        /^169\.254\./,                              // 169.254.0.0/16 (link-local)
+        /^0\./,                                     // 0.0.0.0/8
+        /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, // 100.64.0.0/10 (carrier-grade NAT)
+        /^198\.1[89]\./,                            // 198.18.0.0/15 (benchmarking)
+    ];
+    for (const range of privateRanges) {
+        if (range.test(hostname)) {
+            throw new Error(`SSRF blocked: URL points to private IP range (${hostname})`);
+        }
+    }
+
+    // Block file:// and other non-HTTP schemes
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+        throw new Error(`SSRF blocked: non-HTTP protocol (${parsed.protocol})`);
+    }
+}
+
 class CustomProvider extends KBProvider {
     constructor(config = {}) {
         super({ ...config, type: 'custom' });
@@ -51,6 +91,9 @@ class CustomProvider extends KBProvider {
         if (!this.baseUrl) {
             throw new Error('CustomProvider requires a baseUrl');
         }
+
+        // CWE-918: Validate baseUrl is not pointing to private/internal networks
+        _validateUrlNotPrivate(this.baseUrl);
 
         this._client = null;
     }

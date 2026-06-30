@@ -1,0 +1,59 @@
+{
+  "kind": "studio-agent",
+  "version": 1,
+  "id": "comment-genie2",
+  "name": "Comment Genie2",
+  "shortLabel": "COM",
+  "description": "---",
+  "workspaceId": "mr-zubair",
+  "status": "published",
+  "visibility": "workspace",
+  "surfaces": [
+    "chat"
+  ],
+  "baseAgent": "tpm",
+  "toolProfile": "taskgenie",
+  "followupMode": "taskgenie",
+  "capabilities": {
+    "browser": false,
+    "jira": true,
+    "filesystem": "read"
+  },
+  "model": {
+    "id": "gpt-5",
+    "speed": "standard"
+  },
+  "mcpServers": [
+    {
+      "name": "atlassian-jira",
+      "type": "url"
+    }
+  ],
+  "skills": [],
+  "tags": [],
+  "category": "custom",
+  "permissionMode": "default",
+  "maxTurns": 50,
+  "maxBudgetUsd": null,
+  "activation": {
+    "active": true,
+    "publishedAt": "2026-05-26T06:05:02.400Z",
+    "activatedAt": "2026-05-26T06:05:02.400Z"
+  },
+  "entry": {
+    "prompt": "prompt.md"
+  },
+  "createdAt": "2026-05-26T06:04:17.741Z",
+  "updatedAt": "2026-05-26T09:21:57.996Z",
+  "capabilityProfile": "jira-aware",
+  "toolCategories": [
+    "jira",
+    "evidence",
+    "grounding",
+    "document"
+  ],
+  "mcpToolProfile": null,
+  "browserGateway": false,
+  "browserGatewayProfile": null,
+  "brokerEnabled": true
+}

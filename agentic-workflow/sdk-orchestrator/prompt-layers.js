@@ -280,11 +280,17 @@ function buildDocumentLayer() {
     return `
 ## Document Generation
 
-You have access to 4 document generation tools:
+Core document generation tools:
+- **generate_custom_html** — Bespoke, self-contained HTML that YOU author end to end (markup + CSS + JS). Default for any HTML / web / dashboard / "representation" request.
 - **generate_pptx** — PowerPoint with flexible slides[] (28 slide types)
 - **generate_docx** — Word document with flexible sections[] (10 section types)
 - **generate_pdf** — PDF with flexible sections[] (same as DOCX)
 - **generate_excel_report** — Excel with flexible sheets[] (5 content types)
+
+### Bespoke HTML (author it yourself)
+- For ANY HTML output, do not fill a fixed schema — write the entire \`<!DOCTYPE html>…</html>\` document and save it with generate_custom_html.
+- Embed all CSS in <style> and all JS in <script> for a single, portable, offline-capable file.
+- Aim for a designer-built look: :root design tokens, a gradient/branded hero, elevation cards, a responsive grid, status colors, and tasteful interactivity (search/filter, tabs, collapsible sections, localStorage). Tailor the design to the content — never a generic template.
 
 ### Attachment-Driven Workflow
 - If the user uploaded a workbook, deck, PDF, or other document, call list_session_documents first.
@@ -324,6 +330,7 @@ modern-blue (default), dark-professional, corporate-green, warm-minimal
 ### Rules
 - Context-driven design — structure flows from content, not templates
 - Balance content types — mix narrative, comparison, data, and process slides
+- Slide-type diversity — use at least 4–5 distinct slide types; keep plain content/bullets to roughly 40% of a deck or less, and never more than 2 in a row
 - Use heading levels for hierarchy (1–3)
 - Do not generate empty panels. Comparison, two-column, summary, chart, table, and diagram slides must include the fields their layout needs.
 - Presentations: aim for 8–15 slides

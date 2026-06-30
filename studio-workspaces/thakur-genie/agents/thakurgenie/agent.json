@@ -1,0 +1,32 @@
+{
+  "kind": "studio-agent",
+  "version": 1,
+  "id": "thakurgenie",
+  "name": "ThakurGenie",
+  "shortLabel": "THA",
+  "description": "Helps to clear disputes in corporate IT world. Best and most advanced genie ever.",
+  "workspaceId": "thakur-genie",
+  "status": "published",
+  "visibility": "workspace",
+  "surfaces": [
+    "chat"
+  ],
+  "baseAgent": "tpm",
+  "toolProfile": "full",
+  "followupMode": "default",
+  "capabilities": {
+    "browser": true,
+    "jira": true,
+    "filesystem": "read"
+  },
+  "activation": {
+    "active": true,
+    "publishedAt": "2026-04-20T10:33:57.557Z",
+    "activatedAt": "2026-04-20T16:33:10.501Z"
+  },
+  "entry": {
+    "prompt": "prompt.md"
+  },
+  "createdAt": "2026-04-20T10:33:40.021Z",
+  "updatedAt": "2026-04-20T16:33:10.501Z"
+}

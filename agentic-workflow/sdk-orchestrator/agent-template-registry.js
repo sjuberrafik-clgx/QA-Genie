@@ -27,6 +27,7 @@
 const fs = require('fs');
 const fsP = fs.promises;
 const path = require('path');
+const { getCapabilityProfile } = require('./capability-profiles');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const TEMPLATES_DIR = path.join(PROJECT_ROOT, 'studio-workspaces', '_templates');
@@ -351,6 +352,56 @@ function slugify(value) {
         .replace(/[\s_.]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'template';
 }
 
+function inferCapabilityProfileId(config = {}) {
+    if (typeof config.capabilityProfile === 'string' && config.capabilityProfile.trim()) {
+        return config.capabilityProfile.trim();
+    }
+
+    const capabilities = config.capabilities && typeof config.capabilities === 'object' ? config.capabilities : {};
+    const toolProfile = String(config.toolProfile || '').trim().toLowerCase();
+
+    if (capabilities.browser === true) {
+        return toolProfile === 'scriptgenerator' ? 'automation-script' : 'browser-sanity';
+    }
+    if (capabilities.jira === true) return 'jira-aware';
+    if (toolProfile === 'filegenie' || toolProfile === 'docgenie') return 'document-gen';
+    if (toolProfile === 'codereviewer') return 'repo-code';
+    return 'text-knowledge';
+}
+
+function withCapabilityDefaults(config = {}) {
+    const capabilityProfile = inferCapabilityProfileId(config);
+    const profile = getCapabilityProfile(capabilityProfile) || getCapabilityProfile('text-knowledge');
+    const sourceCapabilities = config.capabilities && typeof config.capabilities === 'object' ? config.capabilities : null;
+    const capabilities = sourceCapabilities ? { ...sourceCapabilities } : { ...profile.capabilities };
+    const toolCategories = Array.isArray(config.toolCategories) && config.toolCategories.length > 0
+        ? [...config.toolCategories]
+        : [...profile.categories];
+    const mcpToolProfile = Object.prototype.hasOwnProperty.call(config, 'mcpToolProfile')
+        ? (config.mcpToolProfile || null)
+        : (capabilities.browser ? profile.mcpProfile : null);
+
+    return {
+        ...config,
+        capabilityProfile: profile.id,
+        capabilities,
+        toolCategories,
+        mcpToolProfile,
+        browserGateway: config.browserGateway === true,
+        browserGatewayProfile: config.browserGateway === true
+            ? (config.browserGatewayProfile || 'dryrun')
+            : (config.browserGatewayProfile || null),
+        brokerEnabled: typeof config.brokerEnabled === 'boolean' ? config.brokerEnabled : profile.brokerEnabled !== false,
+    };
+}
+
+function decorateTemplate(template) {
+    return {
+        ...template,
+        config: withCapabilityDefaults(template.config || {}),
+    };
+}
+
 // ─── Registry Class ─────────────────────────────────────────────────────────
 
 class AgentTemplateRegistry {
@@ -361,11 +412,11 @@ class AgentTemplateRegistry {
     /** List all templates (builtin + user), optionally filtered by category or search. */
     async listTemplates(options = {}) {
         const { category, search, source } = options;
-        const all = [...BUILTIN_TEMPLATES];
+        const all = BUILTIN_TEMPLATES.map(decorateTemplate);
 
         // Load user templates
         const userTemplates = await this._loadUserTemplates();
-        all.push(...userTemplates);
+        all.push(...userTemplates.map(decorateTemplate));
 
         let filtered = all;
 
@@ -401,11 +452,11 @@ class AgentTemplateRegistry {
     /** Get a single template by ID. */
     async getTemplate(templateId) {
         const builtin = BUILTIN_BY_ID.get(templateId);
-        if (builtin) return { ...builtin };
+        if (builtin) return decorateTemplate(builtin);
 
         const userPath = path.join(this.templatesDir, templateId, 'template.json');
         if (await pathExists(userPath)) {
-            return readJson(userPath);
+            return decorateTemplate(await readJson(userPath));
         }
 
         const error = new Error(`Template not found: ${templateId}`);
@@ -437,17 +488,23 @@ class AgentTemplateRegistry {
             color: payload.color || 'slate',
             source: 'user',
             popularity: 0,
-            config: {
+            config: withCapabilityDefaults({
                 toolProfile: payload.config?.toolProfile || 'full',
                 followupMode: payload.config?.followupMode || 'default',
-                capabilities: payload.config?.capabilities || { browser: true, jira: true, filesystem: 'read' },
+                capabilities: payload.config?.capabilities || null,
+                capabilityProfile: payload.config?.capabilityProfile || null,
+                toolCategories: Array.isArray(payload.config?.toolCategories) ? payload.config.toolCategories : [],
+                mcpToolProfile: payload.config?.mcpToolProfile || null,
+                browserGateway: payload.config?.browserGateway === true,
+                browserGatewayProfile: payload.config?.browserGatewayProfile || null,
+                brokerEnabled: typeof payload.config?.brokerEnabled === 'boolean' ? payload.config.brokerEnabled : true,
                 model: payload.config?.model || { id: 'claude-sonnet-4-6', speed: 'standard' },
                 mcpServers: Array.isArray(payload.config?.mcpServers) ? payload.config.mcpServers : [],
                 skills: Array.isArray(payload.config?.skills) ? payload.config.skills : [],
                 permissionMode: payload.config?.permissionMode || 'default',
                 maxTurns: payload.config?.maxTurns || 50,
                 maxBudgetUsd: payload.config?.maxBudgetUsd || null,
-            },
+            }),
             promptTemplate: payload.promptTemplate || '',
             createdAt: now,
             updatedAt: now,
@@ -477,10 +534,10 @@ class AgentTemplateRegistry {
         return {
             name: agentName,
             description: overrides.description || template.description,
-            config: {
+            config: withCapabilityDefaults({
                 ...template.config,
                 ...overrides.config,
-            },
+            }),
             promptBody: prompt,
             forkedFrom: {
                 templateId: template.id,

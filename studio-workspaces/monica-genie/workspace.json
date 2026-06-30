@@ -1,0 +1,25 @@
+{
+  "kind": "studio-workspace",
+  "version": 1,
+  "id": "monica-genie",
+  "name": "MOnica Genie",
+  "description": "",
+  "status": "draft",
+  "visibility": "workspace",
+  "createdBy": "studio-ui",
+  "createdAt": "2026-04-27T06:31:48.690Z",
+  "updatedAt": "2026-04-27T17:33:10.940Z",
+  "paths": {
+    "root": "studio-workspaces/monica-genie",
+    "manifest": "studio-workspaces/monica-genie/workspace.json",
+    "readme": "studio-workspaces/monica-genie/README.md",
+    "agents": "studio-workspaces/monica-genie/agents",
+    "skills": "studio-workspaces/monica-genie/skills",
+    "mcpServers": "studio-workspaces/monica-genie/mcp-servers",
+    "files": "studio-workspaces/monica-genie/files",
+    "notes": "studio-workspaces/monica-genie/notes"
+  },
+  "runtime": {
+    "root": "agentic-workflow/studio-runtime/monica-genie"
+  }
+}

@@ -26,68 +26,15 @@ import {
     isApprovalPrompt,
     normalizeApprovalText,
 } from '@/components/UserInputPrompt';
-
-// ───────────────────────── Helpers ─────────────────────────
-
-/** Stable similarity fingerprint for a request — matching fingerprints surface as a "similar" group. */
-function fingerprintRequest(req) {
-    const meta = req?.meta || {};
-    const preview = getStructuredMutationPreview(meta);
-    const guardrail = meta.guardrail || preview?.guardrail || {};
-    const provider = guardrail.provider || preview?.provider || 'generic';
-    const action = guardrail.actionLabel || preview?.title || req?.question || '';
-    const resource = guardrail.resourceType || preview?.effect || '';
-    // Normalize case + collapse whitespace so small wording drift doesn't break grouping.
-    return `${provider}|${resource}|${String(action).trim().toLowerCase().replace(/\s+/g, ' ')}`;
-}
-
-function getRequestStatus(req) {
-    if (!req?.resolved) return 'pending';
-    const decision = getApprovalDecision(req.resolvedAnswer, !!req.auto);
-    return decision.state; // 'approved' | 'rejected' | 'timed_out' | 'answered'
-}
-
-function getRequestSubject(req) {
-    const preview = getStructuredMutationPreview(req?.meta);
-    return preview?.subject?.id || preview?.subject?.label || preview?.subject?.title || null;
-}
-
-function getRequestTitle(req) {
-    const preview = getStructuredMutationPreview(req?.meta);
-    return preview?.subject?.title || preview?.title || req?.question?.split('\n')[0] || 'Approval request';
-}
-
-function getRequestProviderLabel(req) {
-    const meta = req?.meta || {};
-    const preview = getStructuredMutationPreview(meta);
-    const provider = meta.guardrail?.provider || preview?.provider;
-    if (provider === 'confluence') return 'Confluence';
-    if (provider === 'jira') return 'Jira';
-    return 'Change';
-}
-
-function getRequestActionLabel(req) {
-    const meta = req?.meta || {};
-    const preview = getStructuredMutationPreview(meta);
-    return meta.guardrail?.actionLabel || preview?.title || 'Review change';
-}
-
-/** Extract approve/reject option values from an approval request (fall back to canonical strings). */
-function getApprovalValues(req) {
-    const options = Array.isArray(req?.options) ? req.options : [];
-    let approveValue = 'Approve change';
-    let rejectValue = 'Cancel';
-
-    for (const option of options) {
-        const label = typeof option === 'string' ? option : (option?.label || option?.text || '');
-        const value = typeof option === 'object' && option?.value ? option.value : label;
-        const normalized = normalizeApprovalText(label);
-        if (/(APPROVE|CONFIRM|PROCEED|YES)/.test(normalized)) approveValue = value;
-        else if (/(CANCEL|REJECT|DENY|NO)/.test(normalized)) rejectValue = value;
-    }
-
-    return { approveValue, rejectValue };
-}
+import {
+    fingerprintRequest,
+    getRequestStatus,
+    getRequestSubject,
+    getRequestTitle,
+    getRequestProviderLabel,
+    getRequestActionLabel,
+    getApprovalValues,
+} from '@/lib/approval-batch-helpers';
 
 // ───────────────────────── Row (compact) ─────────────────────────
 

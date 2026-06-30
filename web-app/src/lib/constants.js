@@ -31,6 +31,61 @@ export const LIMITS = {
     MAX_DOC_SIZE_BYTES: 50 * 1024 * 1024, // 50 MB per document
     MAX_VIDEOS_PER_MESSAGE: 2,
     MAX_VIDEO_SIZE_BYTES: 200 * 1024 * 1024, // 200 MB per video
+    // Hard caps on the in-memory React arrays for the chat timeline. Independent
+    // of the on-screen virtualization (<Virtuoso> physically mounts only the rows
+    // near the viewport) — these bound the JS heap + the cost of rebuilding and
+    // sorting the timeline on every SSE event. A very long agent or orchestrator
+    // session would otherwise grow these without limit (renderer churn → Chrome
+    // STATUS_BREAKPOINT). Oldest items are dropped on overflow; the full transcript
+    // remains available server-side via the /history endpoint.
+    MAX_RENDERED_MESSAGES: 400,
+    MAX_RENDERED_TOOL_GROUPS: 60,
+    // Chat renderer memory guards — keep the live streaming buffers and retained
+    // tool-result payloads bounded so long agent runs don't exhaust the renderer
+    // heap (Chrome STATUS_BREAKPOINT). The full, untruncated content still arrives
+    // on message finalization from the server.
+    MAX_STREAMING_CONTENT_CHARS: 200_000,   // ~200 KB live streaming text buffer
+    MAX_STREAMING_REASONING_CHARS: 120_000, // ~120 KB live streaming reasoning buffer
+    MAX_TOOL_RESULT_DISPLAY_CHARS: 20_000,  // cap stored tool-result strings (large MCP snapshots)
+    // Inline image attachments (base64 dataUrl) are retained in React state for the
+    // whole session. Across many agent runs (e.g. creating several BugGenie tickets
+    // with screenshots in one chat), the accumulated base64 exhausts the renderer
+    // heap and Chrome aborts the tab (STATUS_BREAKPOINT). Keep full inline bytes only
+    // for the most recent images (by count AND total bytes); older inline images are
+    // evicted to a lightweight descriptor. Full bytes remain available server-side via
+    // the /history endpoint.
+    MAX_RETAINED_ATTACHMENT_IMAGES: 12,            // newest inline images kept fully decodable
+    MAX_RETAINED_ATTACHMENT_BYTES: 48 * 1024 * 1024, // ~48 MB total base64 retained in state
+    // Approval / user-input prompts accumulate in React state across a session. Each
+    // gated Jira write (e.g. commenting on several tickets in one chat) appends one
+    // prompt; without a cap the array grows unbounded over long sessions. Keep only
+    // the most recent prompts mounted — older resolved prompts add no value.
+    MAX_RETAINED_USER_INPUT_REQUESTS: 40,
+    // Bound the SSE event queue so a reconnect burst (server replays buffered events)
+    // can't spike the renderer heap before the batched flush drains it.
+    MAX_QUEUED_SSE_EVENTS: 600,
+    // Byte-budget backstop for the SSE queue. The server strips inline base64 from
+    // outbound frames, but this guards against any large payload (e.g. a stray
+    // dataUrl) accumulating in the queue faster than it drains — drop oldest events
+    // once the queued bytes exceed this ceiling.
+    MAX_QUEUED_SSE_BYTES: 24 * 1024 * 1024, // ~24 MB of queued event payload
+};
+
+// ─── Renderer Memory Guard ──────────────────────────────────────────────────
+// Runtime safety net for the chat view. The Chrome STATUS_BREAKPOINT ("Aw, Snap!")
+// crash on long, image-heavy sessions is driven by DOM-node count + decoded image
+// bitmaps — the "Other (HTML)" heap category — NOT the JS heap. performance.memory
+// only measures the JS heap, so it cannot even observe this class of crash. The
+// guard samples DOM nodes + the mounted-image pixel budget (the proxies that DO
+// track the dangerous category) and sheds load (shrinks the render window, evicts
+// old inline images) before the renderer is aborted.
+export const MEMORY_GUARD = {
+    ENABLED: true,
+    SAMPLE_MS: 5_000,              // how often to sample the DOM / image budget
+    INITIAL_DELAY_MS: 1_500,       // let the first paint settle before sampling
+    MAX_DOM_NODES: 12_000,         // shed load above this many live DOM elements
+    MAX_IMAGE_PIXELS: 24_000_000,  // Σ (naturalW × naturalH) of mounted <img> (~96 MB RGBA)
+    COOLDOWN_MS: 10_000,           // minimum gap between successive load-shed actions
 };
 
 // ─── Allowed Document Types ─────────────────────────────────────────────────
@@ -132,6 +187,12 @@ export const SSE_EVENT_TYPES = {
     CHAT_FOLLOWUP: 'chat_followup',
     CHAT_USER_INPUT_REQUEST: 'chat_user_input_request',
     CHAT_USER_INPUT_COMPLETE: 'chat_user_input_complete',
+    // Delegation sub-thread (a specialist running on the master's behalf)
+    CHAT_DELEGATION_START: 'chat_delegation_start',
+    CHAT_DELEGATION_DELTA: 'chat_delegation_delta',
+    CHAT_DELEGATION_TOOL_START: 'chat_delegation_tool_start',
+    CHAT_DELEGATION_TOOL_COMPLETE: 'chat_delegation_tool_complete',
+    CHAT_DELEGATION_COMPLETE: 'chat_delegation_complete',
 };
 
 /** Flat list of all SSE event type strings — used for EventSource.addEventListener */

@@ -1105,6 +1105,15 @@ class PipelineRunner {
                     ? `MISSION SCENARIO:\n- Scenario ID: ${context.scenarioId}\n- Scenario Name: ${context.scenarioName || context.scenarioId}\n- Auth State: ${context.authState}\n- Generate and validate ONLY this scenario branch.\n- Authenticated branch: use existing framework login/business functions and validate post-login behavior.\n- Unauthenticated branch: do not perform login unless the application redirects to an auth wall that must be asserted.\n\n`
                     : '') +
                 'MANDATORY STEPS (in this exact order):\n' +
+                (process.env.GLASS_MCP_ENABLED !== 'false'
+                    ? '🪟 GLASS MODE (ACTIVE) — use the 8 Glass verbs, NOT the unified_* tools named below (they map 1:1):\n' +
+                      '  • open(url) = navigate.  FIRST call MUST be open(url).\n' +
+                      '  • see() = perceive the page as a ranked affordance menu with DURABLE HANDLES (replaces snapshot + get_by_*). Pass those handles straight to do/read.\n' +
+                      '  • do({target,action}) = click/type/fill/select/check/hover/press/upload/screenshot.\n' +
+                      '  • read({what,target}) = text/value/attribute/html/table, or page url/title (assertion data).\n' +
+                      '  • wait({for}) · net · devtool (CDP passthrough) · script (in-page JS). Never guess selectors — only use handles from see().\n' +
+                      '  MIN DEPTH before writing a spec: ≥1 see(), ≥1 read() for an assertion value, ≥1 navigation check (read{what:"url"} or wait{for:"url"}). Save exploration with source "glass-see".\n\n'
+                    : '') +
                 `0. FIRST: Navigate to the application using unified_navigate to ${context.appUrl || 'the resolved framework baseUrl'} (or unified_execute_exploration with an explicit navigate step)\n` +
                 '1. Take accessibility snapshots using unified_snapshot\n' +
                 '2. Validate key elements with SEMANTIC selectors (unified_get_by_role, unified_get_by_test_id, unified_get_by_label, unified_get_by_text)\n' +

@@ -147,8 +147,34 @@ export function applyIntelligentPrimitives(bridge) {
             .sort((a, b) => b.score - a.score);
 
         if (scored.length) {
-            const nth = Number.isInteger(spec.nth) ? spec.nth : 0;
-            const pick = scored[Math.min(nth, scored.length - 1)].el;
+            const nthExplicit = Number.isInteger(spec.nth);
+            // ── Actionability-aware ordering (CBR) ────────────────────────────────
+            // Pages like OneHome render hidden RESPONSIVE DUPLICATES that share an
+            // accessible name (e.g. three "Add a Note" buttons, only one visible/in
+            // viewport). Pure name-score can't tell them apart, so a text click lands on
+            // a display:none / off-screen copy and Playwright waits for actionability
+            // until the tool ceiling (the 120s timeouts seen in live runs). Among the
+            // near-top matches we therefore prefer the copy that is actually actionable:
+            // visible (not display:none) AND in the viewport. An explicit nth is honored
+            // as-is — the caller asked for a specific index.
+            let ordered = scored;
+            if (!nthExplicit && scored.length > 1) {
+                const topScore = scored[0].score;
+                const EPS = 0.05;
+                const tier = scored.filter((s) => s.score >= topScore - EPS);
+                if (tier.length > 1) {
+                    const rank = (el) => (el.visible !== false ? 2 : 0) + (el.inViewport !== false ? 1 : 0);
+                    const reranked = [...tier].sort((a, b) => rank(b.el) - rank(a.el));
+                    ordered = [...reranked, ...scored.filter((s) => s.score < topScore - EPS)];
+                }
+            }
+            const nth = nthExplicit ? spec.nth : 0;
+            const pick = ordered[Math.min(nth, ordered.length - 1)].el;
+            // How many matches share this pick's accessible name — the responsive-duplicate count.
+            const pickName = (pick.computedLabel || pick.text || '').trim().toLowerCase();
+            const duplicateCount = pickName
+                ? scored.filter((s) => ((s.el.computedLabel || s.el.text || '').trim().toLowerCase() === pickName)).length
+                : 1;
             // Learn (P4): capture the element's stable identity so a future break of this
             // selector can be healed. Fire-and-forget — never blocks resolution.
             if (this._healingResolver) {
@@ -159,6 +185,13 @@ export function applyIntelligentPrimitives(bridge) {
                 strategy: 'fuzzy-match',
                 matched: pick.computedLabel || pick.text || pick.ref,
                 score: Number(scored[0].score.toFixed(2)),
+                // Affordance / actionability provenance (CBR): the agent and the audit can see
+                // WHICH copy was chosen and whether it was directly actionable or needed a scroll.
+                affordance: pick.affordance || undefined,
+                visible: pick.visible !== false,
+                inViewport: pick.inViewport !== false,
+                actionable: pick.visible !== false && pick.inViewport !== false,
+                duplicateCount,
                 // Vision provenance captured at resolve time (the fusedName flag is transient —
                 // a later non-vision snapshot clears it, so the audit must record it now).
                 visual: pick.fusedName === true,
@@ -168,6 +201,8 @@ export function applyIntelligentPrimitives(bridge) {
                     role: s.el.role || s.el.tag,
                     name: s.el.computedLabel || s.el.text,
                     score: Number(s.score.toFixed(2)),
+                    visible: s.el.visible !== false,
+                    inViewport: s.el.inViewport !== false,
                 })),
             };
         }
@@ -247,6 +282,12 @@ export function applyIntelligentPrimitives(bridge) {
         const before = this.page.url();
         const beforeSeq = await this._readDomSeqQuick();
 
+        // Click-like actions get a bounded timeout so a wrong pick fails fast (≤ this, twice with
+        // the self-heal retry) instead of hanging to the 120s tool ceiling. Real, actionable
+        // clicks complete in well under a second, so this never penalizes a correct target.
+        const CLICKLIKE = new Set(['click', 'dblclick', 'doubleclick']);
+        const CLICK_TIMEOUT_MS = 20000;
+
         const attempt = async (forceFresh) => {
             if (forceFresh) await this.snapshot({ useCache: false });
             const resolved = await this._resolveTarget(spec);
@@ -256,6 +297,7 @@ export function applyIntelligentPrimitives(bridge) {
                     ? { ref: resolved.ref }
                     : { element: resolved.selector, selector: resolved.selector };
                 if (force) handle.force = true;
+                if (CLICKLIKE.has(String(action).toLowerCase())) handle.timeout = CLICK_TIMEOUT_MS;
                 const raw = await this._dispatchAction(action, handle, payload);
                 return { resolved, raw };
             }
@@ -305,6 +347,21 @@ export function applyIntelligentPrimitives(bridge) {
         if (before !== after) out.url = after;
         if (typeof res.resolved.score === 'number') out.matchScore = res.resolved.score;
         if (healed) out.healed = true;
+        // Affordance / actionability provenance (CBR): surface which copy was actioned, its kind,
+        // and — when the page had hidden responsive duplicates — how many shared the name. This
+        // makes a scroll-required or off-viewport pick visible instead of an opaque ok:true.
+        if (res.resolved?.affordance) out.affordance = res.resolved.affordance;
+        if (typeof res.resolved?.actionable === 'boolean') {
+            out.actionable = res.resolved.actionable;
+            if (res.resolved.actionable === false) {
+                out.actionableNote = res.resolved.inViewport === false
+                    ? 'Resolved target was off-viewport — Playwright scrolled it into view before acting.'
+                    : 'Resolved target was not in a directly actionable state.';
+            }
+        }
+        if (typeof res.resolved?.duplicateCount === 'number' && res.resolved.duplicateCount > 1) {
+            out.duplicateCount = res.resolved.duplicateCount;
+        }
         // Propagate a heal performed inside _resolveTarget (broken CSS re-anchored by identity)
         // so callers and the resolution audit see it (QA-integrity — a heal = possible product change).
         if (res.resolved?.healed) { out.healed = true; if (res.resolved.heal) out.heal = res.resolved.heal; }

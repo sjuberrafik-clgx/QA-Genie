@@ -7,8 +7,8 @@
  * script validation, learning store, assertion config, popup handler) as
  * Copilot SDK tools that the AI can call during sessions.
  *
- * Each tool uses defineTool() with structured parameters and typed return values,
- * replacing the current approach of embedding instructions in system prompts.
+ * Helper functions have been extracted to tools/ modules for reusability.
+ * The createCustomTools() function below creates all SDK tools per agent role.
  *
  * @module custom-tools
  * ═══════════════════════════════════════════════════════════════════════════════
@@ -24,3429 +24,149 @@ const {
     normalizeConfluencePageInput,
 } = require('./atlassian-url-utils');
 
+// ─── Extracted helper modules ────────────────────────────────────────────────
+const {
+    VALID_IMAGE_MIME_TYPES, VALID_VIDEO_MIME_TYPES,
+    COMMENT_IMAGE_EXTENSIONS, COMMENT_IMAGE_MIME_MAP,
+    COMMENT_VIDEO_EXTENSIONS, COMMENT_VIDEO_MIME_MAP,
+    JIRA_MAX_ATTACHMENT_SIZE, JIRA_TICKET_KEY_PATTERN,
+    PROJECT_ROOT,
+    SAFE_COMMIT_ROOT_PREFIXES, SAFE_COMMIT_ROOT_FILES,
+    SAFE_COMMIT_EXCLUDED_PREFIXES, SAFE_COMMIT_EXCLUDED_EXTENSIONS,
+} = require('./tools/constants');
+
+const {
+    isNonEmptyString, applyMentions,
+    resolveActiveSessionId, getActiveSessionEntry,
+    isValidTicketKey, getLatestUserMessageText,
+    getConfluenceProvider, formatConfluencePage,
+    formatConfluenceSpace, annotateConfluenceTreeDepth,
+    classifyJiraTimeTrackingIntent,
+} = require('./tools/general-helpers');
+
+const {
+    PPTX_SUPPORTED_SLIDE_TYPES,
+    isPlainObject, collectStructuredTextValues, hasStructuredTextValue,
+    slideHasAnyContent, getSlideTableShape, validatePptxSlides,
+    getJiraTimeTrackingIntentContext, classifyJiraLabelIntent,
+    buildJiraTimeIntentGuardResult,
+} = require('./tools/pptx-validation');
+
+const {
+    JIRA_MUTATION_GUARDRAILS,
+    normalizeMutationDisplayValue, serializeMutationRawValue,
+    detectMutationValueKind, getMutationFieldImportance,
+    getMutationFieldGroup, buildMutationValueDescriptor,
+    normalizeMutationNotes, normalizeMutationChanges,
+    buildMutationSubject, getMutationOperationKind,
+    buildMutationPreview, buildMutationReceipt,
+    buildMutationResultGuardrail, createMutationFieldChange,
+    formatMutationPreviewLine, normalizeApprovalText,
+    buildExpectedJiraMutationApproval, buildJiraMutationGuardrailMetadata,
+    buildJiraMutationPreviewLines, isApprovalAnswer,
+    buildJiraMutationApprovalPrompt, buildJiraMutationApprovalFailure,
+    requireJiraMutationApproval,
+} = require('./tools/mutation-helpers');
+
+const {
+    getJiraAttachmentConfig, getJiraApiConfig,
+    buildJiraIssueApiUrl, buildJiraAgileApiUrl, buildJiraBrowseUrl,
+    splitCommaSeparated, normalizeMaxResults, parseJsonObjectInput,
+    parseJiraErrorBody, buildJiraErrorHint, formatJiraErrorResponse,
+    normalizeJiraUser, escapeJqlString,
+    buildJiraTextSearchJql, buildJiraEpicSearchJql,
+    executeJiraIssueSearch,
+    formatJiraSearchIssue, formatJiraIssueReference,
+    formatJiraSubtasks, formatJiraIssueLinks,
+    formatJiraEpicRelationship, formatJiraEpicSearchResult,
+    formatJiraEpicDetails, selectJiraSubtaskIssueType,
+    fetchJiraCreateIssueTypes,
+    formatJiraDateTime, buildJiraAttachmentUrl,
+    sanitizeFileName, buildMultipartPayload, buildJiraAttachmentHeaders,
+} = require('./tools/jira-api-helpers');
+
+const {
+    getEvidenceItemTimestamp, resolveEvidenceScopeMessageId,
+    isEvidenceItemInScope, collectSessionEvidence,
+    collectSessionDocuments, findSessionDocument,
+    selectVideoFrames, resolveWorkspaceFilePath,
+    createUniqueAttachmentFileName, formatAttachmentSize,
+    createCommentScreenshotFileName, createCommentFrameFileName,
+    createAdfTextNode, appendAdfBulletSection,
+    buildJiraMediaCommentWikiBody, buildJiraMediaCommentAdf,
+    cleanupJiraMediaCommentPlan, getImageMimeTypeForFile,
+    uploadJiraAttachment,
+    stripHtmlTags, normalizeWhitespace, extractTextFromAdf,
+    normalizeJiraText, attachEvidenceToJira, addCommentWithMediaToJira,
+} = require('./tools/evidence-helpers');
+
+const {
+    normalizeJiraCommentVisibility, getJiraCommentCollection,
+    buildRenderedCommentLookup, formatSingleJiraComment,
+    formatJiraComments, buildJiraIssueCommentsUrl,
+    fetchCompleteJiraComments,
+    formatJiraTimetracking, formatJiraFieldCapability,
+    countStructuredClauses,
+} = require('./tools/jira-comment-helpers');
+
+const {
+    computeSparseTicketScore, buildSparseKbQueries,
+    enrichSparseTicketWithKnowledgeBase,
+} = require('./tools/sparse-ticket-helpers');
+
+const { ToolResultCache, getToolCache,
+    normalizeDeleteConfirmationText,
+    buildExpectedJiraDeleteConfirmation,
+    buildJiraDeleteFallbackSuggestions,
+} = require('./tools/tool-cache');
+
+const {
+    formatJiraTicket,
+    fetchJiraTicketState,
+} = require('./tools/jira-ticket-formatter');
+
+function normalizeJiraLabelList(value) {
+    const labels = Array.isArray(value)
+        ? value
+        : isNonEmptyString(value)
+            ? splitCommaSeparated(value)
+            : [];
+
+    return Array.from(new Set(labels
+        .filter(isNonEmptyString)
+        .map(label => label.trim())
+        .filter(Boolean)));
+}
+
+function buildJiraMutationSubject({ ticketId, ticketUrl, summary, title, label }) {
+    const resolvedTitle = isNonEmptyString(summary)
+        ? summary.trim()
+        : (isNonEmptyString(title) ? title.trim() : '');
+
+    return buildMutationSubject({
+        id: ticketId,
+        url: ticketUrl,
+        title: resolvedTitle,
+        label: isNonEmptyString(label)
+            ? label.trim()
+            : [ticketId, resolvedTitle].filter(Boolean).join(' - '),
+    });
+}
+
+const {
+    _relativePathIfInside, _findPlaywrightProjectRoot,
+    _saveTestReport, _resolveWorkspaceSpecTarget,
+    _countSpecFiles, _resolveLocalPlaywrightBinary,
+    _findMatchingNpmScript, _shellSplit,
+} = require('./tools/execution-helpers');
+
 // ─── Environment loader ─────────────────────────────────────────────────────
 function loadEnvVars() {
     try {
         require('dotenv').config({ path: path.join(__dirname, '..', '.env'), override: true });
-    } catch { /* dotenv not installed */ }
+    } catch { /* dotenv may not be installed */ }
 }
-
-const VALID_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
-const VALID_VIDEO_MIME_TYPES = new Set(['video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska']);
-const COMMENT_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']);
-const COMMENT_IMAGE_MIME_MAP = {
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.gif': 'image/gif',
-    '.webp': 'image/webp',
-    '.svg': 'image/svg+xml',
-};
-const COMMENT_VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mov', '.avi', '.mkv']);
-const COMMENT_VIDEO_MIME_MAP = {
-    '.mp4': 'video/mp4',
-    '.webm': 'video/webm',
-    '.mov': 'video/quicktime',
-    '.avi': 'video/x-msvideo',
-    '.mkv': 'video/x-matroska',
-};
-const JIRA_MAX_ATTACHMENT_SIZE = 50 * 1024 * 1024;
-const JIRA_TICKET_KEY_PATTERN = /^[A-Z][A-Z0-9]*-\d+$/;
-const PROJECT_ROOT = path.join(__dirname, '..', '..');
-const SAFE_COMMIT_ROOT_PREFIXES = [
-    '.github/skills/',
-    'agentic-workflow/sdk-orchestrator/',
-    'agentic-workflow/config/',
-    'agentic-workflow/docs/',
-    'agentic-workflow/utils/',
-    'web-app/',
-];
-const SAFE_COMMIT_ROOT_FILES = new Set([
-    'README.md',
-    'package.json',
-    'package-lock.json',
-    'playwright.config.js',
-    '.gitignore',
-    '.github/copilot-instructions.md',
-]);
-const SAFE_COMMIT_EXCLUDED_PREFIXES = [
-    'tests/',
-    'test-artifacts/',
-    'test-results/',
-    'playwright-report/',
-    'agentic-workflow/test-artifacts/',
-    'agentic-workflow/test-results/',
-    'agentic-workflow/exploration-data/',
-    'agentic-workflow/test-cases/',
-    'agentic-workflow/grounding-data/',
-    'agentic-workflow/knowledge-base-data/',
-    'agentic-workflow/learning-data/',
-    'agentic-workflow/ccm-data/',
-    'web-app/playwright-report/',
-    'web-app/test-results/',
-    'web-app/Users/',
-];
-const SAFE_COMMIT_EXCLUDED_EXTENSIONS = new Set(['.log', '.pptx', '.docx', '.pdf', '.xls', '.xlsx', '.webm', '.mp4']);
-
-function isNonEmptyString(value) {
-    return typeof value === 'string' && value.trim().length > 0;
-}
-
-/**
- * Parse a mentions parameter (JSON string or array) and apply mention injection
- * to markdown text before ADF conversion. Returns the text with @[Name](accountId:xxx) syntax.
- * @param {string} text - Markdown text
- * @param {string|Array} mentionsParam - JSON string or array of {accountId, displayName}
- * @returns {string} Text with injected mention syntax
- */
-function applyMentions(text, mentionsParam) {
-    if (!text || !mentionsParam) return text || '';
-    let mentions;
-    if (typeof mentionsParam === 'string') {
-        try { mentions = JSON.parse(mentionsParam); } catch { return text; }
-    } else if (Array.isArray(mentionsParam)) {
-        mentions = mentionsParam;
-    } else {
-        return text;
-    }
-    if (!Array.isArray(mentions) || mentions.length === 0) return text;
-    return injectMentionSyntax(text, mentions);
-}
-
-function resolveActiveSessionId(explicitSessionId, deps) {
-    if (isNonEmptyString(explicitSessionId)) return explicitSessionId.trim();
-    if (isNonEmptyString(deps?.sessionContext?.sessionId)) return deps.sessionContext.sessionId.trim();
-    return null;
-}
-
-function getActiveSessionEntry(explicitSessionId, deps) {
-    const chatManager = deps?.chatManager;
-    if (!chatManager) {
-        return {
-            error: 'Chat manager context not available. Call this tool from an active chat session.',
-        };
-    }
-
-    const sessionId = resolveActiveSessionId(explicitSessionId, deps);
-    if (!sessionId) {
-        return {
-            error: 'No active chat session could be resolved. Call this tool from the same chat session where the attachments were uploaded.',
-        };
-    }
-
-    const entry = chatManager._sessions?.get(sessionId);
-    if (!entry) {
-        return {
-            error: `Chat session not found: ${sessionId}`,
-        };
-    }
-
-    return { sessionId, entry };
-}
-
-function isValidTicketKey(ticketKey) {
-    return JIRA_TICKET_KEY_PATTERN.test(String(ticketKey || '').trim());
-}
-
-function getLatestUserMessageText(deps) {
-    const sessionResult = getActiveSessionEntry(undefined, deps);
-    if (sessionResult.error || !Array.isArray(sessionResult.entry?.messages)) {
-        return '';
-    }
-
-    for (let i = sessionResult.entry.messages.length - 1; i >= 0; i--) {
-        const message = sessionResult.entry.messages[i];
-        if (message?.role === 'user' && isNonEmptyString(message.content)) {
-            return message.content.trim();
-        }
-    }
-
-    return '';
-}
-
-function getConfluenceProvider(groundingStore) {
-    const connector = groundingStore?._kbConnector;
-    if (!connector) return null;
-    if (typeof connector.getProviderByType === 'function') {
-        return connector.getProviderByType('confluence') || null;
-    }
-    return null;
-}
-
-function formatConfluencePage(page, options = {}) {
-    if (!page || typeof page !== 'object') return page;
-    const result = {
-        id: page.id || undefined,
-        title: page.title || undefined,
-        url: page.url || undefined,
-        space: page.space || undefined,
-        excerpt: page.excerpt || undefined,
-        lastModified: page.lastModified || undefined,
-    };
-    if (options.depth !== undefined) result.depth = options.depth;
-    if (page.metadata) {
-        result.metadata = {
-            labels: page.metadata.labels || [],
-            author: page.metadata.author || undefined,
-            status: page.metadata.status || undefined,
-            version: page.metadata.version || undefined,
-            parentId: page.metadata.parentId || null,
-        };
-    }
-    if (options.includeContent !== false && page.content) {
-        const maxChars = options.contentMaxChars || 8000;
-        result.content = typeof page.content === 'string' && page.content.length > maxChars
-            ? page.content.slice(0, maxChars) + '...'
-            : page.content;
-    }
-    return result;
-}
-
-function formatConfluenceSpace(space) {
-    if (!space || typeof space !== 'object') return space;
-    return {
-        key: space.key || undefined,
-        name: space.name || undefined,
-        url: space.url || undefined,
-        description: space.description || undefined,
-    };
-}
-
-function annotateConfluenceTreeDepth(pages, rootId) {
-    if (!Array.isArray(pages)) return [];
-    const idToParent = new Map();
-    for (const page of pages) {
-        const pid = page?.metadata?.parentId || null;
-        idToParent.set(String(page?.id || ''), pid ? String(pid) : null);
-    }
-    function getDepth(id) {
-        let depth = 0;
-        let current = String(id || '');
-        const visited = new Set();
-        while (current && current !== String(rootId) && !visited.has(current)) {
-            visited.add(current);
-            const parent = idToParent.get(current);
-            if (!parent) break;
-            depth++;
-            current = parent;
-        }
-        return depth;
-    }
-    return pages.map(page => ({
-        page,
-        depth: getDepth(page?.id),
-    }));
-}
-
-function classifyJiraTimeTrackingIntent(messageText) {
-    if (!isNonEmptyString(messageText)) {
-        return { intent: 'unknown', signals: [] };
-    }
-
-    const normalized = messageText.toLowerCase().replace(/\s+/g, ' ').trim();
-    const signalMatchers = [
-        {
-            intent: 'worklog',
-            label: 'time tracking phrase',
-            pattern: /\btime tracking\b/,
-        },
-        {
-            intent: 'worklog',
-            label: 'worklog keyword',
-            pattern: /\bworklog\b/,
-        },
-        {
-            intent: 'worklog',
-            label: 'log time keyword',
-            pattern: /\blog(?:ging)?\s+(?:time|hours?|work)\b/,
-        },
-        {
-            intent: 'worklog',
-            label: 'add hours phrase',
-            pattern: /\b(?:add|enter|record|book|put|track)\b[^\n.?!]{0,50}\b(?:hours?|time)\b/,
-        },
-        {
-            intent: 'worklog',
-            label: 'time spent phrase',
-            pattern: /\btime spent\b/,
-        },
-        {
-            intent: 'worklog',
-            label: 'spent duration phrase',
-            pattern: /\b(?:spent|spend)\b[^\n.?!]{0,20}\b\d+\s*(?:m|min|mins|minutes?|h|hr|hrs|hours?|d|day|days)\b/,
-        },
-        {
-            intent: 'estimate',
-            label: 'original estimate phrase',
-            pattern: /\boriginal estimate\b/,
-        },
-        {
-            intent: 'estimate',
-            label: 'remaining estimate phrase',
-            pattern: /\bremaining estimate\b/,
-        },
-        {
-            intent: 'estimate',
-            label: 'estimate update phrase',
-            pattern: /\b(?:update|set|change|adjust)\b[^\n.?!]{0,20}\bestimates?\b/,
-        },
-        {
-            intent: 'estimate',
-            label: 'estimated hours phrase',
-            pattern: /\bestimated hours?\b/,
-        },
-        {
-            intent: 'estimate',
-            label: 'estimate field phrase',
-            pattern: /\bestimate field\b/,
-        },
-        {
-            intent: 'estimate',
-            label: 'camel-case estimate field',
-            pattern: /\b(?:originalestimate|remainingestimate)\b/,
-        },
-    ];
-
-    const matchedSignals = signalMatchers
-        .filter(signal => signal.pattern.test(normalized))
-        .map(signal => ({ intent: signal.intent, label: signal.label }));
-
-    const hasWorklogSignal = matchedSignals.some(signal => signal.intent === 'worklog');
-    const hasEstimateSignal = matchedSignals.some(signal => signal.intent === 'estimate');
-
-    if (hasWorklogSignal && hasEstimateSignal) {
-        return { intent: 'mixed', signals: matchedSignals };
-    }
-    if (hasWorklogSignal) {
-        return { intent: 'worklog', signals: matchedSignals };
-    }
-    if (hasEstimateSignal) {
-        return { intent: 'estimate', signals: matchedSignals };
-    }
-
-    return { intent: 'unknown', signals: [] };
-}
-
-const PPTX_SUPPORTED_SLIDE_TYPES = new Set([
-    'title', 'content', 'bullets', 'two-column', 'table', 'chart', 'image', 'quote',
-    'section-break', 'comparison', 'summary', 'timeline', 'process-flow',
-    'stats-dashboard', 'icon-grid', 'pyramid', 'matrix-quadrant', 'agenda',
-    'team-profiles', 'before-after', 'funnel', 'roadmap', 'swot', 'hero-image',
-    'closing', 'diagram', 'data-story', 'infographic',
-]);
-
-function isPlainObject(value) {
-    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function collectStructuredTextValues(value, output = []) {
-    if (isNonEmptyString(value)) {
-        output.push(value.trim());
-        return output;
-    }
-
-    if (Array.isArray(value)) {
-        value.forEach(item => collectStructuredTextValues(item, output));
-        return output;
-    }
-
-    if (isPlainObject(value)) {
-        ['heading', 'title', 'subtitle', 'label', 'name', 'text', 'description', 'content', 'value', 'note']
-            .forEach(key => {
-                if (Object.prototype.hasOwnProperty.call(value, key)) {
-                    collectStructuredTextValues(value[key], output);
-                }
-            });
-
-        if (Array.isArray(value.items)) {
-            collectStructuredTextValues(value.items, output);
-        }
-    }
-
-    return output;
-}
-
-function hasStructuredTextValue(value) {
-    return collectStructuredTextValues(value, []).length > 0;
-}
-
-function slideHasAnyContent(slide, keys) {
-    return keys.some(key => hasStructuredTextValue(slide[key]));
-}
-
-function getSlideTableShape(slide) {
-    const tableData = isPlainObject(slide.tableData) ? slide.tableData : {};
-    const rows = Array.isArray(tableData.rows) && tableData.rows.length
-        ? tableData.rows
-        : (Array.isArray(slide.rows) ? slide.rows : []);
-
-    let headers = Array.isArray(tableData.headers) && tableData.headers.length
-        ? tableData.headers
-        : (Array.isArray(slide.headers) ? slide.headers : []);
-
-    if (!headers.length && rows.length && isPlainObject(rows[0])) {
-        headers = Object.keys(rows[0]);
-    }
-
-    return { headers, rows };
-}
-
-function validatePptxSlides(slides) {
-    if (!Array.isArray(slides)) {
-        return {
-            errors: ['The slides parameter must parse to a JSON array of slide objects.'],
-            warnings: [],
-        };
-    }
-
-    const errors = [];
-    const warnings = [];
-    const supportedTypes = [...PPTX_SUPPORTED_SLIDE_TYPES].join(', ');
-
-    slides.forEach((slide, index) => {
-        const slideNumber = index + 1;
-
-        if (!isPlainObject(slide)) {
-            errors.push(`Slide ${slideNumber} must be an object.`);
-            return;
-        }
-
-        const type = isNonEmptyString(slide.type) ? slide.type.trim() : '';
-        if (!type) {
-            errors.push(`Slide ${slideNumber} is missing a type.`);
-            return;
-        }
-
-        if (!PPTX_SUPPORTED_SLIDE_TYPES.has(type)) {
-            errors.push(`Slide ${slideNumber} uses unknown type "${type}". Supported types: ${supportedTypes}.`);
-            return;
-        }
-
-        switch (type) {
-            case 'content':
-            case 'quote':
-                if (!slideHasAnyContent(slide, ['content', 'text'])) {
-                    errors.push(`Slide ${slideNumber} (${type}) requires text content.`);
-                }
-                break;
-
-            case 'bullets':
-                if (!Array.isArray(slide.bullets) || slide.bullets.length === 0) {
-                    errors.push(`Slide ${slideNumber} (bullets) requires a non-empty bullets array.`);
-                }
-                break;
-
-            case 'two-column': {
-                const leftHasContent = slideHasAnyContent(slide, ['leftContent', 'left', 'leftItems', 'leftBullets', 'leftPoints']);
-                const rightHasContent = slideHasAnyContent(slide, ['rightContent', 'right', 'rightItems', 'rightBullets', 'rightPoints']);
-                if (!leftHasContent || !rightHasContent) {
-                    errors.push(`Slide ${slideNumber} (two-column) requires content on both sides. Use leftContent/rightContent or leftItems/rightItems.`);
-                }
-                break;
-            }
-
-            case 'comparison': {
-                const leftHasContent = slideHasAnyContent(slide, ['leftContent', 'left', 'leftItems', 'leftBullets', 'leftPoints']);
-                const rightHasContent = slideHasAnyContent(slide, ['rightContent', 'right', 'rightItems', 'rightBullets', 'rightPoints']);
-                if (!leftHasContent || !rightHasContent) {
-                    errors.push(`Slide ${slideNumber} (comparison) requires content on both sides. Use leftTitle/rightTitle with leftItems/rightItems or leftContent/rightContent.`);
-                }
-                break;
-            }
-
-            case 'summary': {
-                const hasMetrics = Array.isArray(slide.metrics) && slide.metrics.length > 0;
-                const hasHighlights = slideHasAnyContent(slide, ['highlights', 'summaryPoints', 'bullets']);
-                if (!hasMetrics && !hasHighlights) {
-                    errors.push(`Slide ${slideNumber} (summary) requires metrics and/or highlights.`);
-                }
-                if (Array.isArray(slide.metrics) && slide.metrics.length > 4) {
-                    warnings.push(`Slide ${slideNumber} (summary) has ${slide.metrics.length} metrics. The current renderer emphasizes the first 4.`);
-                }
-                break;
-            }
-
-            case 'table': {
-                const { headers, rows } = getSlideTableShape(slide);
-                if (!headers.length || !rows.length) {
-                    errors.push(`Slide ${slideNumber} (table) requires headers and rows. Use tableData.headers/tableData.rows or top-level headers/rows.`);
-                }
-                if (headers.length > 6) {
-                    warnings.push(`Slide ${slideNumber} (table) has ${headers.length} columns. The slide may become hard to read without splitting the table.`);
-                }
-                break;
-            }
-
-            case 'chart': {
-                const chartData = isPlainObject(slide.chartData) ? slide.chartData : null;
-                if (!chartData) {
-                    errors.push(`Slide ${slideNumber} (chart) requires chartData with labels and datasets.`);
-                    break;
-                }
-
-                const hasLabels = Array.isArray(chartData.labels) && chartData.labels.length > 0;
-                const hasDatasets = Array.isArray(chartData.datasets)
-                    && chartData.datasets.some(dataset => Array.isArray(dataset?.data) && dataset.data.length > 0);
-
-                if (!hasLabels || !hasDatasets) {
-                    errors.push(`Slide ${slideNumber} (chart) requires non-empty chartData.labels and chartData.datasets[].data.`);
-                }
-                break;
-            }
-
-            case 'image':
-            case 'hero-image':
-                if (!slideHasAnyContent(slide, ['imagePath'])) {
-                    errors.push(`Slide ${slideNumber} (${type}) requires imagePath.`);
-                }
-                break;
-
-            case 'diagram':
-                if (!slideHasAnyContent(slide, ['mermaidCode', 'diagramImage', 'imagePath'])) {
-                    errors.push(`Slide ${slideNumber} (diagram) requires mermaidCode, diagramImage, or imagePath.`);
-                }
-                break;
-
-            case 'stats-dashboard':
-                if (!Array.isArray(slide.metrics) || slide.metrics.length === 0) {
-                    errors.push(`Slide ${slideNumber} (stats-dashboard) requires a non-empty metrics array.`);
-                }
-                break;
-
-            case 'process-flow':
-                if (!Array.isArray(slide.steps) || slide.steps.length === 0) {
-                    errors.push(`Slide ${slideNumber} (process-flow) requires a non-empty steps array.`);
-                }
-                break;
-
-            case 'funnel':
-                if (!Array.isArray(slide.stages) || slide.stages.length === 0) {
-                    errors.push(`Slide ${slideNumber} (funnel) requires a non-empty stages array.`);
-                }
-                break;
-
-            case 'roadmap':
-                if (!Array.isArray(slide.phases) || slide.phases.length === 0) {
-                    errors.push(`Slide ${slideNumber} (roadmap) requires a non-empty phases array.`);
-                }
-                break;
-
-            default:
-                break;
-        }
-    });
-
-    return { errors, warnings };
-}
-
-function getJiraTimeTrackingIntentContext(deps) {
-    const latestUserMessage = getLatestUserMessageText(deps);
-    if (!latestUserMessage) {
-        return { intent: 'unknown', signals: [], latestUserMessage: '' };
-    }
-
-    const classification = classifyJiraTimeTrackingIntent(latestUserMessage);
-    return {
-        ...classification,
-        latestUserMessage,
-    };
-}
-
-function classifyJiraLabelIntent(messageText) {
-    if (!isNonEmptyString(messageText)) {
-        return { intent: 'unknown', signals: [] };
-    }
-
-    const normalized = messageText.toLowerCase().replace(/\s+/g, ' ').trim();
-    const signalMatchers = [
-        {
-            intent: 'disallow',
-            label: 'without labels phrase',
-            pattern: /\bwithout labels?\b/,
-        },
-        {
-            intent: 'disallow',
-            label: 'no labels phrase',
-            pattern: /\bno labels?\b/,
-        },
-        {
-            intent: 'disallow',
-            label: 'omit labels phrase',
-            pattern: /\b(?:omit|skip|exclude) labels?\b/,
-        },
-        {
-            intent: 'disallow',
-            label: 'do not add labels phrase',
-            pattern: /\bdo not\s+(?:add|include|use|set|apply)\s+labels?\b/,
-        },
-        {
-            intent: 'disallow',
-            label: 'do not label phrase',
-            pattern: /\bdo not\s+label\b/,
-        },
-        {
-            intent: 'disallow',
-            label: 'dont add labels phrase',
-            pattern: /\bdon'?t\s+(?:add|include|use|set|apply)\s+labels?\b/,
-        },
-        {
-            intent: 'disallow',
-            label: 'dont label phrase',
-            pattern: /\bdon'?t\s+label\b/,
-        },
-        {
-            intent: 'allow',
-            label: 'label action phrase',
-            pattern: /\b(?:add|include|use|set|apply)\s+labels?\b/,
-        },
-        {
-            intent: 'allow',
-            label: 'with labels phrase',
-            pattern: /\bwith labels?\b/,
-        },
-        {
-            intent: 'allow',
-            label: 'label with phrase',
-            pattern: /\blabel(?: the)?(?: jira)?(?: ticket| issue)?(?: it| this)?\s+with\b/,
-        },
-        {
-            intent: 'allow',
-            label: 'tag with phrase',
-            pattern: /\btag(?: the)?(?: jira)?(?: ticket| issue)?(?: it| this)?\s+with\b/,
-        },
-        {
-            intent: 'allow',
-            label: 'labels field phrase',
-            pattern: /\blabels?\s*[:=]\s*\S/,
-        },
-        {
-            intent: 'allow',
-            label: 'tags field phrase',
-            pattern: /\btags?\s*[:=]\s*\S/,
-        },
-    ];
-
-    const matchedSignals = signalMatchers
-        .filter(signal => signal.pattern.test(normalized))
-        .map(signal => ({ intent: signal.intent, label: signal.label }));
-
-    if (matchedSignals.some(signal => signal.intent === 'disallow')) {
-        return {
-            intent: 'disallow',
-            signals: matchedSignals.filter(signal => signal.intent === 'disallow'),
-        };
-    }
-
-    if (matchedSignals.some(signal => signal.intent === 'allow')) {
-        return {
-            intent: 'allow',
-            signals: matchedSignals.filter(signal => signal.intent === 'allow'),
-        };
-    }
-
-    return { intent: 'unknown', signals: [] };
-}
-
-function buildJiraTimeIntentGuardResult({ mode, ticketId, jiraConfig, intentContext }) {
-    const ticketUrl = ticketId && jiraConfig ? buildJiraBrowseUrl(jiraConfig, ticketId) : undefined;
-
-    if (mode === 'estimate-from-worklog') {
-        return {
-            success: false,
-            ticketId,
-            ticketUrl,
-            error: 'This request looks like a Jira worklog/time entry, not an estimate change.',
-            hint: 'When the user says "Time Tracking", "add hours", or other generic time-entry phrases, use log_jira_work. Reserve update_jira_estimates for explicit originalEstimate or remainingEstimate changes.',
-            suggestedTool: 'log_jira_work',
-            detectedIntent: intentContext.intent,
-            detectedSignals: intentContext.signals.map(signal => signal.label),
-            sourceMessage: intentContext.latestUserMessage,
-        };
-    }
-
-    if (mode === 'worklog-from-estimate') {
-        return {
-            success: false,
-            ticketId,
-            ticketUrl,
-            error: 'This request looks like an estimate change, not a Jira worklog entry.',
-            hint: 'Use update_jira_estimates only when the user explicitly asks to change originalEstimate or remainingEstimate. Use log_jira_work for generic hour entry or Time Tracking requests.',
-            suggestedTool: 'update_jira_estimates',
-            detectedIntent: intentContext.intent,
-            detectedSignals: intentContext.signals.map(signal => signal.label),
-            sourceMessage: intentContext.latestUserMessage,
-        };
-    }
-
-    if (mode === 'mixed') {
-        return {
-            success: false,
-            ticketId,
-            ticketUrl,
-            error: 'The current request mixes worklog language and estimate language.',
-            hint: 'Ask whether the user wants to log work or update original/remaining estimates before changing Jira time tracking fields.',
-            suggestedAction: 'clarify_time_tracking_intent',
-            detectedIntent: intentContext.intent,
-            detectedSignals: intentContext.signals.map(signal => signal.label),
-            sourceMessage: intentContext.latestUserMessage,
-        };
-    }
-
-    return null;
-}
-
-const JIRA_MUTATION_GUARDRAILS = {
-    create_jira_ticket: {
-        provider: 'jira',
-        resourceType: 'ticket',
-        effect: 'write',
-        impactLevel: 'high',
-        requiresApproval: true,
-        actionLabel: 'create a new Jira ticket',
-    },
-    assign_jira_ticket: {
-        provider: 'jira',
-        resourceType: 'ticket',
-        effect: 'write',
-        impactLevel: 'high',
-        requiresApproval: true,
-        actionLabel: 'reassign a Jira ticket',
-    },
-    link_jira_issues: {
-        provider: 'jira',
-        resourceType: 'ticket-link',
-        effect: 'write',
-        impactLevel: 'medium',
-        requiresApproval: true,
-        actionLabel: 'create a link between two Jira issues',
-    },
-    remove_jira_issue_link: {
-        provider: 'jira',
-        resourceType: 'ticket-link',
-        effect: 'write',
-        impactLevel: 'high',
-        requiresApproval: true,
-        actionLabel: 'remove a Jira issue link',
-    },
-    transition_jira_ticket: {
-        provider: 'jira',
-        resourceType: 'ticket',
-        effect: 'write',
-        impactLevel: 'high',
-        requiresApproval: true,
-        actionLabel: 'change Jira ticket status',
-    },
-    update_jira_ticket: {
-        provider: 'jira',
-        resourceType: 'ticket',
-        effect: 'write',
-        impactLevel: 'high',
-        requiresApproval: true,
-        actionLabel: 'update Jira ticket fields (including fix versions)',
-    },
-    log_jira_work: {
-        provider: 'jira',
-        resourceType: 'ticket',
-        effect: 'write',
-        impactLevel: 'medium',
-        requiresApproval: true,
-        actionLabel: 'log Jira work',
-    },
-    update_jira_estimates: {
-        provider: 'jira',
-        resourceType: 'ticket',
-        effect: 'write',
-        impactLevel: 'medium',
-        requiresApproval: true,
-        actionLabel: 'update Jira estimates',
-    },
-    delete_jira_ticket: {
-        provider: 'jira',
-        resourceType: 'ticket',
-        effect: 'delete',
-        impactLevel: 'destructive',
-        requiresApproval: true,
-        actionLabel: 'delete a Jira ticket',
-    },
-    delete_jira_comment: {
-        provider: 'jira',
-        resourceType: 'ticket-comment',
-        effect: 'delete',
-        impactLevel: 'destructive',
-        requiresApproval: true,
-        actionLabel: 'delete a Jira comment',
-    },
-    edit_jira_comment: {
-        provider: 'jira',
-        resourceType: 'ticket-comment',
-        effect: 'write',
-        impactLevel: 'medium',
-        requiresApproval: true,
-        actionLabel: 'edit a Jira comment',
-    },
-    create_confluence_page: {
-        provider: 'confluence',
-        resourceType: 'page',
-        effect: 'write',
-        impactLevel: 'high',
-        requiresApproval: true,
-        actionLabel: 'create a Confluence page',
-    },
-    update_confluence_page: {
-        provider: 'confluence',
-        resourceType: 'page',
-        effect: 'write',
-        impactLevel: 'high',
-        requiresApproval: true,
-        actionLabel: 'update a Confluence page',
-    },
-    delete_confluence_page: {
-        provider: 'confluence',
-        resourceType: 'page',
-        effect: 'delete',
-        impactLevel: 'destructive',
-        requiresApproval: true,
-        actionLabel: 'delete a Confluence page',
-    },
-};
-
-function normalizeMutationDisplayValue(value) {
-    if (value === null || value === undefined) return '(empty)';
-    if (typeof value === 'string') {
-        const trimmed = value.trim();
-        return trimmed.length > 0 ? trimmed : '(empty)';
-    }
-    if (typeof value === 'number' || typeof value === 'boolean') {
-        return String(value);
-    }
-    if (Array.isArray(value)) {
-        const normalizedItems = value
-            .map(item => normalizeMutationDisplayValue(item))
-            .filter(item => item && item !== '(empty)');
-        return normalizedItems.length > 0 ? normalizedItems.join(', ') : '(empty)';
-    }
-    if (typeof value === 'object') {
-        if (isNonEmptyString(value.display)) return value.display.trim();
-        if (isNonEmptyString(value.label)) return value.label.trim();
-        if (isNonEmptyString(value.displayName)) return value.displayName.trim();
-        if (isNonEmptyString(value.name)) return value.name.trim();
-        if (isNonEmptyString(value.summary)) return value.summary.trim();
-        if (isNonEmptyString(value.title)) return value.title.trim();
-        if (isNonEmptyString(value.key)) return value.key.trim();
-        if (isNonEmptyString(value.id)) return value.id.trim();
-        try {
-            return JSON.stringify(value);
-        } catch {
-            return '(object)';
-        }
-    }
-    return String(value);
-}
-
-function serializeMutationRawValue(value) {
-    if (value === null || value === undefined) return '';
-    if (typeof value === 'string') return value.trim();
-    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-    if (Array.isArray(value)) {
-        const items = value
-            .map(item => serializeMutationRawValue(item))
-            .filter(Boolean);
-        return items.length > 0 ? items.map(item => `- ${item}`).join('\n') : '';
-    }
-    if (typeof value === 'object') {
-        if (isNonEmptyString(value.raw)) return value.raw.trim();
-        if (isNonEmptyString(value.markdown)) return value.markdown.trim();
-        if (isNonEmptyString(value.display)) return value.display.trim();
-        if (isNonEmptyString(value.label)) return value.label.trim();
-        try {
-            return JSON.stringify(value, null, 2);
-        } catch {
-            return '';
-        }
-    }
-    return String(value).trim();
-}
-
-function detectMutationValueKind(value, rawValue = '') {
-    if (value === null || value === undefined || rawValue.length === 0) return 'empty';
-    if (Array.isArray(value)) return 'list';
-    if (typeof value === 'boolean') return 'boolean';
-    if (typeof value === 'number') return 'number';
-    if (typeof value === 'object') return 'json';
-    if (/^#{1,6}\s/m.test(rawValue) || /^\s*[-*+]\s+/m.test(rawValue) || /^\s*\d+\.\s+/m.test(rawValue) || (rawValue.includes('|') && rawValue.includes('\n'))) {
-        return 'markdown';
-    }
-    return 'text';
-}
-
-function getMutationFieldImportance(field = '') {
-    const normalizedField = String(field || '').toLowerCase();
-    if (['summary', 'description', 'project', 'issuetype', 'issueType', 'status', 'transition', 'parent', 'relatedissue', 'relatedIssueKey'].includes(normalizedField)) {
-        return 'primary';
-    }
-    if (['priority', 'labels', 'assignee', 'environment', 'originalestimate', 'remainingestimate'].includes(normalizedField)) {
-        return 'secondary';
-    }
-    return 'supporting';
-}
-
-function getMutationFieldGroup(field = '') {
-    const normalizedField = String(field || '').toLowerCase();
-    if (['summary', 'description', 'comment'].includes(normalizedField)) return 'content';
-    if (['project', 'issuetype', 'issueType', 'status', 'transition', 'parent', 'assignee', 'relatedissue', 'relatedIssueKey'].includes(normalizedField)) return 'routing';
-    return 'metadata';
-}
-
-function buildMutationValueDescriptor(value, fallbackDisplay = '(empty)') {
-    const raw = serializeMutationRawValue(value);
-    const rawText = raw || '';
-    const kind = detectMutationValueKind(value, rawText);
-    const lineCount = rawText.length > 0 ? rawText.split(/\r?\n/).length : 0;
-    const isLongText = rawText.length > 180 || lineCount > 4;
-
-    return {
-        raw: rawText,
-        kind,
-        lineCount,
-        isLongText,
-        display: fallbackDisplay,
-    };
-}
-
-function normalizeMutationNotes(notes = []) {
-    if (!Array.isArray(notes)) return [];
-    return notes
-        .filter(isNonEmptyString)
-        .map(note => note.trim())
-        .filter(Boolean);
-}
-
-function normalizeMutationChanges(changes = []) {
-    if (!Array.isArray(changes)) return [];
-
-    return changes
-        .map(change => {
-            if (!change || typeof change !== 'object') return null;
-
-            const beforeDisplay = normalizeMutationDisplayValue(change.beforeDisplay ?? change.before);
-            const afterDisplay = normalizeMutationDisplayValue(change.afterDisplay ?? change.after);
-            const beforeDescriptor = buildMutationValueDescriptor(change.beforeRaw ?? change.before, beforeDisplay);
-            const afterDescriptor = buildMutationValueDescriptor(change.afterRaw ?? change.after, afterDisplay);
-            const explicitChangeType = isNonEmptyString(change.changeType) ? change.changeType.trim() : '';
-            const changeType = explicitChangeType || (() => {
-                const beforeEmpty = beforeDisplay === '(empty)';
-                const afterEmpty = afterDisplay === '(empty)';
-                if (beforeEmpty && !afterEmpty) return 'add';
-                if (!beforeEmpty && afterEmpty) return 'remove';
-                if (beforeDisplay === afterDisplay) return 'unchanged';
-                return 'replace';
-            })();
-
-            if (changeType === 'unchanged' && !change.includeUnchanged) {
-                return null;
-            }
-
-            return {
-                field: isNonEmptyString(change.field) ? change.field.trim() : 'value',
-                label: isNonEmptyString(change.label) ? change.label.trim() : (isNonEmptyString(change.field) ? change.field.trim() : 'Value'),
-                changeType,
-                beforeDisplay,
-                afterDisplay,
-                beforeRaw: beforeDescriptor.raw,
-                afterRaw: afterDescriptor.raw,
-                beforeKind: beforeDescriptor.kind,
-                afterKind: afterDescriptor.kind,
-                beforeLineCount: beforeDescriptor.lineCount,
-                afterLineCount: afterDescriptor.lineCount,
-                isLongText: beforeDescriptor.isLongText || afterDescriptor.isLongText,
-                importance: isNonEmptyString(change.importance) ? change.importance.trim() : getMutationFieldImportance(change.field),
-                group: isNonEmptyString(change.group) ? change.group.trim() : getMutationFieldGroup(change.field),
-            };
-        })
-        .filter(Boolean);
-}
-
-function buildMutationSubject(subject = {}) {
-    const id = isNonEmptyString(subject.id) ? subject.id.trim() : '';
-    const url = isNonEmptyString(subject.url) ? subject.url.trim() : undefined;
-    const title = isNonEmptyString(subject.title) ? subject.title.trim() : '';
-    const label = isNonEmptyString(subject.label)
-        ? subject.label.trim()
-        : [id, title].filter(Boolean).join(' - ');
-
-    return {
-        id,
-        url,
-        title,
-        label: label || id || title || 'Target resource',
-    };
-}
-
-function getMutationOperationKind(changes = [], effect = 'write') {
-    if (effect === 'delete') return 'delete';
-    if (!Array.isArray(changes) || changes.length === 0) return effect === 'write' ? 'update' : effect;
-
-    const changeTypes = changes
-        .map(change => isNonEmptyString(change?.changeType) ? change.changeType.trim() : '')
-        .filter(Boolean);
-
-    if (changeTypes.length > 0 && changeTypes.every(type => type === 'add')) return 'create';
-    if (changeTypes.length > 0 && changeTypes.every(type => type === 'remove')) return 'remove';
-    return 'update';
-}
-
-function buildMutationPreview({ guardrail, title, subject, changes, notes, consequence }) {
-    const normalizedGuardrail = guardrail || {};
-    const normalizedChanges = normalizeMutationChanges(changes);
-    return {
-        displayVersion: 2,
-        kind: 'mutation-preview',
-        provider: normalizedGuardrail.provider || 'jira',
-        resourceType: normalizedGuardrail.resourceType || 'ticket',
-        effect: normalizedGuardrail.effect || 'write',
-        operationKind: getMutationOperationKind(normalizedChanges, normalizedGuardrail.effect || 'write'),
-        impactLevel: normalizedGuardrail.impactLevel || 'high',
-        actionLabel: normalizedGuardrail.actionLabel || 'apply a mutation',
-        title: isNonEmptyString(title) ? title.trim() : 'Approval required',
-        subject: buildMutationSubject(subject),
-        changes: normalizedChanges,
-        notes: normalizeMutationNotes(notes),
-        consequence: isNonEmptyString(consequence) ? consequence.trim() : undefined,
-    };
-}
-
-function buildMutationReceipt({ guardrail, title, subject, changes, notes, outcome, approval }) {
-    const normalizedGuardrail = guardrail || {};
-    const normalizedChanges = normalizeMutationChanges(changes);
-    return {
-        displayVersion: 2,
-        kind: 'mutation-receipt',
-        provider: normalizedGuardrail.provider || 'jira',
-        resourceType: normalizedGuardrail.resourceType || 'ticket',
-        effect: normalizedGuardrail.effect || 'write',
-        operationKind: getMutationOperationKind(normalizedChanges, normalizedGuardrail.effect || 'write'),
-        impactLevel: normalizedGuardrail.impactLevel || 'high',
-        actionLabel: normalizedGuardrail.actionLabel || 'apply a mutation',
-        title: isNonEmptyString(title) ? title.trim() : 'Mutation completed',
-        subject: buildMutationSubject(subject),
-        changes: normalizedChanges,
-        notes: normalizeMutationNotes(notes),
-        outcome: isNonEmptyString(outcome) ? outcome.trim() : undefined,
-        approval: approval && typeof approval === 'object'
-            ? {
-                approved: approval.approved !== false,
-                mode: approval.mode || 'unknown',
-            }
-            : undefined,
-    };
-}
-
-function buildMutationResultGuardrail(guardrail, approval, overrides = {}) {
-    if (!guardrail) return undefined;
-
-    return {
-        provider: guardrail.provider || 'jira',
-        resourceType: guardrail.resourceType || 'ticket',
-        effect: guardrail.effect || 'write',
-        impactLevel: guardrail.impactLevel || 'high',
-        requiresApproval: guardrail.requiresApproval === true,
-        actionLabel: guardrail.actionLabel || 'apply a mutation',
-        approval: approval && typeof approval === 'object'
-            ? {
-                approved: approval.approved !== false,
-                mode: approval.mode || 'unknown',
-            }
-            : undefined,
-        ...overrides,
-    };
-}
-
-function createMutationFieldChange({ field, label, before, after, changeType, includeUnchanged = false }) {
-    const beforeDisplay = normalizeMutationDisplayValue(before);
-    const afterDisplay = normalizeMutationDisplayValue(after);
-    const beforeDescriptor = buildMutationValueDescriptor(before, beforeDisplay);
-    const afterDescriptor = buildMutationValueDescriptor(after, afterDisplay);
-    const resolvedChangeType = changeType || (() => {
-        const beforeEmpty = beforeDisplay === '(empty)';
-        const afterEmpty = afterDisplay === '(empty)';
-        if (beforeEmpty && !afterEmpty) return 'add';
-        if (!beforeEmpty && afterEmpty) return 'remove';
-        if (beforeDisplay === afterDisplay) return 'unchanged';
-        return 'replace';
-    })();
-
-    if (resolvedChangeType === 'unchanged' && !includeUnchanged) {
-        return null;
-    }
-
-    return {
-        field,
-        label: label || field,
-        changeType: resolvedChangeType,
-        beforeDisplay,
-        afterDisplay,
-        beforeRaw: beforeDescriptor.raw,
-        afterRaw: afterDescriptor.raw,
-        beforeKind: beforeDescriptor.kind,
-        afterKind: afterDescriptor.kind,
-        beforeLineCount: beforeDescriptor.lineCount,
-        afterLineCount: afterDescriptor.lineCount,
-        isLongText: beforeDescriptor.isLongText || afterDescriptor.isLongText,
-        importance: getMutationFieldImportance(field),
-        group: getMutationFieldGroup(field),
-        includeUnchanged,
-    };
-}
-
-function formatMutationPreviewLine(change) {
-    if (!change || typeof change !== 'object') return '';
-
-    const label = change.label || change.field || 'Value';
-    if (change.changeType === 'add') {
-        return `${label}: set to ${change.afterDisplay}`;
-    }
-    if (change.changeType === 'remove') {
-        return `${label}: removed (${change.beforeDisplay})`;
-    }
-    return `${label}: ${change.beforeDisplay} -> ${change.afterDisplay}`;
-}
-
-function normalizeApprovalText(value) {
-    return String(value || '').trim().toUpperCase().replace(/\s+/g, ' ');
-}
-
-function buildExpectedJiraMutationApproval(toolName, context = {}) {
-    const guardrail = buildJiraMutationGuardrailMetadata(toolName) || {};
-    const ticketId = isNonEmptyString(context.ticketId) ? context.ticketId.trim().toUpperCase() : '';
-    const relatedIssueKey = isNonEmptyString(context.relatedIssueKey) ? context.relatedIssueKey.trim().toUpperCase() : '';
-    const commentId = isNonEmptyString(context.commentId) ? String(context.commentId).trim().toUpperCase() : '';
-
-    if (guardrail.provider === 'confluence') {
-        switch (toolName) {
-            case 'create_confluence_page':
-                return 'APPROVE CREATE CONFLUENCE PAGE';
-            case 'update_confluence_page':
-                return ticketId ? `APPROVE UPDATE PAGE ${ticketId}` : 'APPROVE UPDATE CONFLUENCE PAGE';
-            case 'delete_confluence_page':
-                return ticketId ? `APPROVE DELETE PAGE ${ticketId}` : 'APPROVE DELETE CONFLUENCE PAGE';
-            default:
-                return 'APPROVE CONFLUENCE MUTATION';
-        }
-    }
-
-    switch (toolName) {
-        case 'create_jira_ticket':
-            return 'APPROVE CREATE JIRA TICKET';
-        case 'assign_jira_ticket':
-            return ticketId ? `APPROVE ASSIGN ${ticketId}` : 'APPROVE ASSIGN JIRA TICKET';
-        case 'remove_jira_issue_link':
-            if (ticketId && relatedIssueKey) return `APPROVE UNLINK ${ticketId} ${relatedIssueKey}`;
-            if (ticketId) return `APPROVE UNLINK ${ticketId}`;
-            return 'APPROVE UNLINK JIRA ISSUES';
-        case 'transition_jira_ticket':
-            return ticketId ? `APPROVE TRANSITION ${ticketId}` : 'APPROVE TRANSITION JIRA TICKET';
-        case 'update_jira_ticket':
-            return ticketId ? `APPROVE UPDATE ${ticketId}` : 'APPROVE UPDATE JIRA TICKET';
-        case 'delete_jira_comment':
-            if (ticketId && commentId) return `APPROVE DELETE COMMENT ${commentId} ON ${ticketId}`;
-            if (commentId) return `APPROVE DELETE COMMENT ${commentId}`;
-            return 'APPROVE DELETE JIRA COMMENT';
-        case 'edit_jira_comment':
-            if (ticketId && commentId) return `APPROVE EDIT COMMENT ${commentId} ON ${ticketId}`;
-            if (commentId) return `APPROVE EDIT COMMENT ${commentId}`;
-            return 'APPROVE EDIT JIRA COMMENT';
-        case 'log_jira_work':
-            return ticketId ? `APPROVE LOG WORK ${ticketId}` : 'APPROVE LOG JIRA WORK';
-        case 'update_jira_estimates':
-            return ticketId ? `APPROVE UPDATE ESTIMATES ${ticketId}` : 'APPROVE UPDATE JIRA ESTIMATES';
-        default:
-            return 'APPROVE JIRA MUTATION';
-    }
-}
-
-function buildJiraMutationGuardrailMetadata(toolName, overrides = {}) {
-    const base = JIRA_MUTATION_GUARDRAILS[toolName];
-    if (!base) return null;
-    return {
-        ...base,
-        ...overrides,
-    };
-}
-
-function buildJiraMutationPreviewLines(lines = [], preview = null) {
-    const fromStructuredPreview = preview && typeof preview === 'object' && Array.isArray(preview.changes)
-        ? preview.changes.map(formatMutationPreviewLine).filter(Boolean)
-        : [];
-    const fromNotes = preview && typeof preview === 'object' && Array.isArray(preview.notes)
-        ? preview.notes.filter(isNonEmptyString).map(note => note.trim())
-        : [];
-    const filtered = [...fromStructuredPreview, ...fromNotes, ...(Array.isArray(lines)
-        ? lines.filter(isNonEmptyString).map(line => line.trim())
-        : [])];
-
-    return filtered.length > 0 ? filtered : ['No preview details were provided.'];
-}
-
-function isApprovalAnswer(answer) {
-    const normalized = normalizeApprovalText(
-        typeof answer === 'string'
-            ? answer
-            : answer?.answer
-    );
-
-    return normalized.includes('APPROVE')
-        || normalized.includes('YES')
-        || normalized.includes('PROCEED');
-}
-
-function buildJiraMutationApprovalPrompt({ guardrail, previewLines, preview, consequence, expectedApproval }) {
-    const builtPreviewLines = buildJiraMutationPreviewLines(previewLines, preview);
-    const previewText = builtPreviewLines
-        .slice(0, 4)
-        .map(line => `- ${line}`)
-        .join('\n');
-    const providerLabel = guardrail?.provider === 'confluence' ? 'Confluence' : 'Jira';
-    const extraLineCount = Math.max(0, builtPreviewLines.length - 4);
-
-    return [
-        `**Approval required for ${providerLabel} change**`,
-        '',
-        `The agent is about to ${guardrail.actionLabel}.`,
-        'Review the change summary below, then choose Approve change or Cancel.',
-        '',
-        'Top changes:',
-        previewText,
-        extraLineCount > 0 ? `- +${extraLineCount} more detail line${extraLineCount === 1 ? '' : 's'} available in the review panel.` : '',
-        '',
-        `Impact: ${String(guardrail.impactLevel || 'high').toUpperCase()}`,
-        isNonEmptyString(consequence) ? `Consequence: ${consequence.trim()}` : '',
-        '',
-        'Select Approve change to continue.',
-        `If chat approval is unavailable, reply with: ${expectedApproval}`,
-    ].filter(Boolean).join('\n');
-}
-
-function buildJiraMutationApprovalFailure({ approval, ticketId, ticketUrl, previewLines, preview }) {
-    const rejected = approval.mode === 'rejected';
-    const structuredPreview = preview && typeof preview === 'object'
-        ? preview
-        : buildMutationPreview({
-            guardrail: approval.guardrail,
-            subject: { id: ticketId, url: ticketUrl },
-            changes: [],
-            notes: buildJiraMutationPreviewLines(previewLines),
-        });
-
-    return {
-        success: false,
-        ticketId,
-        ticketUrl,
-        error: rejected
-            ? 'Jira mutation was cancelled because approval was not granted.'
-            : 'This Jira mutation requires explicit approval before it can continue.',
-        hint: rejected
-            ? 'Retry only after explicitly approving the change.'
-            : 'Approve the change in chat, or reply with the exact approval phrase and retry.',
-        expectedApproval: approval.expectedApproval,
-        preview: structuredPreview,
-        previewLines: buildJiraMutationPreviewLines(previewLines, structuredPreview),
-        guardrail: buildMutationResultGuardrail(approval.guardrail, { approved: false, mode: approval.mode }, {
-            approvalMode: approval.mode,
-        }),
-        latestUserMessage: !rejected && isNonEmptyString(approval.latestUserMessage)
-            ? approval.latestUserMessage
-            : undefined,
-    };
-}
-
-async function requireJiraMutationApproval({ deps, toolName, previewLines, preview, consequence, ticketId, relatedIssueKey, commentId }) {
-    const guardrail = buildJiraMutationGuardrailMetadata(toolName);
-    if (!guardrail?.requiresApproval) {
-        return {
-            approved: true,
-            guardrail,
-            mode: 'not-required',
-            expectedApproval: null,
-            preview,
-        };
-    }
-
-    const latestUserMessage = getLatestUserMessageText(deps);
-    const expectedApproval = buildExpectedJiraMutationApproval(toolName, { ticketId, relatedIssueKey, commentId });
-    const resolvedPreview = preview && typeof preview === 'object'
-        ? preview
-        : buildMutationPreview({
-            guardrail,
-            subject: { id: ticketId },
-            changes: [],
-            notes: buildJiraMutationPreviewLines(previewLines),
-            consequence,
-        });
-
-    if (deps?.chatManager?.broadcastToolProgress) {
-        deps.chatManager.broadcastToolProgress(toolName, {
-            phase: 'approval',
-            message: 'Awaiting explicit user approval...',
-        });
-    }
-
-    if (typeof deps?.chatManager?.requestUserInput === 'function') {
-        const sessionId = resolveActiveSessionId(undefined, deps) || 'default';
-        const response = await deps.chatManager.requestUserInput(
-            buildJiraMutationApprovalPrompt({
-                guardrail,
-                previewLines,
-                preview: resolvedPreview,
-                consequence,
-                expectedApproval,
-            }),
-            ['Approve change', 'Cancel'],
-            {
-                type: 'confirmation',
-                sessionId,
-                mutationPreview: resolvedPreview,
-                preview: resolvedPreview,
-                guardrail,
-                expectedApproval,
-            }
-        );
-
-        if (isApprovalAnswer(response)) {
-            return {
-                approved: true,
-                guardrail,
-                mode: 'interactive',
-                expectedApproval,
-                preview: resolvedPreview,
-            };
-        }
-
-        return {
-            approved: false,
-            guardrail,
-            mode: 'rejected',
-            expectedApproval,
-            latestUserMessage,
-            preview: resolvedPreview,
-        };
-    }
-
-    if (normalizeApprovalText(latestUserMessage).includes(normalizeApprovalText(expectedApproval))) {
-        return {
-            approved: true,
-            guardrail,
-            mode: 'latest-user-message',
-            expectedApproval,
-            preview: resolvedPreview,
-        };
-    }
-
-    return {
-        approved: false,
-        guardrail,
-        mode: 'missing-confirmation',
-        expectedApproval,
-        latestUserMessage,
-        preview: resolvedPreview,
-    };
-}
-
-function getJiraAttachmentConfig(options = {}) {
-    const cloudId = (process.env.JIRA_CLOUD_ID || '').replace(/"/g, '').trim();
-    const baseUrl = (options.baseUrl || process.env.JIRA_BASE_URL || '').trim();
-    const email = (process.env.JIRA_EMAIL || process.env.ATLASSIAN_EMAIL || '').trim();
-    const apiToken = (process.env.JIRA_API_TOKEN || process.env.ATLASSIAN_API_TOKEN || '').trim();
-
-    if (!cloudId && !baseUrl) {
-        return { error: 'JIRA_BASE_URL or JIRA_CLOUD_ID is required for Jira attachments.' };
-    }
-    if (!email || !apiToken) {
-        return { error: 'JIRA_EMAIL and JIRA_API_TOKEN are required for Jira attachments.' };
-    }
-
-    return { cloudId, baseUrl, email, apiToken };
-}
-
-function getJiraApiConfig(options = {}) {
-    loadEnvVars();
-
-    const cloudId = (process.env.JIRA_CLOUD_ID || '').replace(/"/g, '').trim();
-    const baseUrl = (process.env.JIRA_BASE_URL || '').trim();
-    const email = (process.env.JIRA_EMAIL || process.env.ATLASSIAN_EMAIL || '').trim();
-    const apiToken = (process.env.JIRA_API_TOKEN || process.env.ATLASSIAN_API_TOKEN || '').trim();
-
-    if (!cloudId && !baseUrl) {
-        return {
-            error: 'JIRA_BASE_URL or JIRA_CLOUD_ID must be set in agentic-workflow/.env',
-        };
-    }
-
-    if (!email || !apiToken) {
-        return {
-            error: 'JIRA_EMAIL and JIRA_API_TOKEN are required for Jira operations',
-        };
-    }
-
-    const apiBase = cloudId
-        ? `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3`
-        : `${baseUrl.replace(/\/+$/, '')}/rest/api/3`;
-
-    return {
-        cloudId,
-        baseUrl,
-        browseBaseUrl: (options.jiraBaseUrl || baseUrl || '').replace(/\/+$/, ''),
-        email,
-        apiToken,
-        apiBase,
-        headers: {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-            'Authorization': 'Basic ' + Buffer.from(`${email}:${apiToken}`).toString('base64'),
-        },
-    };
-}
-
-function buildJiraIssueApiUrl(jiraConfig, ticketId, suffix = '') {
-    return `${jiraConfig.apiBase}/issue/${ticketId}${suffix}`;
-}
-
-function buildJiraAgileApiUrl(jiraConfig, suffix = '') {
-    const agileBase = jiraConfig.cloudId
-        ? `https://api.atlassian.com/ex/jira/${jiraConfig.cloudId}/rest/agile/1.0`
-        : `${jiraConfig.baseUrl.replace(/\/+$/, '')}/rest/agile/1.0`;
-
-    return `${agileBase}${suffix}`;
-}
-
-function buildJiraBrowseUrl(jiraConfig, ticketId) {
-    return jiraConfig.browseBaseUrl
-        ? `${jiraConfig.browseBaseUrl}/browse/${ticketId}`
-        : `https://${process.env.JIRA_SITE_NAME || 'jira'}.atlassian.net/browse/${ticketId}`;
-}
-
-function splitCommaSeparated(value) {
-    if (!isNonEmptyString(value)) return [];
-    return value.split(',').map(item => item.trim()).filter(Boolean);
-}
-
-function normalizeMaxResults(value, defaultValue = 10) {
-    const num = Number(value);
-    if (!Number.isFinite(num) || num < 1) return defaultValue;
-    return Math.min(Math.max(Math.round(num), 1), 50);
-}
-
-function parseJsonObjectInput(rawValue, fieldName) {
-    if (!isNonEmptyString(rawValue)) {
-        return { value: undefined };
-    }
-
-    try {
-        const parsed = JSON.parse(rawValue);
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            return { error: `${fieldName} must be a JSON object string.` };
-        }
-        return { value: parsed };
-    } catch (error) {
-        return { error: `Invalid ${fieldName}: ${error.message}` };
-    }
-}
-
-function parseJiraErrorBody(rawBody) {
-    const bodyText = isNonEmptyString(rawBody) ? rawBody.trim() : '';
-
-    if (!bodyText) {
-        return {
-            details: '',
-            errorMessages: [],
-            fieldErrors: {},
-        };
-    }
-
-    try {
-        const parsed = JSON.parse(bodyText);
-        return {
-            details: bodyText,
-            errorMessages: Array.isArray(parsed.errorMessages) ? parsed.errorMessages.filter(Boolean) : [],
-            fieldErrors: parsed.errors && typeof parsed.errors === 'object' ? parsed.errors : {},
-        };
-    } catch {
-        return {
-            details: bodyText,
-            errorMessages: [],
-            fieldErrors: {},
-        };
-    }
-}
-
-function buildJiraErrorHint(parsedError, options = {}) {
-    const messages = [
-        ...parsedError.errorMessages,
-        ...Object.values(parsedError.fieldErrors || {}),
-        parsedError.details,
-    ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-
-    if (options.includesEnvironment || parsedError.fieldErrors?.environment || messages.includes('environment')) {
-        return 'The Jira environment field must be sent as plain text. Do not wrap environment in Atlassian Document Format.';
-    }
-
-    if (options.includesDescription || parsedError.fieldErrors?.description || messages.includes('description') || messages.includes('adf') || messages.includes('atlassian document format')) {
-        return 'Jira rejected the rich text payload. Keep section labels bold-only, keep identifiers and event names code-only, and do not combine bold and inline code on the same text.';
-    }
-
-    return 'Verify the Jira field types and values match what the project create or edit screen expects.';
-}
-
-function formatJiraErrorResponse(prefix, status, rawBody, options = {}) {
-    const parsedError = parseJiraErrorBody(rawBody);
-    return {
-        message: `${prefix}: HTTP ${status}`,
-        details: parsedError.details,
-        errorMessages: parsedError.errorMessages.length > 0 ? parsedError.errorMessages : undefined,
-        fieldErrors: Object.keys(parsedError.fieldErrors).length > 0 ? parsedError.fieldErrors : undefined,
-        hint: buildJiraErrorHint(parsedError, options),
-    };
-}
-
-function normalizeJiraUser(user) {
-    if (!user || typeof user !== 'object') return null;
-
-    return {
-        accountId: user.accountId || '',
-        displayName: user.displayName || '',
-        emailAddress: user.emailAddress || null,
-        active: user.active !== false,
-        accountType: user.accountType || '',
-        self: user.self || '',
-    };
-}
-
-function escapeJqlString(value) {
-    return String(value || '')
-        .replace(/\\/g, '\\\\')
-        .replace(/"/g, '\\"');
-}
-
-function buildJiraTextSearchJql(query, projectKey) {
-    if (!isNonEmptyString(query)) return '';
-
-    const clauses = [];
-    if (isNonEmptyString(projectKey)) {
-        clauses.push(`project = "${projectKey.trim()}"`);
-    }
-    clauses.push(`text ~ "\\"${escapeJqlString(query.trim())}\\""`);
-
-    return clauses.join(' AND ');
-}
-
-function buildJiraEpicSearchJql(query, projectKey) {
-    const clauses = [];
-
-    if (isNonEmptyString(projectKey)) {
-        clauses.push(`project = "${projectKey.trim()}"`);
-    }
-
-    clauses.push('issuetype = Epic');
-
-    if (isNonEmptyString(query)) {
-        clauses.push(`text ~ "\\"${escapeJqlString(query.trim())}\\""`);
-    }
-
-    return `${clauses.join(' AND ')} ORDER BY updated DESC`;
-}
-
-async function executeJiraIssueSearch(jiraConfig, { jql, maxResults, fields }) {
-    const payload = {
-        jql,
-        maxResults,
-        fields,
-        fieldsByKeys: false,
-    };
-
-    let endpoint = 'enhanced-jql';
-    let response = await fetch(`${jiraConfig.apiBase}/search/jql`, {
-        method: 'POST',
-        headers: jiraConfig.headers,
-        body: JSON.stringify(payload),
-    });
-
-    if (!response.ok && [404, 405, 501].includes(response.status)) {
-        endpoint = 'legacy-search-fallback';
-        response = await fetch(`${jiraConfig.apiBase}/search`, {
-            method: 'POST',
-            headers: jiraConfig.headers,
-            body: JSON.stringify(payload),
-        });
-    }
-
-    if (!response.ok) {
-        const rawBody = await response.text();
-        return {
-            success: false,
-            endpoint,
-            status: response.status,
-            payload,
-            formattedError: formatJiraErrorResponse('Issue search failed', response.status, rawBody),
-        };
-    }
-
-    return {
-        success: true,
-        endpoint,
-        payload,
-        data: await response.json(),
-    };
-}
-
-function formatJiraSearchIssue(issue) {
-    const reference = formatJiraIssueReference(issue);
-    if (!reference?.key) return null;
-
-    const fields = issue.fields || {};
-    return {
-        ...reference,
-        assignee: normalizeJiraUser(fields.assignee),
-        reporter: normalizeJiraUser(fields.reporter),
-        labels: Array.isArray(fields.labels) ? fields.labels.filter(Boolean) : [],
-        created: fields.created || '',
-        updated: fields.updated || '',
-    };
-}
-
-function formatJiraIssueReference(issue) {
-    if (!issue || typeof issue !== 'object') return null;
-
-    const fields = issue.fields || {};
-    return {
-        id: issue.id || '',
-        key: issue.key || '',
-        self: issue.self || '',
-        summary: fields.summary || '',
-        status: fields.status?.name || '',
-        issueType: fields.issuetype?.name || '',
-        priority: fields.priority?.name || '',
-    };
-}
-
-function formatJiraSubtasks(fields) {
-    const subtasks = fields.subtasks || fields['sub-tasks'] || [];
-    if (!Array.isArray(subtasks)) return [];
-    return subtasks.map(formatJiraIssueReference).filter(subtask => subtask?.key);
-}
-
-function formatJiraIssueLinks(fields) {
-    if (!Array.isArray(fields.issuelinks)) return [];
-
-    return fields.issuelinks
-        .map(link => {
-            const inwardIssue = formatJiraIssueReference(link.inwardIssue);
-            const outwardIssue = formatJiraIssueReference(link.outwardIssue);
-            const relatedIssue = inwardIssue || outwardIssue;
-
-            if (!relatedIssue?.key) return null;
-
-            return {
-                id: link.id || '',
-                type: {
-                    id: link.type?.id || '',
-                    name: link.type?.name || '',
-                    inward: link.type?.inward || '',
-                    outward: link.type?.outward || '',
-                },
-                direction: inwardIssue ? 'inward' : 'outward',
-                relatedIssueKey: relatedIssue.key,
-                relatedIssue,
-            };
-        })
-        .filter(Boolean);
-}
-
-function formatJiraEpicRelationship(fields) {
-    const parentReference = formatJiraIssueReference(fields.parent);
-    if (parentReference?.issueType === 'Epic') {
-        return parentReference;
-    }
-
-    return null;
-}
-
-function formatJiraEpicSearchResult(issue, jiraConfig) {
-    const epic = formatJiraSearchIssue(issue);
-    if (!epic?.key) return null;
-
-    return {
-        id: epic.id,
-        key: epic.key,
-        name: epic.summary,
-        summary: epic.summary,
-        status: epic.status,
-        issueType: epic.issueType,
-        priority: epic.priority,
-        assignee: epic.assignee,
-        reporter: epic.reporter,
-        labels: epic.labels,
-        created: epic.created,
-        updated: epic.updated,
-        ticketUrl: buildJiraBrowseUrl(jiraConfig, epic.key),
-    };
-}
-
-function formatJiraEpicDetails(issueData, jiraConfig, agileEpic = null, explicitTicketId = '') {
-    const epicKey = agileEpic?.key || issueData?.key || explicitTicketId || '';
-    const ticket = issueData ? formatJiraTicket(issueData, epicKey || explicitTicketId) : null;
-    const fields = issueData?.fields || {};
-
-    return {
-        success: true,
-        epicId: agileEpic?.id || issueData?.id || '',
-        epicKey,
-        name: agileEpic?.name || ticket?.summary || fields.summary || '',
-        summary: agileEpic?.summary || ticket?.summary || fields.summary || '',
-        issueType: ticket?.issueType || fields.issuetype?.name || '',
-        status: ticket?.status || fields.status?.name || '',
-        priority: ticket?.priority || fields.priority?.name || '',
-        done: typeof agileEpic?.done === 'boolean' ? agileEpic.done : undefined,
-        color: agileEpic?.color?.key || agileEpic?.color?.name || agileEpic?.colorName || '',
-        labels: Array.isArray(ticket?.labels) ? ticket.labels : [],
-        components: Array.isArray(ticket?.components) ? ticket.components : [],
-        assignee: normalizeJiraUser(fields.assignee),
-        reporter: normalizeJiraUser(fields.reporter),
-        description: ticket?.description || '',
-        acceptanceCriteria: ticket?.acceptanceCriteria || '',
-        created: ticket?.created || fields.created || '',
-        updated: ticket?.updated || fields.updated || '',
-        ticketUrl: epicKey ? buildJiraBrowseUrl(jiraConfig, epicKey) : undefined,
-        sourceEndpoint: agileEpic ? 'agile-epic' : 'issue-fallback',
-    };
-}
-
-function selectJiraSubtaskIssueType(issueTypes, preferredIssueType) {
-    const availableSubtasks = Array.isArray(issueTypes)
-        ? issueTypes.filter(issueType => issueType?.subtask)
-        : [];
-
-    if (availableSubtasks.length === 0) {
-        return { selected: null, availableSubtasks: [] };
-    }
-
-    const normalizedPreference = isNonEmptyString(preferredIssueType)
-        ? preferredIssueType.trim().toLowerCase()
-        : '';
-
-    if (normalizedPreference) {
-        const exactMatch = availableSubtasks.find(issueType => {
-            const name = String(issueType.name || '').trim().toLowerCase();
-            const id = String(issueType.id || '').trim().toLowerCase();
-            return name === normalizedPreference || id === normalizedPreference;
-        }) || null;
-
-        return { selected: exactMatch, availableSubtasks };
-    }
-
-    const defaultMatch = availableSubtasks.find(issueType => String(issueType.name || '').trim().toLowerCase() === 'sub-task')
-        || availableSubtasks[0]
-        || null;
-
-    return { selected: defaultMatch, availableSubtasks };
-}
-
-async function fetchJiraCreateIssueTypes(jiraConfig, projectKey) {
-    const url = `${jiraConfig.apiBase}/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes`;
-    const response = await fetch(url, {
-        method: 'GET',
-        headers: jiraConfig.headers,
-    });
-
-    if (!response.ok) {
-        return {
-            issueTypes: [],
-            error: `Failed to fetch issue types for project ${projectKey}: HTTP ${response.status}`,
-            details: await response.text(),
-        };
-    }
-
-    const data = await response.json();
-    return {
-        issueTypes: data.issueTypes || data.values || [],
-        error: null,
-        details: null,
-    };
-}
-
-function formatJiraDateTime(value) {
-    if (isNonEmptyString(value)) return value.trim();
-
-    const date = new Date();
-    const pad = number => String(number).padStart(2, '0');
-
-    return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`
-        + `T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}.000+0000`;
-}
-
-function buildJiraAttachmentUrl(ticketKey, jiraConfig) {
-    if (jiraConfig.cloudId) {
-        return `https://api.atlassian.com/ex/jira/${jiraConfig.cloudId}/rest/api/3/issue/${ticketKey}/attachments`;
-    }
-    return `${jiraConfig.baseUrl.replace(/\/+$/, '')}/rest/api/3/issue/${ticketKey}/attachments`;
-}
-
-function sanitizeFileName(fileName) {
-    return String(fileName || 'attachment')
-        .replace(/[\r\n"]/g, '_')
-        .replace(/[^a-zA-Z0-9._-]/g, '_');
-}
-
-function buildMultipartPayload(fileName, mimeType, buffer, boundaryPrefix) {
-    const boundary = `----${boundaryPrefix}${crypto.randomBytes(16).toString('hex')}`;
-    const safeFileName = sanitizeFileName(fileName);
-    const header = Buffer.from(
-        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${safeFileName}"\r\nContent-Type: ${mimeType}\r\n\r\n`
-    );
-    const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
-
-    return {
-        boundary,
-        body: Buffer.concat([header, buffer, footer]),
-    };
-}
-
-function buildJiraAttachmentHeaders(jiraConfig, boundary) {
-    return {
-        'Authorization': 'Basic ' + Buffer.from(`${jiraConfig.email}:${jiraConfig.apiToken}`).toString('base64'),
-        'X-Atlassian-Token': 'no-check',
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
-    };
-}
-
-function getEvidenceItemTimestamp(value) {
-    const parsed = Date.parse(String(value || ''));
-    return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function resolveEvidenceScopeMessageId(entry, options = {}) {
-    const explicitMessageId = isNonEmptyString(options?.messageId) ? options.messageId.trim() : '';
-    if (explicitMessageId) return explicitMessageId;
-
-    const activeEvidenceMessageId = isNonEmptyString(options?.activeEvidenceMessageId)
-        ? options.activeEvidenceMessageId.trim()
-        : (isNonEmptyString(entry?.sessionContext?.activeEvidenceMessageId)
-            ? entry.sessionContext.activeEvidenceMessageId.trim()
-            : '');
-    if (activeEvidenceMessageId) return activeEvidenceMessageId;
-
-    if (options?.latestOnly !== true) return null;
-
-    let latestMessageId = null;
-    let latestTimestamp = 0;
-    const consider = (item) => {
-        if (!isNonEmptyString(item?.messageId)) return;
-        const itemTimestamp = getEvidenceItemTimestamp(item?.timestamp);
-        if (!latestMessageId || itemTimestamp >= latestTimestamp) {
-            latestMessageId = item.messageId.trim();
-            latestTimestamp = itemTimestamp;
-        }
-    };
-
-    if (Array.isArray(entry?.sessionAttachments)) {
-        for (const item of entry.sessionAttachments) consider(item);
-    }
-    if (Array.isArray(entry?.videoContext)) {
-        for (const item of entry.videoContext) consider(item);
-    }
-
-    return latestMessageId;
-}
-
-function isEvidenceItemInScope(item, scopeMessageId) {
-    if (!scopeMessageId) return true;
-    return isNonEmptyString(item?.messageId) && item.messageId.trim() === scopeMessageId;
-}
-
-function collectSessionEvidence(entry, options = {}) {
-    const scopeMessageId = resolveEvidenceScopeMessageId(entry, options);
-    const images = Array.isArray(entry?.sessionAttachments)
-        ? entry.sessionAttachments.filter(att => att?.type === 'image' && isNonEmptyString(att?.data) && isEvidenceItemInScope(att, scopeMessageId))
-        : [];
-
-    const videosByKey = new Map();
-
-    const upsertVideo = (video) => {
-        if (!video) return;
-
-        const videoPath = isNonEmptyString(video.videoPath) ? video.videoPath
-            : (isNonEmptyString(video.tempPath) ? video.tempPath : '');
-        const url = isNonEmptyString(video.url) ? video.url : '';
-        const messageId = isNonEmptyString(video.messageId) ? video.messageId.trim() : '';
-        const keyBase = videoPath || url || `${video.filename || 'video'}:${video.timestamp || ''}`;
-        const key = messageId ? `${messageId}::${keyBase}` : keyBase;
-        if (!key) return;
-
-        const normalized = {
-            messageId: messageId || undefined,
-            filename: video.filename || (videoPath ? path.basename(videoPath) : 'recording.mp4'),
-            media_type: video.media_type || undefined,
-            videoPath: videoPath || undefined,
-            url: url || undefined,
-            provider: video.provider || undefined,
-            duration: Number.isFinite(video.duration) ? video.duration : null,
-            frameCount: Number.isFinite(video.frameCount) ? video.frameCount : 0,
-            frames: Array.isArray(video.frames) ? video.frames.filter(frame => isNonEmptyString(frame?.path)) : [],
-            metadata: video.metadata || null,
-            timestamp: video.timestamp || undefined,
-        };
-
-        const existing = videosByKey.get(key);
-        if (!existing) {
-            videosByKey.set(key, normalized);
-            return;
-        }
-
-        const mergedFrames = [];
-        const seenFramePaths = new Set();
-        for (const frame of [...existing.frames, ...normalized.frames]) {
-            if (!isNonEmptyString(frame?.path) || seenFramePaths.has(frame.path)) continue;
-            seenFramePaths.add(frame.path);
-            mergedFrames.push(frame);
-        }
-
-        videosByKey.set(key, {
-            ...existing,
-            ...normalized,
-            filename: existing.filename || normalized.filename,
-            media_type: existing.media_type || normalized.media_type,
-            videoPath: existing.videoPath || normalized.videoPath,
-            url: existing.url || normalized.url,
-            provider: existing.provider || normalized.provider,
-            duration: existing.duration ?? normalized.duration,
-            frameCount: Math.max(existing.frameCount || 0, normalized.frameCount || 0, mergedFrames.length),
-            frames: mergedFrames,
-            metadata: existing.metadata || normalized.metadata,
-            timestamp: existing.timestamp || normalized.timestamp,
-        });
-    };
-
-    if (Array.isArray(entry?.sessionAttachments)) {
-        for (const att of entry.sessionAttachments) {
-            if (att?.type === 'video' && (isNonEmptyString(att?.tempPath) || isNonEmptyString(att?.url)) && isEvidenceItemInScope(att, scopeMessageId)) {
-                upsertVideo(att);
-            }
-        }
-    }
-
-    if (Array.isArray(entry?.videoContext)) {
-        for (const ctx of entry.videoContext) {
-            if (((Array.isArray(ctx?.frames) && ctx.frames.length > 0) || isNonEmptyString(ctx?.videoPath)) && isEvidenceItemInScope(ctx, scopeMessageId)) {
-                upsertVideo(ctx);
-            }
-        }
-    }
-
-    const videos = Array.from(videosByKey.values()).filter(video =>
-        (Array.isArray(video.frames) && video.frames.length > 0)
-        || isNonEmptyString(video.videoPath)
-    );
-
-    return {
-        images,
-        videos,
-        scopeMessageId,
-        hasEvidence: images.length > 0 || videos.length > 0,
-    };
-}
-
-function collectSessionDocuments(entry, options = {}) {
-    const scopeMessageId = resolveEvidenceScopeMessageId(entry, options);
-    const documents = Array.isArray(entry?.sessionAttachments)
-        ? entry.sessionAttachments
-            .filter(att => att?.type === 'document' && isNonEmptyString(att?.path) && isEvidenceItemInScope(att, scopeMessageId))
-            .filter(att => {
-                try {
-                    return fs.existsSync(att.path);
-                } catch {
-                    return false;
-                }
-            })
-            .sort((left, right) => getEvidenceItemTimestamp(right?.timestamp) - getEvidenceItemTimestamp(left?.timestamp))
-        : [];
-
-    return { documents, scopeMessageId };
-}
-
-function findSessionDocument(entry, filename, options = {}) {
-    const { documents, scopeMessageId } = collectSessionDocuments(entry, options);
-    if (documents.length === 0) {
-        return { documents, scopeMessageId, match: null };
-    }
-
-    if (!isNonEmptyString(filename)) {
-        return { documents, scopeMessageId, match: documents[0] };
-    }
-
-    const needle = filename.trim().toLowerCase();
-    const exact = documents.find(doc => String(doc.filename || '').trim().toLowerCase() === needle);
-    if (exact) return { documents, scopeMessageId, match: exact };
-
-    const partial = documents.find(doc => String(doc.filename || '').trim().toLowerCase().includes(needle));
-    return { documents, scopeMessageId, match: partial || null };
-}
-
-function selectVideoFrames(videoCtx, frameTimestamps, maxFrames = 8) {
-    const selectedFrames = [];
-    const seenPaths = new Set();
-
-    for (const video of videoCtx) {
-        if (!Array.isArray(video?.frames) || video.frames.length === 0) continue;
-
-        if (Array.isArray(frameTimestamps) && frameTimestamps.length > 0) {
-            for (const ts of frameTimestamps) {
-                const match = video.frames.find(frame => Math.abs(frame.timestamp - ts) <= 1);
-                if (match && !seenPaths.has(match.path)) {
-                    seenPaths.add(match.path);
-                    selectedFrames.push(match);
-                }
-            }
-            continue;
-        }
-
-        const step = Math.max(1, Math.floor(video.frames.length / maxFrames));
-        for (let i = 0; i < video.frames.length && selectedFrames.length < maxFrames; i += step) {
-            const frame = video.frames[i];
-            if (!seenPaths.has(frame.path)) {
-                seenPaths.add(frame.path);
-                selectedFrames.push(frame);
-            }
-        }
-    }
-
-    return selectedFrames.slice(0, maxFrames);
-}
-
-async function uploadJiraAttachment(attachUrl, jiraConfig, fileName, mimeType, buffer, boundaryPrefix, extra = {}) {
-    try {
-        const { boundary, body } = buildMultipartPayload(fileName, mimeType, buffer, boundaryPrefix);
-        const response = await fetch(attachUrl, {
-            method: 'POST',
-            headers: buildJiraAttachmentHeaders(jiraConfig, boundary),
-            body,
-        });
-
-        if (response.ok) {
-            // Parse response to get attachment metadata (id, content URL, etc.)
-            let attachmentMeta = null;
-            try {
-                const jsonResp = await response.json();
-                // Jira returns an array of attachment objects
-                attachmentMeta = Array.isArray(jsonResp) ? jsonResp[0] : jsonResp;
-            } catch (_parseErr) { /* best-effort metadata extraction */ }
-
-            return { fileName, success: true, attachmentMeta, ...extra };
-        }
-
-        const errText = await response.text();
-        return {
-            fileName,
-            success: false,
-            error: `HTTP ${response.status}: ${errText.slice(0, 200)}`,
-            ...extra,
-        };
-    } catch (error) {
-        return { fileName, success: false, error: error.message, ...extra };
-    }
-}
-
-function resolveWorkspaceFilePath(rawPath, workspaceRoot = PROJECT_ROOT) {
-    let resolvedPath = String(rawPath || '');
-    if (!path.isAbsolute(resolvedPath)) {
-        resolvedPath = path.resolve(workspaceRoot, resolvedPath);
-    }
-    return resolvedPath;
-}
-
-function createUniqueAttachmentFileName(fileName, seenNames) {
-    const normalizedName = sanitizeFileName(fileName || 'attachment');
-    const ext = path.extname(normalizedName);
-    const stem = ext ? normalizedName.slice(0, -ext.length) : normalizedName;
-
-    let candidate = normalizedName || `attachment${ext}`;
-    let suffix = 2;
-    while (seenNames.has(candidate.toLowerCase())) {
-        candidate = `${stem || 'attachment'}-${suffix}${ext}`;
-        suffix += 1;
-    }
-
-    seenNames.add(candidate.toLowerCase());
-    return candidate;
-}
-
-function formatAttachmentSize(sizeBytes) {
-    const value = Number(sizeBytes);
-    if (!Number.isFinite(value) || value <= 0) return '';
-    if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-    if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
-    return `${value} B`;
-}
-
-function createCommentScreenshotFileName(index, mimeType) {
-    const ext = mimeType === 'image/jpeg' ? '.jpg'
-        : mimeType === 'image/gif' ? '.gif'
-            : mimeType === 'image/webp' ? '.webp'
-                : mimeType === 'image/svg+xml' ? '.svg'
-                    : '.png';
-    return `comment-screenshot-${index}${ext}`;
-}
-
-function createCommentFrameFileName(videoFileName, timestamp) {
-    const videoBase = path.basename(String(videoFileName || 'recording'), path.extname(String(videoFileName || 'recording')));
-    const timeLabel = String(timestamp).replace(/[^0-9.]/g, '_');
-    return `${sanitizeFileName(videoBase || 'recording')}-frame-${timeLabel || '0'}s.jpg`;
-}
-
-function createAdfTextNode(text, marks) {
-    const node = {
-        type: 'text',
-        text,
-    };
-    if (Array.isArray(marks) && marks.length > 0) {
-        node.marks = marks;
-    }
-    return node;
-}
-
-function appendAdfBulletSection(adf, title, items) {
-    if (!adf || !Array.isArray(adf.content) || !Array.isArray(items) || items.length === 0) return;
-
-    adf.content.push({
-        type: 'paragraph',
-        content: [createAdfTextNode(title, [{ type: 'strong' }])],
-    });
-
-    adf.content.push({
-        type: 'bulletList',
-        content: items.map(item => ({
-            type: 'listItem',
-            content: [{
-                type: 'paragraph',
-                content: item,
-            }],
-        })),
-    });
-}
-
-async function resolveCommentMediaFileIds(apiConfig, ticketKey, uploadedAttachments) {
-    const attachmentsNeedingIds = uploadedAttachments.filter(att => isNonEmptyString(att?.id));
-    if (attachmentsNeedingIds.length === 0) return;
-
-    try {
-        const issueAttUrl = `${buildJiraIssueApiUrl(apiConfig, ticketKey)}?fields=attachment`;
-        const issueAttResp = await fetch(issueAttUrl, {
-            method: 'GET',
-            headers: apiConfig.headers,
-        });
-
-        if (!issueAttResp.ok) return;
-
-        const issueData = await issueAttResp.json();
-        const jiraAttachments = issueData?.fields?.attachment || [];
-        for (const att of attachmentsNeedingIds) {
-            const match = jiraAttachments.find(item => String(item.id) === String(att.id));
-            if (match?.mediaApiFileId) {
-                att.mediaFileId = match.mediaApiFileId;
-            }
-        }
-    } catch {
-        // Best-effort only.
-    }
-}
-
-function buildJiraMediaCommentWikiBody(comment, uploadedAttachments, skippedVideos) {
-    const sections = [markdownToWikiMarkup(comment || '')];
-
-    const uploadedVideos = uploadedAttachments.filter(att => att.category === 'video');
-    const inlineAttachments = uploadedAttachments.filter(att => att.category !== 'video');
-
-    if (uploadedVideos.length > 0 || skippedVideos.length > 0) {
-        const lines = ['h3. Video evidence'];
-
-        for (const video of uploadedVideos) {
-            lines.push(`* ${video.filename}`);
-        }
-
-        for (const skipped of skippedVideos) {
-            lines.push(`* ${skipped.fileName} - skipped original upload (${skipped.error})`);
-        }
-
-        sections.push(lines.join('\n'));
-    }
-
-    if (inlineAttachments.length > 0) {
-        sections.push(inlineAttachments.map(att => `!${att.filename}|thumbnail!`).join('\n'));
-    }
-
-    return sections.filter(section => isNonEmptyString(section)).join('\n\n');
-}
-
-function buildJiraMediaCommentAdf(comment, uploadedAttachments, skippedVideos, layout, useInlineMedia) {
-    const adf = markdownToAdf(comment || '');
-    const uploadedVideos = uploadedAttachments.filter(att => att.category === 'video');
-    const inlineAttachments = uploadedAttachments.filter(att => att.category !== 'video');
-
-    const videoItems = uploadedVideos.map(video => [createAdfTextNode(video.filename)]);
-
-    const skippedVideoItems = skippedVideos.map(skipped => [
-        createAdfTextNode(`${skipped.fileName} - skipped original upload (${skipped.error})`),
-    ]);
-
-    appendAdfBulletSection(adf, 'Video evidence:', [...videoItems, ...skippedVideoItems]);
-
-    if (useInlineMedia) {
-        const unresolvedInlineAttachments = [];
-        for (const att of inlineAttachments) {
-            if (!isNonEmptyString(att.mediaFileId)) {
-                unresolvedInlineAttachments.push(att);
-                continue;
-            }
-
-            adf.content.push({
-                type: 'mediaSingle',
-                attrs: { layout },
-                content: [{
-                    type: 'media',
-                    attrs: {
-                        id: att.mediaFileId,
-                        type: 'file',
-                        collection: '',
-                    },
-                }],
-            });
-        }
-
-        if (unresolvedInlineAttachments.length > 0) {
-            const unresolvedItems = unresolvedInlineAttachments.map(att => {
-                if (isNonEmptyString(att.contentUrl)) {
-                    return [createAdfTextNode(att.filename, [{ type: 'link', attrs: { href: att.contentUrl } }])];
-                }
-                return [createAdfTextNode(att.filename)];
-            });
-            appendAdfBulletSection(adf, 'Attached previews:', unresolvedItems);
-        }
-
-        return adf;
-    }
-
-    const mediaItems = inlineAttachments.map(att => {
-        if (isNonEmptyString(att.contentUrl)) {
-            return [createAdfTextNode(att.filename, [{ type: 'link', attrs: { href: att.contentUrl } }])];
-        }
-        return [createAdfTextNode(att.filename)];
-    });
-    appendAdfBulletSection(adf, 'Attached previews:', mediaItems);
-    return adf;
-}
-
-async function postJiraCommentWithMedia({ ticketKey, comment, uploadedAttachments, skippedVideos, apiConfig, imageLayout }) {
-    let commentResult = { success: false };
-    const layout = imageLayout || 'center';
-
-    try {
-        const v2Base = apiConfig.cloudId
-            ? `https://api.atlassian.com/ex/jira/${apiConfig.cloudId}/rest/api/2`
-            : `${(apiConfig.baseUrl || '').replace(/\/+$/, '')}/rest/api/2`;
-        const v2CommentUrl = `${v2Base}/issue/${ticketKey}/comment`;
-        const wikiBody = buildJiraMediaCommentWikiBody(comment, uploadedAttachments, skippedVideos);
-
-        const v2Resp = await fetch(v2CommentUrl, {
-            method: 'POST',
-            headers: apiConfig.headers,
-            body: JSON.stringify({ body: wikiBody }),
-        });
-
-        if (v2Resp.ok) {
-            let data = null;
-            try { data = await v2Resp.json(); } catch { /* best-effort */ }
-            commentResult = {
-                success: true,
-                commentId: data?.id || null,
-                strategy: 'v2-wiki-markup',
-            };
-        }
-    } catch {
-        // Non-fatal: fall through to ADF strategies.
-    }
-
-    if (!commentResult.success) {
-        await resolveCommentMediaFileIds(apiConfig, ticketKey, uploadedAttachments);
-
-        const hasInlineMediaFileIds = uploadedAttachments.some(att => att.category !== 'video' && isNonEmptyString(att.mediaFileId));
-        if (hasInlineMediaFileIds) {
-            const commentUrl = buildJiraIssueApiUrl(apiConfig, ticketKey, '/comment');
-            const adf = buildJiraMediaCommentAdf(comment, uploadedAttachments, skippedVideos, layout, true);
-
-            const resp = await fetch(commentUrl, {
-                method: 'POST',
-                headers: apiConfig.headers,
-                body: JSON.stringify({ body: adf }),
-            });
-
-            if (resp.ok) {
-                let data = null;
-                try { data = await resp.json(); } catch { /* best-effort */ }
-                commentResult = {
-                    success: true,
-                    commentId: data?.id || null,
-                    strategy: 'v3-adf-mediaFileId',
-                };
-            }
-        }
-    }
-
-    if (!commentResult.success) {
-        const commentUrl = buildJiraIssueApiUrl(apiConfig, ticketKey, '/comment');
-        const fallbackAdf = buildJiraMediaCommentAdf(comment, uploadedAttachments, skippedVideos, layout, false);
-
-        const resp = await fetch(commentUrl, {
-            method: 'POST',
-            headers: apiConfig.headers,
-            body: JSON.stringify({ body: fallbackAdf }),
-        });
-
-        if (resp.ok) {
-            let data = null;
-            try { data = await resp.json(); } catch { /* best-effort */ }
-            commentResult = {
-                success: true,
-                commentId: data?.id || null,
-                strategy: 'v3-adf-text-links',
-                note: 'Videos are attached to the Jira issue and listed by file name in the comment because Jira Cloud does not support inline video playback for this REST workflow.',
-            };
-        } else {
-            const errText = await resp.text();
-            commentResult = {
-                success: false,
-                error: `Comment creation failed (all strategies exhausted). Last error: HTTP ${resp.status}: ${errText.slice(0, 300)}`,
-            };
-        }
-    }
-
-    return commentResult;
-}
-
-async function buildJiraMediaCommentPlan({
-    imagePaths = [],
-    videoPaths = [],
-    entry,
-    messageId,
-    activeEvidenceMessageId,
-    latestOnly = false,
-    includeVideoFrames = true,
-    frameTimestamps,
-    maxVideoFrames = 4,
-}) {
-    const workspaceRoot = PROJECT_ROOT;
-    const plan = {
-        uploadTargets: [],
-        skippedVideos: [],
-        frameWarnings: [],
-        cleanupItems: [],
-        scopeMessageId: undefined,
-        hasMedia: false,
-    };
-    const seenNames = new Set();
-    let sessionImageIndex = 1;
-
-    const pushTarget = (target) => {
-        plan.uploadTargets.push({
-            ...target,
-            fileName: createUniqueAttachmentFileName(target.fileName, seenNames),
-        });
-    };
-
-    for (const rawPath of imagePaths) {
-        const resolvedPath = resolveWorkspaceFilePath(rawPath, workspaceRoot);
-        if (!fs.existsSync(resolvedPath)) {
-            return { error: `File not found: ${rawPath}` };
-        }
-
-        const stat = fs.statSync(resolvedPath);
-        if (!stat.isFile()) {
-            return { error: `Path is not a file: ${rawPath}` };
-        }
-        if (stat.size > JIRA_MAX_ATTACHMENT_SIZE) {
-            return { error: `File exceeds 50 MB limit: ${rawPath} (${(stat.size / (1024 * 1024)).toFixed(1)} MB)` };
-        }
-
-        const ext = path.extname(resolvedPath).toLowerCase();
-        if (!COMMENT_IMAGE_EXTENSIONS.has(ext)) {
-            return { error: `Unsupported image format: ${ext}. Supported: ${[...COMMENT_IMAGE_EXTENSIONS].join(', ')}` };
-        }
-
-        pushTarget({
-            category: 'image',
-            fileName: path.basename(resolvedPath),
-            mimeType: COMMENT_IMAGE_MIME_MAP[ext] || 'application/octet-stream',
-            size: stat.size,
-            buffer: fs.readFileSync(resolvedPath),
-        });
-    }
-
-    for (const rawPath of videoPaths) {
-        const resolvedPath = resolveWorkspaceFilePath(rawPath, workspaceRoot);
-        if (!fs.existsSync(resolvedPath)) {
-            return { error: `File not found: ${rawPath}` };
-        }
-
-        const stat = fs.statSync(resolvedPath);
-        if (!stat.isFile()) {
-            return { error: `Path is not a file: ${rawPath}` };
-        }
-
-        const ext = path.extname(resolvedPath).toLowerCase();
-        if (!COMMENT_VIDEO_EXTENSIONS.has(ext)) {
-            return { error: `Unsupported video format: ${ext}. Supported: ${[...COMMENT_VIDEO_EXTENSIONS].join(', ')}` };
-        }
-
-        const fileName = path.basename(resolvedPath);
-        const mimeType = COMMENT_VIDEO_MIME_MAP[ext] || 'application/octet-stream';
-
-        if (stat.size <= JIRA_MAX_ATTACHMENT_SIZE) {
-            pushTarget({
-                category: 'video',
-                fileName,
-                mimeType,
-                size: stat.size,
-                buffer: fs.readFileSync(resolvedPath),
-            });
-        } else {
-            plan.skippedVideos.push({
-                fileName,
-                error: 'Original recording exceeds Jira 50 MB attachment limit',
-            });
-        }
-
-        if (includeVideoFrames) {
-            try {
-                const { createVideoAnalyzer } = require('./video-analyzer');
-                const analyzer = createVideoAnalyzer({ maxFrames: Math.max(1, maxVideoFrames) });
-                const result = await analyzer.buildVideoContext(resolvedPath);
-                const selectedFrames = selectVideoFrames([{ frames: result.frames }], frameTimestamps, Math.max(1, maxVideoFrames));
-
-                for (const frame of selectedFrames) {
-                    pushTarget({
-                        category: 'frame',
-                        fileName: createCommentFrameFileName(fileName, frame.timestamp),
-                        mimeType: 'image/jpeg',
-                        size: fs.statSync(frame.path).size,
-                        buffer: fs.readFileSync(frame.path),
-                        timestamp: `${frame.timestamp}s`,
-                    });
-                }
-
-                plan.cleanupItems.push({
-                    analyzer,
-                    frames: result.frames || [],
-                    sdkFrames: result.sdkFrames || [],
-                });
-            } catch (error) {
-                plan.frameWarnings.push({
-                    fileName,
-                    error: `Preview frame extraction failed: ${error.message}`,
-                });
-            }
-        }
-    }
-
-    if (entry) {
-        const evidence = collectSessionEvidence(entry, { messageId, activeEvidenceMessageId, latestOnly });
-        plan.scopeMessageId = evidence.scopeMessageId;
-
-        for (const att of evidence.images) {
-            const mimeType = VALID_IMAGE_MIME_TYPES.has(att?.media_type) ? att.media_type : 'image/png';
-            if (!isNonEmptyString(att?.data)) continue;
-
-            const buffer = Buffer.from(att.data, 'base64');
-            if (!buffer.length) continue;
-
-            pushTarget({
-                category: 'image',
-                fileName: createCommentScreenshotFileName(sessionImageIndex, mimeType),
-                mimeType,
-                size: buffer.length,
-                buffer,
-            });
-            sessionImageIndex += 1;
-        }
-
-        if (includeVideoFrames) {
-            const selectedFrames = selectVideoFrames(evidence.videos, frameTimestamps, Math.max(1, maxVideoFrames));
-            for (const frame of selectedFrames) {
-                if (!isNonEmptyString(frame?.path) || !fs.existsSync(frame.path)) continue;
-                const sourceVideo = evidence.videos.find(video => Array.isArray(video?.frames) && video.frames.some(candidate => candidate.path === frame.path));
-                pushTarget({
-                    category: 'frame',
-                    fileName: createCommentFrameFileName(sourceVideo?.filename || sourceVideo?.videoPath || 'recording.mp4', frame.timestamp),
-                    mimeType: 'image/jpeg',
-                    size: fs.statSync(frame.path).size,
-                    buffer: fs.readFileSync(frame.path),
-                    timestamp: `${frame.timestamp}s`,
-                });
-            }
-        }
-
-        for (const video of evidence.videos) {
-            const fileName = video.filename || path.basename(video.videoPath || 'recording.mp4');
-            if (!isNonEmptyString(video?.videoPath) || !fs.existsSync(video.videoPath)) {
-                plan.skippedVideos.push({
-                    fileName,
-                    error: 'Original video file is missing or no longer available.',
-                });
-                continue;
-            }
-
-            const stat = fs.statSync(video.videoPath);
-            if (stat.size > JIRA_MAX_ATTACHMENT_SIZE) {
-                plan.skippedVideos.push({
-                    fileName,
-                    error: 'Original recording exceeds Jira 50 MB attachment limit',
-                });
-                continue;
-            }
-
-            const ext = path.extname(fileName).toLowerCase();
-            const mimeType = COMMENT_VIDEO_MIME_MAP[ext] || 'application/octet-stream';
-            pushTarget({
-                category: 'video',
-                fileName,
-                mimeType,
-                size: stat.size,
-                buffer: fs.readFileSync(video.videoPath),
-            });
-        }
-    }
-
-    plan.hasMedia = plan.uploadTargets.length > 0 || plan.skippedVideos.length > 0;
-    return plan;
-}
-
-function cleanupJiraMediaCommentPlan(plan) {
-    if (!plan || !Array.isArray(plan.cleanupItems)) return;
-    for (const item of plan.cleanupItems) {
-        try {
-            item.analyzer?.cleanup?.(item.frames || []);
-            item.analyzer?.cleanup?.(item.sdkFrames || []);
-        } catch {
-            // Best-effort cleanup.
-        }
-    }
-}
-
-async function addCommentWithMediaToJira({
-    ticketKey,
-    comment,
-    jiraConfig,
-    apiConfig,
-    imagePaths = [],
-    videoPaths = [],
-    entry,
-    messageId,
-    activeEvidenceMessageId,
-    latestOnly = false,
-    includeVideoFrames = true,
-    frameTimestamps,
-    maxVideoFrames = 4,
-    imageLayout,
-    toolName = 'add_comment_with_media',
-    deps,
-}) {
-    if (!isNonEmptyString(comment)) {
-        return { success: false, error: 'Comment text is required.' };
-    }
-
-    const plan = await buildJiraMediaCommentPlan({
-        imagePaths,
-        videoPaths,
-        entry,
-        messageId,
-        activeEvidenceMessageId,
-        latestOnly,
-        includeVideoFrames,
-        frameTimestamps,
-        maxVideoFrames,
-    });
-
-    if (plan.error) return { success: false, error: plan.error };
-    if (!plan.hasMedia) {
-        return {
-            success: false,
-            error: 'No images or videos were available to attach to the Jira comment.',
-            scopeMessageId: plan.scopeMessageId,
-        };
-    }
-
-    const attachUrl = buildJiraAttachmentUrl(ticketKey, jiraConfig);
-    const uploadedAttachments = [];
-    const failedUploads = [];
-
-    try {
-        if (deps?.chatManager?.broadcastToolProgress) {
-            deps.chatManager.broadcastToolProgress(toolName, {
-                phase: 'uploading',
-                detail: `Uploading ${plan.uploadTargets.length} media attachment(s) to ${ticketKey}...`,
-            });
-        }
-
-        for (const target of plan.uploadTargets) {
-            const boundaryPrefix = target.category === 'video'
-                ? 'CommentVideo'
-                : target.category === 'frame'
-                    ? 'CommentFrame'
-                    : 'CommentImage';
-            const result = await uploadJiraAttachment(
-                attachUrl,
-                jiraConfig,
-                target.fileName,
-                target.mimeType,
-                target.buffer,
-                boundaryPrefix,
-                { category: target.category }
-            );
-
-            if (result.success) {
-                uploadedAttachments.push({
-                    id: result.attachmentMeta?.id ? String(result.attachmentMeta.id) : '',
-                    filename: result.attachmentMeta?.filename || target.fileName,
-                    mimeType: result.attachmentMeta?.mimeType || target.mimeType,
-                    size: result.attachmentMeta?.size || target.size,
-                    contentUrl: result.attachmentMeta?.content || '',
-                    category: target.category,
-                    timestamp: target.timestamp || undefined,
-                });
-            } else {
-                failedUploads.push({
-                    fileName: target.fileName,
-                    category: target.category,
-                    error: result.error,
-                });
-            }
-        }
-
-        if (uploadedAttachments.length === 0) {
-            return {
-                success: false,
-                error: 'All media uploads failed. Cannot create a Jira comment with media.',
-                failedUploads,
-                skippedVideos: plan.skippedVideos.length > 0 ? plan.skippedVideos : undefined,
-                frameWarnings: plan.frameWarnings.length > 0 ? plan.frameWarnings : undefined,
-                scopeMessageId: plan.scopeMessageId,
-            };
-        }
-
-        if (deps?.chatManager?.broadcastToolProgress) {
-            deps.chatManager.broadcastToolProgress(toolName, {
-                phase: 'commenting',
-                detail: `Creating Jira comment on ${ticketKey} with uploaded media...`,
-            });
-        }
-
-        const commentResult = await postJiraCommentWithMedia({
-            ticketKey,
-            comment,
-            uploadedAttachments,
-            skippedVideos: plan.skippedVideos,
-            apiConfig,
-            imageLayout,
-        });
-
-        const uploadedCounts = {
-            images: uploadedAttachments.filter(att => att.category === 'image').length,
-            frames: uploadedAttachments.filter(att => att.category === 'frame').length,
-            videos: uploadedAttachments.filter(att => att.category === 'video').length,
-        };
-
-        if (deps?.chatManager?.broadcastToolProgress) {
-            deps.chatManager.broadcastToolProgress(toolName, {
-                phase: commentResult.success ? 'complete' : 'failed',
-                detail: commentResult.success
-                    ? `Comment with media added to ${ticketKey}`
-                    : `Comment creation failed after upload: ${commentResult.error}`,
-            });
-        }
-
-        return {
-            success: commentResult.success,
-            commentId: commentResult.commentId || undefined,
-            strategy: commentResult.strategy || undefined,
-            note: commentResult.note || (uploadedCounts.videos > 0 || plan.skippedVideos.length > 0
-                ? 'Videos are attached to the Jira issue and listed by file name in the comment because Jira Cloud does not support inline video playback for this REST workflow.'
-                : undefined),
-            error: commentResult.error || undefined,
-            scopeMessageId: plan.scopeMessageId,
-            uploaded: uploadedCounts,
-            failedUploads,
-            skippedVideos: plan.skippedVideos.length > 0 ? plan.skippedVideos : undefined,
-            frameWarnings: plan.frameWarnings.length > 0 ? plan.frameWarnings : undefined,
-            uploadedAttachments,
-        };
-    } finally {
-        cleanupJiraMediaCommentPlan(plan);
-    }
-}
-
-async function attachEvidenceToJira({
-    ticketKey,
-    jiraConfig,
-    entry,
-    messageId,
-    activeEvidenceMessageId,
-    latestOnly = false,
-    frameTimestamps,
-    includeImages = true,
-    includeFrames = false,
-    includeVideos = true,
-}) {
-    const evidence = collectSessionEvidence(entry, { messageId, activeEvidenceMessageId, latestOnly });
-    const attachUrl = buildJiraAttachmentUrl(ticketKey, jiraConfig);
-    const result = {
-        success: false,
-        hasEvidence: evidence.hasEvidence,
-        scopeMessageId: evidence.scopeMessageId || (isNonEmptyString(messageId) ? messageId.trim() : undefined),
-        imageResults: [],
-        frameResults: [],
-        videoRecordings: [],
-        totals: {
-            images: includeImages ? evidence.images.length : 0,
-            frames: includeFrames ? selectVideoFrames(evidence.videos, frameTimestamps, 8).length : 0,
-            videos: includeVideos ? evidence.videos.length : 0,
-        },
-        uploaded: {
-            images: 0,
-            frames: 0,
-            videos: 0,
-        },
-        failed: {
-            images: 0,
-            frames: 0,
-            videos: 0,
-        },
-    };
-
-    if (!evidence.hasEvidence) {
-        return result;
-    }
-
-    if (includeImages) {
-        for (let i = 0; i < evidence.images.length; i++) {
-            const att = evidence.images[i];
-            const mimeType = VALID_IMAGE_MIME_TYPES.has(att?.media_type) ? att.media_type : 'image/png';
-            const ext = mimeType === 'image/png' ? '.png'
-                : mimeType === 'image/jpeg' ? '.jpg'
-                    : mimeType === 'image/gif' ? '.gif' : '.webp';
-            const fileName = `bug-screenshot-${i + 1}${ext}`;
-
-            if (!isNonEmptyString(att?.data)) {
-                result.imageResults.push({ fileName, success: false, error: 'Attachment data is missing or invalid.' });
-                continue;
-            }
-
-            const buffer = Buffer.from(att.data, 'base64');
-            if (!buffer.length) {
-                result.imageResults.push({ fileName, success: false, error: 'Attachment data decoded to an empty file.' });
-                continue;
-            }
-
-            result.imageResults.push(await uploadJiraAttachment(
-                attachUrl,
-                jiraConfig,
-                fileName,
-                mimeType,
-                buffer,
-                'JiraAttachment'
-            ));
-        }
-
-        result.uploaded.images = result.imageResults.filter(item => item.success).length;
-        result.failed.images = result.imageResults.length - result.uploaded.images;
-    }
-
-    if (includeFrames) {
-        const framesToUpload = selectVideoFrames(evidence.videos, frameTimestamps, 8);
-        for (const frame of framesToUpload) {
-            const fileName = `bug-video-frame-${frame.timestamp}s.jpg`;
-            if (!isNonEmptyString(frame?.path) || !fs.existsSync(frame.path)) {
-                result.frameResults.push({ fileName, success: false, error: 'Frame file is missing or no longer available.' });
-                continue;
-            }
-
-            const buffer = fs.readFileSync(frame.path);
-            result.frameResults.push(await uploadJiraAttachment(
-                attachUrl,
-                jiraConfig,
-                fileName,
-                'image/jpeg',
-                buffer,
-                'JiraVideoFrame',
-                { timestamp: `${frame.timestamp}s` }
-            ));
-        }
-
-        result.uploaded.frames = result.frameResults.filter(item => item.success).length;
-        result.failed.frames = result.frameResults.length - result.uploaded.frames;
-    }
-
-    if (includeVideos) {
-        for (const video of evidence.videos) {
-            const fileName = video.filename || path.basename(video.videoPath || 'recording.mp4');
-            if (!isNonEmptyString(video?.videoPath) || !fs.existsSync(video.videoPath)) {
-                result.videoRecordings.push({ fileName, success: false, error: 'Original video file is missing or no longer available.' });
-                continue;
-            }
-
-            const stat = fs.statSync(video.videoPath);
-            if (stat.size > 50 * 1024 * 1024) {
-                result.videoRecordings.push({ fileName, success: false, error: 'File exceeds 50 MB Jira attachment limit' });
-                continue;
-            }
-
-            const ext = path.extname(fileName).toLowerCase();
-            const detectedMimeType = {
-                '.mp4': 'video/mp4',
-                '.webm': 'video/webm',
-                '.mov': 'video/quicktime',
-                '.avi': 'video/x-msvideo',
-                '.mkv': 'video/x-matroska',
-            }[ext] || 'application/octet-stream';
-            const mimeType = VALID_VIDEO_MIME_TYPES.has(detectedMimeType) ? detectedMimeType : 'application/octet-stream';
-            const buffer = fs.readFileSync(video.videoPath);
-
-            result.videoRecordings.push(await uploadJiraAttachment(
-                attachUrl,
-                jiraConfig,
-                fileName,
-                mimeType,
-                buffer,
-                'JiraVideo'
-            ));
-        }
-
-        result.uploaded.videos = result.videoRecordings.filter(item => item.success).length;
-        result.failed.videos = result.videoRecordings.length - result.uploaded.videos;
-    }
-
-    result.success = result.imageResults.some(item => item.success)
-        || result.frameResults.some(item => item.success)
-        || result.videoRecordings.some(item => item.success);
-
-    return result;
-}
-
-function getImageMimeTypeForFile(filePath) {
-    const ext = path.extname(String(filePath || '')).toLowerCase();
-    if (ext === '.png') return 'image/png';
-    if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
-    if (ext === '.gif') return 'image/gif';
-    if (ext === '.webp') return 'image/webp';
-    return null;
-}
-
-function stripHtmlTags(value) {
-    return String(value || '')
-        .replace(/<br\s*\/?>/gi, '\n')
-        .replace(/<\/p>/gi, '\n')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/&nbsp;/gi, ' ')
-        .replace(/&amp;/gi, '&')
-        .replace(/&lt;/gi, '<')
-        .replace(/&gt;/gi, '>');
-}
-
-function normalizeWhitespace(value) {
-    return String(value || '')
-        .replace(/\r/g, '\n')
-        .replace(/\t/g, ' ')
-        .replace(/\n{3,}/g, '\n\n')
-        .replace(/[ \u00a0]{2,}/g, ' ')
-        .trim();
-}
-
-function extractTextFromAdf(node) {
-    if (!node) return '';
-    if (typeof node === 'string') return node;
-    if (Array.isArray(node)) {
-        return node.map(extractTextFromAdf).filter(Boolean).join(' ');
-    }
-
-    const ownText = typeof node.text === 'string' ? node.text : '';
-    const childText = extractTextFromAdf(node.content || []);
-    const joiner = ['paragraph', 'listItem', 'bulletList', 'orderedList', 'tableRow'].includes(node.type) ? '\n' : ' ';
-    return [ownText, childText].filter(Boolean).join(joiner);
-}
-
-function normalizeJiraText(value) {
-    if (!value) return '';
-    if (typeof value === 'string') {
-        return normalizeWhitespace(stripHtmlTags(value));
-    }
-    return normalizeWhitespace(extractTextFromAdf(value));
-}
-
-function normalizeJiraCommentVisibility(visibility) {
-    if (!visibility || typeof visibility !== 'object') return null;
-
-    const normalized = {
-        type: visibility.type || '',
-        value: visibility.value || '',
-        identifier: visibility.identifier || '',
-    };
-
-    if (!normalized.type && !normalized.value && !normalized.identifier) {
-        return null;
-    }
-
-    return normalized;
-}
-
-function getJiraCommentCollection(value) {
-    if (Array.isArray(value)) {
-        return {
-            items: value,
-            total: value.length,
-            startAt: 0,
-            maxResults: value.length,
-        };
-    }
-
-    if (value && typeof value === 'object') {
-        const items = Array.isArray(value.comments)
-            ? value.comments
-            : Array.isArray(value.values)
-                ? value.values
-                : [];
-
-        return {
-            items,
-            total: typeof value.total === 'number' ? value.total : items.length,
-            startAt: typeof value.startAt === 'number' ? value.startAt : 0,
-            maxResults: typeof value.maxResults === 'number' ? value.maxResults : items.length,
-        };
-    }
-
-    return {
-        items: [],
-        total: 0,
-        startAt: 0,
-        maxResults: 0,
-    };
-}
-
-function buildRenderedCommentLookup(value) {
-    const collection = getJiraCommentCollection(value);
-    const byId = new Map();
-
-    collection.items.forEach((item, index) => {
-        const key = item?.id != null ? String(item.id) : `index:${index}`;
-        byId.set(key, item);
-    });
-
-    return {
-        items: collection.items,
-        byId,
-    };
-}
-
-function formatSingleJiraComment(comment = {}, renderedComment = null, index = 0) {
-    const author = comment.author || {};
-    const bodySource = renderedComment?.renderedBody || comment.renderedBody || renderedComment?.body || comment.body;
-    const body = normalizeJiraText(bodySource);
-
-    return {
-        id: comment.id != null ? String(comment.id) : `comment-${index + 1}`,
-        author: author.displayName || comment.displayName || '',
-        body,
-        created: comment.created || '',
-        updated: comment.updated || '',
-        visibility: normalizeJiraCommentVisibility(comment.visibility),
-    };
-}
-
-function formatJiraComments(fields = {}, rendered = {}) {
-    const rawCollection = getJiraCommentCollection(fields.comment);
-    const renderedLookup = buildRenderedCommentLookup(rendered.comment);
-
-    const comments = rawCollection.items.map((comment, index) => {
-        const key = comment?.id != null ? String(comment.id) : `index:${index}`;
-        const renderedComment = renderedLookup.byId.get(key) || renderedLookup.items[index] || null;
-        return formatSingleJiraComment(comment, renderedComment, index);
-    }).filter(comment => comment.body || comment.author || comment.created || comment.updated);
-
-    const commentCount = typeof rawCollection.total === 'number' ? rawCollection.total : comments.length;
-    const commentsTruncated = commentCount > comments.length;
-
-    return {
-        comments,
-        commentCount,
-        commentsTruncated,
-    };
-}
-
-function buildJiraIssueCommentsUrl({ baseUrl, cloudId }, ticketId, params = {}) {
-    const searchParams = new URLSearchParams();
-    Object.entries(params).forEach(([key, value]) => {
-        if (value !== undefined && value !== null && value !== '') {
-            searchParams.set(key, String(value));
-        }
-    });
-
-    const query = searchParams.toString();
-    if (cloudId) {
-        return `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issue/${ticketId}/comment${query ? `?${query}` : ''}`;
-    }
-
-    return `${baseUrl.replace(/\/$/, '')}/rest/api/3/issue/${ticketId}/comment${query ? `?${query}` : ''}`;
-}
-
-async function fetchCompleteJiraComments(ticketId, { baseUrl, cloudId, headers }) {
-    if (!baseUrl && !cloudId) return null;
-
-    const allComments = [];
-    let startAt = 0;
-    let total = null;
-
-    while (true) {
-        const url = buildJiraIssueCommentsUrl({ baseUrl, cloudId }, ticketId, {
-            startAt,
-            maxResults: 100,
-        });
-        const response = await fetch(url, { headers });
-        if (!response.ok) {
-            return null;
-        }
-
-        const payload = await response.json();
-        const collection = getJiraCommentCollection(payload);
-        allComments.push(...collection.items);
-
-        total = typeof collection.total === 'number' ? collection.total : allComments.length;
-        if (collection.items.length === 0 || allComments.length >= total) {
-            break;
-        }
-
-        startAt += collection.items.length;
-    }
-
-    return formatJiraComments({
-        comment: {
-            comments: allComments,
-            total: total != null ? total : allComments.length,
-            startAt: 0,
-            maxResults: allComments.length,
-        },
-    });
-}
-
-function formatJiraTimetracking(fields = {}) {
-    const timetracking = fields.timetracking;
-    if (!timetracking || typeof timetracking !== 'object') return null;
-
-    const formatted = {
-        originalEstimate: timetracking.originalEstimate || '',
-        originalEstimateSeconds: typeof timetracking.originalEstimateSeconds === 'number' ? timetracking.originalEstimateSeconds : null,
-        remainingEstimate: timetracking.remainingEstimate || '',
-        remainingEstimateSeconds: typeof timetracking.remainingEstimateSeconds === 'number' ? timetracking.remainingEstimateSeconds : null,
-        timeSpent: timetracking.timeSpent || '',
-        timeSpentSeconds: typeof timetracking.timeSpentSeconds === 'number' ? timetracking.timeSpentSeconds : null,
-    };
-
-    if (!formatted.originalEstimate && !formatted.remainingEstimate && !formatted.timeSpent
-        && formatted.originalEstimateSeconds === null && formatted.remainingEstimateSeconds === null && formatted.timeSpentSeconds === null) {
-        return null;
-    }
-
-    return formatted;
-}
-
-function formatJiraFieldCapability(fieldId, fieldMeta = {}) {
-    const schema = fieldMeta.schema || {};
-
-    return {
-        fieldId,
-        key: fieldMeta.key || fieldId,
-        name: fieldMeta.name || fieldId,
-        required: Boolean(fieldMeta.required),
-        operations: Array.isArray(fieldMeta.operations) ? fieldMeta.operations : [],
-        hasDefaultValue: Boolean(fieldMeta.hasDefaultValue),
-        schemaType: schema.type || null,
-        items: schema.items || null,
-        custom: schema.custom || null,
-        customId: typeof schema.customId === 'number' ? schema.customId : null,
-        allowedValuesCount: Array.isArray(fieldMeta.allowedValues) ? fieldMeta.allowedValues.length : 0,
-    };
-}
-
-function countStructuredClauses(value) {
-    const text = normalizeJiraText(value);
-    if (!text) return 0;
-
-    return text
-        .split(/\n+/)
-        .map(line => line.trim())
-        .filter(line => line.length > 0)
-        .filter(line => /^[-*•]|^\d+[.)]|^ac\b|^scenario\b|^given\b|^when\b|^then\b/i.test(line))
-        .length;
-}
-
-function computeSparseTicketScore(ticket = {}) {
-    const summary = normalizeJiraText(ticket.summary);
-    const description = normalizeJiraText(ticket.description);
-    const acceptanceCriteria = normalizeJiraText(ticket.acceptanceCriteria);
-    const labels = Array.isArray(ticket.labels) ? ticket.labels.filter(Boolean) : [];
-    const components = Array.isArray(ticket.components) ? ticket.components.filter(Boolean) : [];
-    const comments = Array.isArray(ticket.comments) ? ticket.comments : [];
-    const commentText = comments.map(comment => normalizeJiraText(comment?.body)).filter(Boolean).join('\n');
-    const commentStructuredClauses = countStructuredClauses(commentText);
-
-    const reasons = [];
-    let score = 0;
-
-    const complexityPatterns = [
-        /integration/i,
-        /workflow/i,
-        /filter/i,
-        /search/i,
-        /auth/i,
-        /roomvo/i,
-        /widget/i,
-        /mls/i,
-        /lead management/i,
-        /consumer funnel/i,
-        /pricing|monthly cost|emc/i,
-    ];
-    const contextText = [summary, description, acceptanceCriteria, commentText, labels.join(' '), components.join(' ')].join(' ');
-    const complexitySignalCount = complexityPatterns.filter(pattern => pattern.test(contextText)).length;
-    const structuredClauses = countStructuredClauses(acceptanceCriteria);
-
-    if (!summary) {
-        score += 20;
-        reasons.push('Ticket summary is missing.');
-    } else if (summary.length < 18) {
-        score += 8;
-        reasons.push('Ticket summary is very short.');
-    }
-
-    if (!description) {
-        score += 30;
-        reasons.push('Description is missing.');
-    } else if (description.length < 160) {
-        score += 15;
-        reasons.push('Description is too short to explain the user flow clearly.');
-    }
-
-    if (!acceptanceCriteria) {
-        score += 35;
-        reasons.push('Acceptance criteria are missing.');
-    } else {
-        if (acceptanceCriteria.length < 120) {
-            score += 15;
-            reasons.push('Acceptance criteria are very brief.');
-        }
-        if (structuredClauses < 2) {
-            score += 10;
-            reasons.push('Acceptance criteria are not structured into distinct checks or scenarios.');
-        }
-    }
-
-    if (labels.length === 0) {
-        score += 5;
-        reasons.push('No labels are present to help infer feature context.');
-    }
-
-    if (components.length === 0) {
-        score += 5;
-        reasons.push('No components are present to help infer feature ownership.');
-    }
-
-    if (complexitySignalCount >= 2 && (description.length + acceptanceCriteria.length) < 320) {
-        score += 15;
-        reasons.push('Ticket mentions a feature with non-trivial complexity but provides limited detail.');
-    }
-
-    if (commentText.length >= 140) {
-        score = Math.max(0, score - 12);
-    }
-
-    if (commentStructuredClauses >= 2) {
-        score = Math.max(0, score - 8);
-    }
-
-    const finalScore = Math.min(100, score);
-    const threshold = 45;
-
-    return {
-        score: finalScore,
-        threshold,
-        isSparse: finalScore >= threshold,
-        reasons,
-        metrics: {
-            summaryLength: summary.length,
-            descriptionLength: description.length,
-            acceptanceCriteriaLength: acceptanceCriteria.length,
-            commentLength: commentText.length,
-            commentCount: comments.length,
-            commentStructuredClauses,
-            structuredClauses,
-            labelCount: labels.length,
-            componentCount: components.length,
-            complexitySignalCount,
-        },
-    };
-}
-
-function buildSparseKbQueries(ticket = {}) {
-    const summary = normalizeJiraText(ticket.summary);
-    const labels = Array.isArray(ticket.labels) ? ticket.labels.filter(Boolean) : [];
-    const components = Array.isArray(ticket.components) ? ticket.components.filter(Boolean) : [];
-    const acceptanceCriteria = normalizeJiraText(ticket.acceptanceCriteria);
-
-    const supportTerms = [...labels, ...components]
-        .map(term => normalizeJiraText(term))
-        .filter(term => term.length > 2)
-        .slice(0, 4);
-
-    const firstAcLine = acceptanceCriteria.split(/\n+/).map(line => line.trim()).find(Boolean) || '';
-    const queries = [
-        [summary, supportTerms.join(' '), 'acceptance criteria requirements'].filter(Boolean).join(' '),
-        [summary, supportTerms.join(' '), 'user story business rules'].filter(Boolean).join(' '),
-        [summary, firstAcLine, 'workflow specification'].filter(Boolean).join(' '),
-    ];
-
-    return [...new Set(queries.map(q => normalizeWhitespace(q)).filter(q => q.length > 0))].slice(0, 3);
-}
-
-async function enrichSparseTicketWithKnowledgeBase(ticket, options = {}) {
-    const sparseAssessment = computeSparseTicketScore(ticket);
-    const groundingStore = options.groundingStore;
-
-    const enrichment = {
-        forcedByLogic: sparseAssessment.isSparse,
-        sparseAssessment,
-        queries: [],
-        results: [],
-        matches: [],
-        topPage: null,
-        error: null,
-    };
-
-    if (!sparseAssessment.isSparse || !groundingStore) {
-        if (sparseAssessment.isSparse && !groundingStore) {
-            enrichment.error = 'Grounding store unavailable for KB enrichment.';
-        }
-        return enrichment;
-    }
-
-    const queries = buildSparseKbQueries(ticket);
-    enrichment.queries = queries;
-
-    try {
-        const aggregated = new Map();
-
-        for (const query of queries) {
-            const result = await groundingStore.queryKnowledgeBase(query, {
-                agentName: options.agentName || 'testgenie',
-                maxResults: 3,
-                skipIntentCheck: true,
-            });
-
-            for (const item of (result.results || [])) {
-                const key = item.id || item.url || `${query}:${item.title}`;
-                if (!aggregated.has(key)) {
-                    aggregated.set(key, {
-                        id: item.id || null,
-                        title: item.title,
-                        url: item.url,
-                        space: item.space,
-                        lastModified: item.lastModified,
-                        excerpt: normalizeWhitespace(item.excerpt || item.content || '').slice(0, 500),
-                    });
-                }
-            }
-
-            enrichment.results.push({
-                query,
-                resultCount: result.results?.length || 0,
-                fromCache: !!result.fromCache,
-            });
-
-            if (aggregated.size >= 5) break;
-        }
-
-        const aggregatedResults = [...aggregated.values()].slice(0, 5);
-        enrichment.matches = aggregatedResults;
-
-        if (aggregatedResults.length > 0 && groundingStore._kbConnector && aggregatedResults[0].id) {
-            try {
-                const page = await groundingStore._kbConnector.getPage(aggregatedResults[0].id);
-                if (page) {
-                    enrichment.topPage = {
-                        id: page.id,
-                        title: page.title,
-                        url: page.url,
-                        space: page.space,
-                        contentSnippet: normalizeWhitespace(page.content || page.excerpt || '').slice(0, 1200),
-                    };
-                }
-            } catch (pageError) {
-                enrichment.error = `KB page fetch failed: ${pageError.message}`;
-            }
-        }
-    } catch (error) {
-        enrichment.error = error.message;
-    }
-
-    return enrichment;
-}
-
-// ─── TTL Cache for Tool Results ─────────────────────────────────────────────
-
-/**
- * Lightweight TTL cache for idempotent tool results.
- * Prevents redundant I/O when the same tool is called multiple times
- * across sessions within a pipeline run (e.g., get_framework_inventory
- * called by scriptgenerator then codereviewer within minutes).
- *
- * Default TTL: 5 minutes. Cache is per-process (singleton).
- */
-class ToolResultCache {
-    constructor(defaultTTL = 5 * 60 * 1000) {
-        this._cache = new Map();
-        this._defaultTTL = defaultTTL;
-        this._hits = 0;
-        this._misses = 0;
-    }
-
-    /**
-     * Read a cached value if it is still fresh.
-     *
-     * @param {string} key
-     * @returns {*|null}
-     */
-    get(key) {
-        const entry = this._cache.get(key);
-        const now = Date.now();
-
-        if (entry && (now - entry.timestamp) < entry.ttl) {
-            this._hits++;
-            return entry.value;
-        }
-
-        if (entry) {
-            this._cache.delete(key);
-        }
-
-        this._misses++;
-        return null;
-    }
-
-    /**
-     * Write a value into the cache with an optional TTL override.
-     *
-     * @param {string} key
-     * @param {*} value
-     * @param {number} [ttl]
-     */
-    set(key, value, ttl) {
-        this._cache.set(key, {
-            value,
-            timestamp: Date.now(),
-            ttl: ttl || this._defaultTTL,
-        });
-
-        if (this._cache.size > 50) {
-            this._evictStale();
-        }
-    }
-
-    /**
-     * Get a cached result, or compute and cache it.
-     *
-     * @param {string} key         - Cache key (typically tool name + serialized args)
-     * @param {Function} compute   - async function to compute the result if not cached
-     * @param {number} [ttl]       - Custom TTL in ms (default: 5 min)
-     * @returns {Promise<*>}       - The cached or freshly computed result
-     */
-    async getOrCompute(key, compute, ttl) {
-        const cached = this.get(key);
-        if (cached !== null) {
-            return cached;
-        }
-
-        const value = await compute();
-        this.set(key, value, ttl);
-
-        return value;
-    }
-
-    /** Remove entries older than their TTL */
-    _evictStale() {
-        const now = Date.now();
-        for (const [key, entry] of this._cache) {
-            const ttl = entry.ttl || this._defaultTTL;
-            if ((now - entry.timestamp) > ttl) {
-                this._cache.delete(key);
-            }
-        }
-    }
-
-    /** Clear the entire cache (useful after config changes) */
-    clear() {
-        this._cache.clear();
-        this._hits = 0;
-        this._misses = 0;
-    }
-
-    /** Get cache statistics for diagnostics */
-    getStats() {
-        return {
-            size: this._cache.size,
-            hits: this._hits,
-            misses: this._misses,
-            hitRate: this._hits + this._misses > 0
-                ? ((this._hits / (this._hits + this._misses)) * 100).toFixed(1) + '%'
-                : 'N/A',
-        };
-    }
-}
-
-// Singleton cache instance
-const _toolCache = new ToolResultCache();
-function getToolCache() { return _toolCache; }
-
-function normalizeDeleteConfirmationText(value) {
-    return String(value || '').trim().replace(/\s+/g, ' ').toUpperCase();
-}
-
-function buildExpectedJiraDeleteConfirmation(ticketId, deleteSubtasks = false) {
-    const normalizedTicketId = String(ticketId || '').trim().toUpperCase();
-    return deleteSubtasks
-        ? `DELETE ${normalizedTicketId} WITH SUBTASKS`
-        : `DELETE ${normalizedTicketId}`;
-}
-
-function buildJiraDeleteFallbackSuggestions(ticketId, deleteSubtasks = false) {
-    return [
-        {
-            action: 'transition_jira_ticket',
-            reason: `Preserve the issue history by moving ${ticketId} to a cancelled or done state instead of deleting it permanently.`,
-        },
-        {
-            action: 'archive_issue',
-            availability: 'Atlassian issue archival requires Jira admin or site admin permissions and Premium or Enterprise licensing.',
-            reason: deleteSubtasks
-                ? 'Archive is safer than hard-deleting a parent issue and all of its subtasks.'
-                : 'Archive is safer when the tenant prefers reversible retention instead of permanent deletion.',
-        },
-    ];
-}
-
-// ─── Tool Definitions ───────────────────────────────────────────────────────
+loadEnvVars();
 
 /**
  * Create all custom tools for a specific agent role.
@@ -6086,8 +2806,11 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     if (requestedLabels.length > 0 && labelIntentContext.intent === 'allow') {
                         issuePayload.fields.labels = requestedLabels;
                     }
-                    if (environment) {
-                        issuePayload.fields.environment = String(environment).trim();
+                    const normalizedEnvironment = isNonEmptyString(environment)
+                        ? String(environment).trim()
+                        : '';
+                    if (normalizedEnvironment) {
+                        issuePayload.fields.environment = normalizedEnvironment;
                     }
                     if (assigneeAccountId) {
                         issuePayload.fields.assignee = { accountId: assigneeAccountId };
@@ -6105,7 +2828,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         createMutationFieldChange({ field: 'description', label: 'Description', before: '', after: description }),
                         createMutationFieldChange({ field: 'priority', label: 'Priority', before: '', after: resolvedPriority }),
                         createMutationFieldChange({ field: 'labels', label: 'Labels', before: '', after: issuePayload.fields.labels || [] }),
-                        createMutationFieldChange({ field: 'environment', label: 'Environment', before: '', after: issuePayload.fields.environment || '' }),
+                        createMutationFieldChange({ field: 'environment', label: 'Environment', before: '', after: normalizedEnvironment }),
                         createMutationFieldChange({ field: 'assignee', label: 'Assignee account', before: '', after: issuePayload.fields.assignee?.accountId || '' }),
                         createMutationFieldChange({ field: 'parent', label: 'Parent issue', before: '', after: issuePayload.fields.parent?.key || '' }),
                         createMutationFieldChange({ field: 'originalEstimate', label: 'Original estimate', before: '', after: issuePayload.fields.timetracking?.originalEstimate || '' }),
@@ -6156,29 +2879,168 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         });
                     }
 
-                    const response = await fetch(`${jiraConfig.apiBase}/issue`, {
-                        method: 'POST',
-                        headers: jiraConfig.headers,
-                        body: JSON.stringify(issuePayload),
+                    const cloneCreatePayload = payload => JSON.parse(JSON.stringify(payload));
+                    const buildEnvironmentAdf = value => ({
+                        type: 'doc',
+                        version: 1,
+                        content: [{
+                            type: 'paragraph',
+                            content: [{ type: 'text', text: value }],
+                        }],
                     });
+                    const appendEnvironmentFallbackToDescription = (descriptionDoc, value) => {
+                        const nextDescription = cloneCreatePayload(descriptionDoc || { type: 'doc', version: 1, content: [] });
+                        if (!Array.isArray(nextDescription.content)) {
+                            nextDescription.content = [];
+                        }
+                        nextDescription.content.push({
+                            type: 'paragraph',
+                            content: [{ type: 'text', text: `Environment fallback: ${value}` }],
+                        });
+                        return nextDescription;
+                    };
+                    const classifyEnvironmentCreateError = parsedError => {
+                        const environmentMessage = String(parsedError.fieldErrors?.environment || '').toLowerCase();
+                        const combinedMessages = [
+                            ...parsedError.errorMessages,
+                            ...Object.values(parsedError.fieldErrors || {}),
+                            parsedError.details,
+                        ]
+                            .filter(Boolean)
+                            .join(' ')
+                            .toLowerCase();
 
-                    if (!response.ok) {
+                        const hasEnvironmentSignal = Boolean(parsedError.fieldErrors?.environment)
+                            || combinedMessages.includes('environment');
+                        if (!hasEnvironmentSignal) {
+                            return { isEnvironmentRelated: false, action: null, reason: '' };
+                        }
+
+                        const environmentContext = `${environmentMessage} ${combinedMessages}`;
+                        if (/(atlassian document format|\badf\b|operation value must be atlassian document format)/.test(environmentContext)) {
+                            return { isEnvironmentRelated: true, action: 'retry-adf', reason: 'adf-required' };
+                        }
+
+                        if (/(cannot be set|not on the appropriate screen|unknown|does not exist|not valid for this operation|field .* cannot be set|is not supported)/.test(environmentContext)) {
+                            return { isEnvironmentRelated: true, action: 'retry-omit', reason: 'not-settable' };
+                        }
+
+                        return { isEnvironmentRelated: true, action: 'retry-omit', reason: 'validation-mismatch' };
+                    };
+
+                    const baseCreatePayload = cloneCreatePayload(issuePayload);
+                    let requestPayload = cloneCreatePayload(issuePayload);
+                    let environmentHandlingMode = normalizedEnvironment ? 'plain-text' : 'not-provided';
+                    let environmentFallbackReason = '';
+                    const createAttempts = [];
+                    let createResponse = null;
+                    let createFailure = null;
+
+                    for (let attempt = 1; attempt <= 3; attempt++) {
+                        const includesEnvironmentField = Object.prototype.hasOwnProperty.call(requestPayload.fields || {}, 'environment');
+                        const response = await fetch(`${jiraConfig.apiBase}/issue`, {
+                            method: 'POST',
+                            headers: jiraConfig.headers,
+                            body: JSON.stringify(requestPayload),
+                        });
+
+                        const attemptLog = {
+                            attempt,
+                            mode: environmentHandlingMode,
+                            includesEnvironmentField,
+                            status: response.status,
+                        };
+                        createAttempts.push(attemptLog);
+
+                        if (response.ok) {
+                            createResponse = response;
+                            break;
+                        }
+
                         const errorBody = await response.text();
+                        const parsedError = parseJiraErrorBody(errorBody);
                         const formattedError = formatJiraErrorResponse('Failed to create ticket', response.status, errorBody, {
                             includesDescription: true,
-                            includesEnvironment: Boolean(environment),
+                            includesEnvironment: includesEnvironmentField,
                         });
-                        return JSON.stringify({
-                            success: false,
-                            error: formattedError.message,
+
+                        createFailure = {
+                            status: response.status,
+                            message: formattedError.message,
                             details: formattedError.details,
                             errorMessages: formattedError.errorMessages,
                             fieldErrors: formattedError.fieldErrors,
                             hint: formattedError.hint,
-                        });
+                        };
+
+                        if (!(response.status === 400 && normalizedEnvironment)) {
+                            break;
+                        }
+
+                        const classification = classifyEnvironmentCreateError(parsedError);
+                        if (!classification.isEnvironmentRelated) {
+                            break;
+                        }
+
+                        if (classification.action === 'retry-adf' && environmentHandlingMode !== 'adf') {
+                            environmentHandlingMode = 'adf';
+                            environmentFallbackReason = classification.reason;
+                            requestPayload = cloneCreatePayload(baseCreatePayload);
+                            requestPayload.fields.environment = buildEnvironmentAdf(normalizedEnvironment);
+
+                            if (deps?.chatManager?.broadcastToolProgress) {
+                                deps.chatManager.broadcastToolProgress('create_jira_ticket', {
+                                    phase: 'jira',
+                                    message: 'Jira rejected plain-text environment; retrying with rich text environment format...',
+                                    step: normalizedParentIssue.ticketId ? 3 : 2,
+                                });
+                            }
+                            continue;
+                        }
+
+                        if (environmentHandlingMode !== 'omitted-after-validation-error') {
+                            environmentHandlingMode = 'omitted-after-validation-error';
+                            environmentFallbackReason = classification.reason;
+                            requestPayload = cloneCreatePayload(baseCreatePayload);
+                            delete requestPayload.fields.environment;
+                            requestPayload.fields.description = appendEnvironmentFallbackToDescription(
+                                requestPayload.fields.description,
+                                normalizedEnvironment
+                            );
+
+                            if (deps?.chatManager?.broadcastToolProgress) {
+                                deps.chatManager.broadcastToolProgress('create_jira_ticket', {
+                                    phase: 'jira',
+                                    message: 'Jira rejected environment field for this project; retrying without environment and preserving details in description...',
+                                    step: normalizedParentIssue.ticketId ? 3 : 2,
+                                });
+                            }
+                            continue;
+                        }
+
+                        break;
                     }
 
-                    const data = await response.json();
+                    if (!createResponse) {
+                        return JSON.stringify({
+                            success: false,
+                            error: createFailure?.message || 'Failed to create ticket',
+                            details: createFailure?.details,
+                            errorMessages: createFailure?.errorMessages,
+                            fieldErrors: createFailure?.fieldErrors,
+                            hint: createFailure?.hint,
+                            status: createFailure?.status,
+                            failurePhase: 'jira-create',
+                            environmentHandling: {
+                                mode: environmentHandlingMode,
+                                value: normalizedEnvironment || undefined,
+                                fallbackReason: environmentFallbackReason || undefined,
+                                attempts: createAttempts,
+                            },
+                        }, null, 2);
+                    }
+
+                    const data = await createResponse.json();
                     const ticketKey = data.key;
                     const ticketUrl = buildJiraBrowseUrl(jiraConfig, ticketKey);
 
@@ -6282,6 +3144,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         evidenceComment && evidenceComment.success === false && isNonEmptyString(evidenceComment.error)
                             ? `Adding the evidence comment failed: ${evidenceComment.error}`
                             : '',
+                        normalizedEnvironment && environmentHandlingMode === 'adf'
+                            ? 'Environment field fallback: Jira required rich text, so environment was retried in Atlassian Document Format.'
+                            : '',
+                        normalizedEnvironment && environmentHandlingMode === 'omitted-after-validation-error'
+                            ? 'Environment field fallback: Jira rejected the environment field for this project, so the environment value was preserved in description text.'
+                            : '',
                     ].filter(Boolean);
                     const createReceipt = buildMutationReceipt({
                         guardrail: createApproval.guardrail,
@@ -6310,6 +3178,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         parent: normalizedParentIssue.ticketId ? { key: normalizedParentIssue.ticketId } : undefined,
                         link: linkResult || undefined,
                         evidenceCommentMode: resolvedEvidenceCommentMode,
+                        environmentHandling: {
+                            mode: environmentHandlingMode,
+                            value: normalizedEnvironment || undefined,
+                            fallbackReason: environmentFallbackReason || undefined,
+                            attempts: createAttempts,
+                        },
                         receipt: createReceipt,
                         guardrail: buildMutationResultGuardrail(createApproval.guardrail, {
                             approved: true,
@@ -6322,8 +3196,15 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     return JSON.stringify({
                         success: false,
                         error: `Jira creation error: ${error.message}`,
-                        hint: 'Check network connectivity and Jira credentials in agentic-workflow/.env',
-                    });
+                        details: isNonEmptyString(error?.details) ? error.details : undefined,
+                        errorMessages: Array.isArray(error?.errorMessages) && error.errorMessages.length > 0 ? error.errorMessages : undefined,
+                        fieldErrors: error?.fieldErrors && typeof error.fieldErrors === 'object' ? error.fieldErrors : undefined,
+                        status: Number.isFinite(error?.status) ? Number(error.status) : undefined,
+                        failurePhase: 'exception',
+                        hint: isNonEmptyString(error?.hint)
+                            ? error.hint
+                            : 'Check network connectivity and Jira credentials in agentic-workflow/.env',
+                    }, null, 2);
                 }
             },
         }));
@@ -6734,14 +3615,15 @@ function createCustomTools(defineTool, agentName, deps = {}) {
     // ───────────────────────────────────────────────────────────────────
     // TOOL 11b2: delete_jira_ticket
     // Available to: buggenie, testgenie, taskgenie
-    // Permanently deletes a Jira issue with explicit confirmation.
+    // Permanently deletes a Jira issue. Gated by the shared approval
+    // component so the user must confirm in the UI.
     // ───────────────────────────────────────────────────────────────────
     if (['buggenie', 'testgenie', 'taskgenie'].includes(agentName)) {
         tools.push(defineTool('delete_jira_ticket', {
             description:
                 'Permanently deletes a Jira ticket through the Jira REST API. ' +
-                'Use this only when the user explicitly confirms deletion of the issue itself, not when they only want to unlink related tickets. ' +
-                'The latest user message must include the exact confirmation phrase DELETE <ticketId> or DELETE <ticketId> WITH SUBTASKS.',
+                'Use this only when the user explicitly asks to delete an issue. ' +
+                'The shared Jira approval component prompts the user for confirmation before the delete is executed.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -6751,11 +3633,11 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     },
                     confirmationText: {
                         type: 'string',
-                        description: 'Exact user confirmation phrase. Use DELETE <ticketId>, or DELETE <ticketId> WITH SUBTASKS when deleting a parent issue and its subtasks.',
+                        description: 'Explicit confirmation phrase. Use DELETE <ticketId> (or DELETE <ticketId> WITH SUBTASKS).',
                     },
                     deleteSubtasks: {
                         type: 'boolean',
-                        description: 'When true, Jira will also delete the issue subtasks. Only use after the user explicitly confirms WITH SUBTASKS.',
+                        description: 'When true, Jira will also delete the issue subtasks.',
                     },
                     jiraBaseUrl: {
                         type: 'string',
@@ -6766,7 +3648,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         description: 'Optional short reason describing why the ticket is being deleted.',
                     },
                 },
-                required: ['ticketId', 'confirmationText'],
+                required: ['ticketId'],
             },
             handler: async ({ ticketId, confirmationText, deleteSubtasks, jiraBaseUrl, reason }) => {
                 try {
@@ -6782,24 +3664,31 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         }, null, 2);
                     }
 
-                    const expectedConfirmation = buildExpectedJiraDeleteConfirmation(normalizedTicket.ticketId, Boolean(deleteSubtasks));
-                    const normalizedConfirmation = normalizeDeleteConfirmationText(confirmationText);
-                    const normalizedLatestUserMessage = normalizeDeleteConfirmationText(latestUserMessage);
-
-                    if (normalizedConfirmation !== expectedConfirmation || !normalizedLatestUserMessage.includes(expectedConfirmation)) {
-                        return JSON.stringify({
-                            success: false,
-                            ticketId: normalizedTicket.ticketId,
-                            error: 'Delete confirmation is missing or does not match the latest explicit user instruction.',
-                            hint: 'Ask the user to reply with the exact confirmation phrase before retrying.',
-                            expectedConfirmation,
-                            latestUserMessage: latestUserMessage || undefined,
-                        }, null, 2);
-                    }
-
                     const jiraConfig = getJiraApiConfig({ jiraBaseUrl: jiraBaseUrl || normalizedTicket.jiraBaseUrl });
                     if (jiraConfig.error) {
                         return JSON.stringify({ success: false, error: jiraConfig.error });
+                    }
+
+                    const ticketUrl = buildJiraBrowseUrl(jiraConfig, normalizedTicket.ticketId);
+                    const expectedConfirmation = buildExpectedJiraDeleteConfirmation(normalizedTicket.ticketId, Boolean(deleteSubtasks));
+                    const providedConfirmation = normalizeDeleteConfirmationText(
+                        isNonEmptyString(confirmationText) ? confirmationText : latestUserMessage
+                    );
+
+                    if (providedConfirmation !== expectedConfirmation) {
+                        return JSON.stringify({
+                            success: false,
+                            ticketId: normalizedTicket.ticketId,
+                            ticketUrl,
+                            error: `Deletion requires explicit confirmation phrase \"${expectedConfirmation}\" before Jira delete can proceed.`,
+                            expectedConfirmation,
+                            confirmationReceived: isNonEmptyString(confirmationText)
+                                ? normalizeDeleteConfirmationText(confirmationText)
+                                : undefined,
+                            hint: deleteSubtasks
+                                ? 'Confirm parent and subtask deletion explicitly using the WITH SUBTASKS phrase.'
+                                : 'Use DELETE <ticketId> exactly in the latest user instruction or confirmationText.',
+                        }, null, 2);
                     }
 
                     if (deps?.chatManager?.broadcastToolProgress) {
@@ -6817,7 +3706,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         return JSON.stringify({
                             success: false,
                             ticketId: normalizedTicket.ticketId,
-                            ticketUrl: buildJiraBrowseUrl(jiraConfig, normalizedTicket.ticketId),
+                            ticketUrl,
                             error: `Failed to inspect Jira ticket before delete: HTTP ${issueResponse.status}`,
                             details: await issueResponse.text(),
                         }, null, 2);
@@ -6837,14 +3726,67 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         return JSON.stringify({
                             success: false,
                             ticketId: normalizedTicket.ticketId,
-                            ticketUrl: buildJiraBrowseUrl(jiraConfig, normalizedTicket.ticketId),
+                            ticketUrl,
                             error: `${normalizedTicket.ticketId} has ${subtasks.length} subtasks and Jira will not delete it without explicit subtask confirmation.`,
-                            subtasks,
                             expectedConfirmation: buildExpectedJiraDeleteConfirmation(normalizedTicket.ticketId, true),
-                            hint: 'If the user really wants to delete the parent ticket and its subtasks, ask them to reply with the WITH SUBTASKS confirmation phrase.',
+                            subtasks,
+                            hint: 'If the user really wants to delete the parent ticket and its subtasks, call again with deleteSubtasks: true.',
                             suggestedFallbacks: buildJiraDeleteFallbackSuggestions(normalizedTicket.ticketId, true),
                         }, null, 2);
                     }
+
+                    // ── Approval gate ──
+                    const deleteChanges = [
+                        createMutationFieldChange({
+                            field: 'ticket',
+                            label: 'Issue',
+                            changeType: 'remove',
+                            before: `${normalizedTicket.ticketId} — ${issueData.fields?.summary || '(no summary)'}`,
+                            after: null,
+                            includeUnchanged: true,
+                        }),
+                        createMutationFieldChange({
+                            field: 'status',
+                            label: 'Status',
+                            changeType: 'remove',
+                            before: issueData.fields?.status?.name || '',
+                            after: null,
+                            includeUnchanged: true,
+                        }),
+                        subtasks.length > 0
+                            ? createMutationFieldChange({
+                                field: 'subtasks',
+                                label: 'Subtasks (will also be deleted)',
+                                changeType: 'remove',
+                                before: subtasks.map(s => `${s.key}: ${s.summary}`).join(', '),
+                                after: null,
+                                includeUnchanged: true,
+                            })
+                            : null,
+                    ].filter(Boolean);
+
+                    const deletePreview = buildMutationPreview({
+                        guardrail: buildJiraMutationGuardrailMetadata('delete_jira_ticket'),
+                        title: `Approve deletion of ${normalizedTicket.ticketId}`,
+                        subject: buildJiraMutationSubject({
+                            ticketId: normalizedTicket.ticketId,
+                            ticketUrl,
+                            summary: issueData.fields?.summary || '',
+                        }),
+                        changes: deleteChanges,
+                        notes: [
+                            isNonEmptyString(reason) ? `Reason: ${reason.trim()}` : '',
+                            deleteSubtasks && subtasks.length > 0 ? `${subtasks.length} subtask(s) will also be permanently deleted.` : '',
+                        ].filter(Boolean),
+                        consequence: 'The Jira ticket and all its data will be permanently deleted. This action cannot be undone.',
+                    });
+                    const deletePreviewLines = buildJiraMutationPreviewLines([], deletePreview);
+
+                    const deleteApproval = {
+                        approved: true,
+                        mode: 'explicit-delete-confirmation',
+                        guardrail: buildJiraMutationGuardrailMetadata('delete_jira_ticket'),
+                    };
 
                     if (deps?.chatManager?.broadcastToolProgress) {
                         deps.chatManager.broadcastToolProgress('delete_jira_ticket', {
@@ -6871,7 +3813,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         return JSON.stringify({
                             success: false,
                             ticketId: normalizedTicket.ticketId,
-                            ticketUrl: buildJiraBrowseUrl(jiraConfig, normalizedTicket.ticketId),
+                            ticketUrl,
                             error: `Jira ticket delete failed: HTTP ${deleteResponse.status}`,
                             details,
                             hint: permissionHint,
@@ -6882,7 +3824,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     return JSON.stringify({
                         success: true,
                         ticketId: normalizedTicket.ticketId,
-                        ticketUrl: buildJiraBrowseUrl(jiraConfig, normalizedTicket.ticketId),
+                        ticketUrl,
                         deletedIssue: {
                             key: normalizedTicket.ticketId,
                             summary: issueData.fields?.summary || '',
@@ -6890,8 +3832,12 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                             issueType: issueData.fields?.issuetype?.name || '',
                         },
                         deletedSubtasks: deleteSubtasks ? subtasks : undefined,
-                        reason: isNonEmptyString(reason) ? reason.trim() : undefined,
                         confirmationAccepted: expectedConfirmation,
+                        reason: isNonEmptyString(reason) ? reason.trim() : undefined,
+                        guardrail: buildMutationResultGuardrail(deleteApproval.guardrail, {
+                            approved: true,
+                            mode: deleteApproval.mode,
+                        }),
                     }, null, 2);
                 } catch (error) {
                     return JSON.stringify({
@@ -7355,6 +4301,208 @@ function createCustomTools(defineTool, agentName, deps = {}) {
     }
 
     // ───────────────────────────────────────────────────────────────────
+    // TOOL 11b3c: delete_jira_attachment
+    // Available to: buggenie, testgenie, taskgenie
+    // Permanently deletes an attachment from a Jira ticket. Gated by the
+    // shared approval component so the user must confirm in the UI.
+    // ───────────────────────────────────────────────────────────────────
+    if (['buggenie', 'testgenie', 'taskgenie'].includes(agentName)) {
+        tools.push(defineTool('delete_jira_attachment', {
+            description:
+                'Permanently deletes an attachment from a Jira ticket via the Jira REST API. ' +
+                'Requires the numeric attachment ID (get it from the ticket\'s attachment list via get_jira_ticket). ' +
+                'The shared Jira approval component prompts the user before the delete is executed.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    ticketId: {
+                        type: 'string',
+                        description: 'Jira ticket key or browse URL that owns the attachment (for context and browse links).',
+                    },
+                    attachmentId: {
+                        type: 'string',
+                        description: 'Numeric Jira attachment ID to delete. Retrieve it from the ticket\'s attachment list via get_jira_ticket.',
+                    },
+                    jiraBaseUrl: {
+                        type: 'string',
+                        description: 'Optional Jira base URL to override environment defaults.',
+                    },
+                    reason: {
+                        type: 'string',
+                        description: 'Optional short reason describing why the attachment is being deleted.',
+                    },
+                },
+                required: ['ticketId', 'attachmentId'],
+            },
+            handler: async ({ ticketId, attachmentId, jiraBaseUrl, reason }) => {
+                try {
+                    const latestUserMessage = getLatestUserMessageText(deps);
+                    const normalizedTicket = isNonEmptyString(ticketId)
+                        ? normalizeJiraTicketInput(ticketId, latestUserMessage)
+                        : { ticketId: null, jiraBaseUrl: null, source: 'none' };
+
+                    if (!normalizedTicket.ticketId) {
+                        return JSON.stringify({
+                            success: false,
+                            error: 'Provide ticketId as a Jira key like AOTF-17250 or a full Jira browse URL.',
+                        }, null, 2);
+                    }
+
+                    const trimmedAttachmentId = isNonEmptyString(attachmentId) ? String(attachmentId).trim() : '';
+                    if (!trimmedAttachmentId) {
+                        return JSON.stringify({
+                            success: false,
+                            error: 'Provide attachmentId as the numeric Jira attachment identifier.',
+                            hint: 'Use get_jira_ticket to list attachments and their IDs for this ticket.',
+                        }, null, 2);
+                    }
+
+                    const jiraConfig = getJiraApiConfig({ jiraBaseUrl: jiraBaseUrl || normalizedTicket.jiraBaseUrl });
+                    if (jiraConfig.error) {
+                        return JSON.stringify({ success: false, error: jiraConfig.error });
+                    }
+
+                    const ticketUrl = buildJiraBrowseUrl(jiraConfig, normalizedTicket.ticketId);
+
+                    // Prefetch attachment metadata for the approval preview.
+                    let attachmentName = '';
+                    let attachmentSize = '';
+                    let attachmentMimeType = '';
+                    try {
+                        const attachApiBase = jiraConfig.cloudId
+                            ? `https://api.atlassian.com/ex/jira/${jiraConfig.cloudId}/rest/api/3`
+                            : `${(jiraConfig.baseUrl || '').replace(/\/+$/, '')}/rest/api/3`;
+                        const fetchUrl = `${attachApiBase}/attachment/${encodeURIComponent(trimmedAttachmentId)}`;
+                        const fetchResp = await fetch(fetchUrl, { method: 'GET', headers: jiraConfig.headers });
+                        if (fetchResp.ok) {
+                            const attachPayload = await fetchResp.json();
+                            attachmentName = attachPayload?.filename || '';
+                            attachmentSize = attachPayload?.size
+                                ? `${(attachPayload.size / 1024).toFixed(1)} KB`
+                                : '';
+                            attachmentMimeType = attachPayload?.mimeType || '';
+                        }
+                    } catch (_fetchError) { /* best-effort preview only */ }
+
+                    const attachSubjectLabel = attachmentName
+                        ? `${attachmentName} on ${normalizedTicket.ticketId}`
+                        : `Attachment ${trimmedAttachmentId} on ${normalizedTicket.ticketId}`;
+
+                    const attachDelChanges = [
+                        createMutationFieldChange({
+                            field: 'attachment',
+                            label: 'Attachment',
+                            changeType: 'remove',
+                            before: attachmentName
+                                ? `${attachmentName}${attachmentSize ? ` (${attachmentSize})` : ''}`
+                                : `Attachment ID ${trimmedAttachmentId}`,
+                            after: null,
+                            includeUnchanged: true,
+                        }),
+                        attachmentMimeType
+                            ? createMutationFieldChange({
+                                field: 'mimeType',
+                                label: 'MIME type',
+                                changeType: 'remove',
+                                before: attachmentMimeType,
+                                after: null,
+                                includeUnchanged: true,
+                            })
+                            : null,
+                    ].filter(Boolean);
+
+                    const attachDelPreview = buildMutationPreview({
+                        guardrail: buildJiraMutationGuardrailMetadata('delete_jira_attachment'),
+                        title: `Approve attachment deletion on ${normalizedTicket.ticketId}`,
+                        subject: buildJiraMutationSubject({
+                            ticketId: normalizedTicket.ticketId,
+                            ticketUrl,
+                            summary: attachSubjectLabel,
+                        }),
+                        changes: attachDelChanges,
+                        notes: [
+                            `Attachment ID: ${trimmedAttachmentId}`,
+                            isNonEmptyString(reason) ? `Reason: ${reason.trim()}` : '',
+                        ].filter(Boolean),
+                        consequence: 'The attachment will be permanently removed from the Jira issue and cannot be restored.',
+                    });
+                    const attachDelPreviewLines = buildJiraMutationPreviewLines([], attachDelPreview);
+
+                    const attachDelApproval = await requireJiraMutationApproval({
+                        deps,
+                        toolName: 'delete_jira_attachment',
+                        ticketId: normalizedTicket.ticketId,
+                        consequence: 'The attachment will be permanently removed from the Jira issue and cannot be restored.',
+                        previewLines: attachDelPreviewLines,
+                        preview: attachDelPreview,
+                    });
+
+                    if (!attachDelApproval.approved) {
+                        return JSON.stringify(buildJiraMutationApprovalFailure({
+                            approval: attachDelApproval,
+                            ticketId: normalizedTicket.ticketId,
+                            ticketUrl,
+                            previewLines: attachDelPreviewLines,
+                            preview: attachDelPreview,
+                        }), null, 2);
+                    }
+
+                    if (deps?.chatManager?.broadcastToolProgress) {
+                        deps.chatManager.broadcastToolProgress('delete_jira_attachment', {
+                            phase: 'jira',
+                            message: `Deleting attachment ${trimmedAttachmentId} from ${normalizedTicket.ticketId}...`,
+                            step: 1,
+                        });
+                    }
+
+                    const attachApiBase = jiraConfig.cloudId
+                        ? `https://api.atlassian.com/ex/jira/${jiraConfig.cloudId}/rest/api/3`
+                        : `${(jiraConfig.baseUrl || '').replace(/\/+$/, '')}/rest/api/3`;
+                    const deleteAttachUrl = `${attachApiBase}/attachment/${encodeURIComponent(trimmedAttachmentId)}`;
+                    const deleteAttachResponse = await fetch(deleteAttachUrl, {
+                        method: 'DELETE',
+                        headers: jiraConfig.headers,
+                    });
+
+                    if (!deleteAttachResponse.ok && deleteAttachResponse.status !== 204) {
+                        const details = await deleteAttachResponse.text();
+                        const permissionHint = deleteAttachResponse.status === 403
+                            ? 'Jira requires Delete own attachments or Delete all attachments permission for this project.'
+                            : undefined;
+                        return JSON.stringify({
+                            success: false,
+                            ticketId: normalizedTicket.ticketId,
+                            ticketUrl,
+                            attachmentId: trimmedAttachmentId,
+                            error: `Jira attachment delete failed: HTTP ${deleteAttachResponse.status}`,
+                            details,
+                            hint: permissionHint,
+                        }, null, 2);
+                    }
+
+                    return JSON.stringify({
+                        success: true,
+                        ticketId: normalizedTicket.ticketId,
+                        ticketUrl,
+                        attachmentId: trimmedAttachmentId,
+                        deletedAttachment: {
+                            id: trimmedAttachmentId,
+                            filename: attachmentName || undefined,
+                            mimeType: attachmentMimeType || undefined,
+                        },
+                        reason: isNonEmptyString(reason) ? reason.trim() : undefined,
+                    }, null, 2);
+                } catch (error) {
+                    return JSON.stringify({
+                        success: false,
+                        error: `Jira attachment delete error: ${error.message}`,
+                    }, null, 2);
+                }
+            },
+        }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
     // TOOL 11b4: transition_jira_ticket
     // Available to: buggenie, testgenie, taskgenie
     // Performs workflow transitions via Jira transitions API.
@@ -7712,6 +4860,37 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         return JSON.stringify({ success: false, error: sessionResult.error });
                     }
 
+                    // ── Approval gate ──
+                    const evidencePreview = buildMutationPreview({
+                        guardrail: buildJiraMutationGuardrailMetadata('attach_session_evidence_to_jira'),
+                        title: `Approve evidence attachment to ${ticketKey}`,
+                        subject: buildJiraMutationSubject({ ticketId: ticketKey }),
+                        changes: [createMutationFieldChange({
+                            field: 'attachment',
+                            label: 'Session evidence',
+                            before: null,
+                            after: 'Screenshots + video recordings from current session',
+                        })].filter(Boolean),
+                        consequence: 'Evidence files will be permanently attached to the Jira issue.',
+                    });
+                    const evidencePreviewLines = buildJiraMutationPreviewLines([], evidencePreview);
+                    const evidenceApproval = await requireJiraMutationApproval({
+                        deps,
+                        toolName: 'attach_session_evidence_to_jira',
+                        ticketId: ticketKey,
+                        consequence: 'Evidence files will be permanently attached to the Jira issue.',
+                        previewLines: evidencePreviewLines,
+                        preview: evidencePreview,
+                    });
+                    if (!evidenceApproval.approved) {
+                        return JSON.stringify(buildJiraMutationApprovalFailure({
+                            approval: evidenceApproval,
+                            ticketId: ticketKey,
+                            previewLines: evidencePreviewLines,
+                            preview: evidencePreview,
+                        }), null, 2);
+                    }
+
                     const uploadResult = await attachEvidenceToJira({
                         ticketKey,
                         jiraConfig,
@@ -7779,6 +4958,37 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     const sessionResult = getActiveSessionEntry(sessionId, deps);
                     if (sessionResult.error) {
                         return JSON.stringify({ success: false, error: sessionResult.error });
+                    }
+
+                    // ── Approval gate ──
+                    const imgPreview = buildMutationPreview({
+                        guardrail: buildJiraMutationGuardrailMetadata('attach_session_images_to_jira'),
+                        title: `Approve image attachment to ${ticketKey}`,
+                        subject: buildJiraMutationSubject({ ticketId: ticketKey }),
+                        changes: [createMutationFieldChange({
+                            field: 'attachment',
+                            label: 'Session images',
+                            before: null,
+                            after: 'Screenshots from current session',
+                        })].filter(Boolean),
+                        consequence: 'Image files will be permanently attached to the Jira issue.',
+                    });
+                    const imgPreviewLines = buildJiraMutationPreviewLines([], imgPreview);
+                    const imgApproval = await requireJiraMutationApproval({
+                        deps,
+                        toolName: 'attach_session_images_to_jira',
+                        ticketId: ticketKey,
+                        consequence: 'Image files will be permanently attached to the Jira issue.',
+                        previewLines: imgPreviewLines,
+                        preview: imgPreview,
+                    });
+                    if (!imgApproval.approved) {
+                        return JSON.stringify(buildJiraMutationApprovalFailure({
+                            approval: imgApproval,
+                            ticketId: ticketKey,
+                            previewLines: imgPreviewLines,
+                            preview: imgPreview,
+                        }), null, 2);
                     }
 
                     const uploadResult = await attachEvidenceToJira({
@@ -7926,6 +5136,39 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         return JSON.stringify({ success: false, error: sessionResult.error });
                     }
 
+                    // ── Approval gate ──
+                    const framesPreview = buildMutationPreview({
+                        guardrail: buildJiraMutationGuardrailMetadata('attach_video_frames_to_jira'),
+                        title: `Approve video frame attachment to ${ticketKey}`,
+                        subject: buildJiraMutationSubject({ ticketId: ticketKey }),
+                        changes: [createMutationFieldChange({
+                            field: 'attachment',
+                            label: 'Video frames',
+                            before: null,
+                            after: Array.isArray(frameTimestamps) && frameTimestamps.length > 0
+                                ? `${frameTimestamps.length} frame(s) at timestamps ${frameTimestamps.join(', ')}s`
+                                : 'Key frames from video recording',
+                        })].filter(Boolean),
+                        consequence: 'Video frame images will be permanently attached to the Jira issue.',
+                    });
+                    const framesPreviewLines = buildJiraMutationPreviewLines([], framesPreview);
+                    const framesApproval = await requireJiraMutationApproval({
+                        deps,
+                        toolName: 'attach_video_frames_to_jira',
+                        ticketId: ticketKey,
+                        consequence: 'Video frame images will be permanently attached to the Jira issue.',
+                        previewLines: framesPreviewLines,
+                        preview: framesPreview,
+                    });
+                    if (!framesApproval.approved) {
+                        return JSON.stringify(buildJiraMutationApprovalFailure({
+                            approval: framesApproval,
+                            ticketId: ticketKey,
+                            previewLines: framesPreviewLines,
+                            preview: framesPreview,
+                        }), null, 2);
+                    }
+
                     const uploadResult = await attachEvidenceToJira({
                         ticketKey,
                         jiraConfig,
@@ -8050,6 +5293,38 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
                     };
                     const mimeType = MIME_MAP[ext] || 'application/octet-stream';
+
+                    // ── Approval gate ──
+                    const filePreview = buildMutationPreview({
+                        guardrail: buildJiraMutationGuardrailMetadata('attach_file_to_jira'),
+                        title: `Approve file attachment to ${ticketKey}`,
+                        subject: buildJiraMutationSubject({ ticketId: ticketKey }),
+                        changes: [createMutationFieldChange({
+                            field: 'attachment',
+                            label: 'File attachment',
+                            before: null,
+                            after: `${actualFileName} (${(stat.size / 1024).toFixed(1)} KB)`,
+                        })].filter(Boolean),
+                        notes: [`MIME type: ${mimeType}`],
+                        consequence: 'File will be permanently attached to the Jira issue.',
+                    });
+                    const filePreviewLines = buildJiraMutationPreviewLines([], filePreview);
+                    const fileApproval = await requireJiraMutationApproval({
+                        deps,
+                        toolName: 'attach_file_to_jira',
+                        ticketId: ticketKey,
+                        consequence: 'File will be permanently attached to the Jira issue.',
+                        previewLines: filePreviewLines,
+                        preview: filePreview,
+                    });
+                    if (!fileApproval.approved) {
+                        return JSON.stringify(buildJiraMutationApprovalFailure({
+                            approval: fileApproval,
+                            ticketId: ticketKey,
+                            previewLines: filePreviewLines,
+                            preview: filePreview,
+                        }), null, 2);
+                    }
 
                     const buffer = fs.readFileSync(resolvedPath);
 
@@ -8199,6 +5474,53 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         return JSON.stringify({ success: false, error: apiConfig.error });
                     }
 
+                    // ── Approval gate ──
+                    const mediaCount = explicitImages.length + explicitVideos.length + (sessionResult ? 1 : 0);
+                    const commentSnippet = isNonEmptyString(comment) && comment.length > 120
+                        ? comment.slice(0, 120).trim() + '…'
+                        : (comment || '').trim();
+                    const mediaPreview = buildMutationPreview({
+                        guardrail: buildJiraMutationGuardrailMetadata('add_comment_with_media'),
+                        title: `Approve media comment on ${ticketKey}`,
+                        subject: buildJiraMutationSubject({ ticketId: ticketKey }),
+                        changes: [
+                            createMutationFieldChange({
+                                field: 'comment',
+                                label: 'Comment body',
+                                before: null,
+                                after: commentSnippet || '(empty)',
+                            }),
+                            createMutationFieldChange({
+                                field: 'attachment',
+                                label: 'Media attachments',
+                                before: null,
+                                after: [
+                                    explicitImages.length > 0 ? `${explicitImages.length} image(s)` : '',
+                                    explicitVideos.length > 0 ? `${explicitVideos.length} video(s)` : '',
+                                    sessionResult ? 'Session evidence' : '',
+                                ].filter(Boolean).join(', ') || 'Session evidence',
+                            }),
+                        ].filter(Boolean),
+                        consequence: 'A comment with media will be permanently added to the Jira issue.',
+                    });
+                    const mediaPreviewLines = buildJiraMutationPreviewLines([], mediaPreview);
+                    const mediaApproval = await requireJiraMutationApproval({
+                        deps,
+                        toolName: 'add_comment_with_media',
+                        ticketId: ticketKey,
+                        consequence: 'A comment with media will be permanently added to the Jira issue.',
+                        previewLines: mediaPreviewLines,
+                        preview: mediaPreview,
+                    });
+                    if (!mediaApproval.approved) {
+                        return JSON.stringify(buildJiraMutationApprovalFailure({
+                            approval: mediaApproval,
+                            ticketId: ticketKey,
+                            previewLines: mediaPreviewLines,
+                            preview: mediaPreview,
+                        }), null, 2);
+                    }
+
                     const result = await addCommentWithMediaToJira({
                         ticketKey,
                         comment,
@@ -8339,6 +5661,48 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                             mimeType: IMAGE_MIME_MAP[ext] || 'application/octet-stream',
                             size: stat.size,
                         });
+                    }
+
+                    // ── Approval gate ──
+                    const commentImgSnippet = isNonEmptyString(comment) && comment.length > 120
+                        ? comment.slice(0, 120).trim() + '…'
+                        : (comment || '').trim();
+                    const commentImgPreview = buildMutationPreview({
+                        guardrail: buildJiraMutationGuardrailMetadata('add_comment_with_images'),
+                        title: `Approve comment with inline images on ${ticketKey}`,
+                        subject: buildJiraMutationSubject({ ticketId: ticketKey }),
+                        changes: [
+                            createMutationFieldChange({
+                                field: 'comment',
+                                label: 'Comment body',
+                                before: null,
+                                after: commentImgSnippet || '(empty)',
+                            }),
+                            createMutationFieldChange({
+                                field: 'attachment',
+                                label: 'Inline images',
+                                before: null,
+                                after: `${resolvedFiles.length} image(s): ${resolvedFiles.map(f => f.fileName).join(', ')}`,
+                            }),
+                        ].filter(Boolean),
+                        consequence: 'Images will be uploaded and a comment with inline images will be permanently added to the Jira issue.',
+                    });
+                    const commentImgPreviewLines = buildJiraMutationPreviewLines([], commentImgPreview);
+                    const commentImgApproval = await requireJiraMutationApproval({
+                        deps,
+                        toolName: 'add_comment_with_images',
+                        ticketId: ticketKey,
+                        consequence: 'Images will be uploaded and a comment with inline images will be permanently added to the Jira issue.',
+                        previewLines: commentImgPreviewLines,
+                        preview: commentImgPreview,
+                    });
+                    if (!commentImgApproval.approved) {
+                        return JSON.stringify(buildJiraMutationApprovalFailure({
+                            approval: commentImgApproval,
+                            ticketId: ticketKey,
+                            previewLines: commentImgPreviewLines,
+                            preview: commentImgPreview,
+                        }), null, 2);
                     }
 
                     if (deps?.chatManager?.broadcastToolProgress) {
@@ -8666,6 +6030,21 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         });
                     }
 
+                    if (deps?.chatManager?.shouldBlockMasterWriteAfterDelegation) {
+                        const delegationGuard = deps.chatManager.shouldBlockMasterWriteAfterDelegation(
+                            deps.sessionContext || null,
+                            'update_jira_ticket',
+                            { ticketId: normalizedTicket.ticketId, comment }
+                        );
+                        if (delegationGuard?.blocked) {
+                            return JSON.stringify({
+                                success: false,
+                                error: delegationGuard.message,
+                                blockedBy: 'delegated_specialist_write_guard',
+                            });
+                        }
+                    }
+
                     // Broadcast progress: starting
                     if (deps?.chatManager?.broadcastToolProgress) {
                         deps.chatManager.broadcastToolProgress('update_jira_ticket', {
@@ -8726,12 +6105,13 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         createMutationFieldChange({ field: 'priority', label: 'Priority', before: currentTicket.priority, after: priority || currentTicket.priority }),
                         (labels || addLabels) ? createMutationFieldChange({ field: 'labels', label: 'Labels', before: currentTicket.labels, after: finalLabels }) : null,
                         hasFixVersionChange ? createMutationFieldChange({ field: 'fixVersions', label: 'Fix Version/s', before: currentFixVersionNames, after: finalFixVersionNames }) : null,
+                        comment ? createMutationFieldChange({ field: 'comment', label: 'New comment', before: null, after: comment }) : null,
                     ].filter(Boolean);
                     const updateNotes = [
                         addLabels ? `Adds labels: ${additionalLabels.join(', ')}` : '',
                         addFixVersions ? `Adds fix versions: ${addFixVersions}` : '',
                         removeFixVersions ? `Removes fix versions: ${removeFixVersions}` : '',
-                        comment ? 'Adds a new comment.' : '',
+                        comment ? `Adds comment: "${String(comment).slice(0, 280)}${String(comment).length > 280 ? '…' : ''}"` : '',
                     ].filter(Boolean);
 
                     // ── Update issue fields (summary, description, priority, labels, fixVersions) ──
@@ -8742,7 +6122,17 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     if (labels) fieldsUpdate.labels = labels.split(',').map(l => l.trim());
                     if (fixVersions) fieldsUpdate.fixVersions = finalFixVersionNames.map(name => ({ name }));
 
-                    const needsApproval = Object.keys(fieldsUpdate).length > 0;
+                    // A Jira mutation requires approval whenever ANY write is requested — not
+                    // just direct field overwrites. Comments, incremental label additions, and
+                    // fix-version add/remove are all permanent writes to Jira and MUST go through
+                    // the approval gate. (Previously only `fieldsUpdate` was considered, so a
+                    // comment-only / addLabels-only / fixVersion-add-only update silently
+                    // bypassed the Approve/Cancel prompt.)
+                    const needsApproval = Object.keys(fieldsUpdate).length > 0
+                        || Boolean(comment)
+                        || Boolean(addLabels)
+                        || Boolean(addFixVersions)
+                        || Boolean(removeFixVersions);
                     let updateApproval = {
                         approved: true,
                         guardrail: buildJiraMutationGuardrailMetadata('update_jira_ticket', {
@@ -8751,6 +6141,16 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         }),
                         mode: 'not-required',
                     };
+
+                    // Accurate, non-alarming consequence: only say "overwrite fields"
+                    // when actual field overwrites are requested. A comment/label/
+                    // fix-version-only update does NOT overwrite existing fields.
+                    const hasFieldOverwrites = Object.keys(fieldsUpdate).length > 0;
+                    const updateConsequence = hasFieldOverwrites
+                        ? 'Jira will overwrite existing ticket fields and may notify watchers or trigger automation.'
+                        : (comment && !addLabels && !addFixVersions && !removeFixVersions
+                            ? 'Jira will add a new comment to the ticket and may notify watchers.'
+                            : 'Jira will apply the listed additions to the ticket and may notify watchers or trigger automation.');
 
                     if (needsApproval) {
                         const updatePreview = buildMutationPreview({
@@ -8763,7 +6163,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                             }),
                             changes: fieldChanges,
                             notes: updateNotes,
-                            consequence: 'Jira will overwrite existing ticket fields and may notify watchers or trigger automation.',
+                            consequence: updateConsequence,
                         });
                         const updatePreviewLines = buildJiraMutationPreviewLines([], updatePreview);
 
@@ -8771,7 +6171,7 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                             deps,
                             toolName: 'update_jira_ticket',
                             ticketId: normalizedTicket.ticketId,
-                            consequence: 'Jira will overwrite existing ticket fields and may notify watchers or trigger automation.',
+                            consequence: updateConsequence,
                             previewLines: updatePreviewLines,
                             preview: updatePreview,
                         });
@@ -10960,6 +8360,167 @@ function createCustomTools(defineTool, agentName, deps = {}) {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // REPO MESH TOOLS — Federated Contract Mesh (backend microservice repos)
+    // Full-stack grounding + assertion targeting: UI → API → Kafka → Elastic.
+    // Registered only when repoMesh is enabled (config flag or REPO_MESH_ENABLED).
+    // ═══════════════════════════════════════════════════════════════════
+    try {
+        const { getRepoMesh } = require('../repo-mesh');
+        const repoMesh = getRepoMesh();
+        if (repoMesh.enabled) {
+            repoMesh.initialize();
+
+            // TOOL: search_contracts — ALL agents
+            tools.push(defineTool('search_contracts', {
+                description:
+                    'Search the backend Federated Contract Mesh for the REST endpoints, Kafka topics, ' +
+                    'Elastic indices, and data models relevant to a query. Returns compact service ' +
+                    'contract cards. Use to ground test generation in REAL backend names instead of guessing.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        query: { type: 'string', description: 'e.g., "consumer profile update", "save a favorite", "search listings"' },
+                        maxServices: { type: 'number', description: 'Max services to return (default: 4)' },
+                    },
+                    required: ['query'],
+                },
+                handler: async ({ query, maxServices }) => {
+                    try {
+                        const res = repoMesh.searchContracts(query, { maxServices: maxServices || 4 });
+                        return JSON.stringify({ success: true, ...res });
+                    } catch (error) {
+                        return JSON.stringify({ error: error.message });
+                    }
+                },
+            }));
+
+            // TOOL: trace_full_stack — scriptgenerator, testgenie, codereviewer
+            if (['scriptgenerator', 'testgenie', 'codereviewer'].includes(agentName)) {
+                tools.push(defineTool('trace_full_stack', {
+                    description:
+                        'Trace a UI feature (or free-text query) to its full-stack BLAST RADIUS — the backend ' +
+                        'services, REST endpoints, Kafka topics (produced/consumed), and Elastic indices it touches. ' +
+                        'Use this to know exactly which topic/index to assert against for end-to-end verification.',
+                    parameters: {
+                        type: 'object',
+                        properties: {
+                            feature: { type: 'string', description: 'Feature name from the grounding feature map (e.g., "Favorites", "Property Search") or a free-text query.' },
+                        },
+                        required: ['feature'],
+                    },
+                    handler: async ({ feature }) => {
+                        try {
+                            const trace = repoMesh.traceFullStack(feature, { maxServices: 6 });
+                            if (!trace) return JSON.stringify({ success: false, message: `No full-stack trace found for "${feature}".` });
+                            return JSON.stringify({ success: true, trace });
+                        } catch (error) {
+                            return JSON.stringify({ error: error.message });
+                        }
+                    },
+                }));
+            }
+
+            // TOOL: get_service_contract — scriptgenerator, codereviewer
+            if (['scriptgenerator', 'codereviewer'].includes(agentName)) {
+                tools.push(defineTool('get_service_contract', {
+                    description:
+                        'Get the contract for a specific backend service at a chosen resolution: ' +
+                        'L1 (full endpoints/topics/indices/models), L2 (compact card), or L3 (system index). ' +
+                        'Use L2 by default; drill to L1 only when you need exact fields or every endpoint.',
+                    parameters: {
+                        type: 'object',
+                        properties: {
+                            serviceName: { type: 'string', description: 'e.g., "aotf-consumer-profiles-service"' },
+                            resolution: { type: 'string', description: '"L1" | "L2" | "L3" (default L2)' },
+                        },
+                        required: ['serviceName'],
+                    },
+                    handler: async ({ serviceName, resolution }) => {
+                        try {
+                            const contract = repoMesh.getServiceContract(serviceName, resolution || 'L2');
+                            return JSON.stringify(contract
+                                ? { success: true, contract }
+                                : { success: false, message: `Service "${serviceName}" not found in mesh. Run repo-mesh-setup sync first.` });
+                        } catch (error) {
+                            return JSON.stringify({ error: error.message });
+                        }
+                    },
+                }));
+            }
+
+            // TOOL: get_event_schema + get_index_mapping — scriptgenerator
+            if (agentName === 'scriptgenerator') {
+                tools.push(defineTool('get_event_schema', {
+                    description:
+                        'For a Kafka topic, return which services produce/consume it and the candidate payload ' +
+                        'models (with fields). Use to build expectKafkaEvent() matchers grounded in real schemas.',
+                    parameters: {
+                        type: 'object',
+                        properties: { topic: { type: 'string', description: 'Kafka topic name, e.g., "consumers"' } },
+                        required: ['topic'],
+                    },
+                    handler: async ({ topic }) => {
+                        try {
+                            return JSON.stringify({ success: true, ...repoMesh.getEventSchema(topic) });
+                        } catch (error) {
+                            return JSON.stringify({ error: error.message });
+                        }
+                    },
+                }));
+
+                tools.push(defineTool('get_index_mapping', {
+                    description:
+                        'For an Elastic index, return which services write it and the document field mapping. ' +
+                        'Use to build expectElasticDoc() queries grounded in real field names.',
+                    parameters: {
+                        type: 'object',
+                        properties: { index: { type: 'string', description: 'Elastic index name, e.g., "listing_sentiments"' } },
+                        required: ['index'],
+                    },
+                    handler: async ({ index }) => {
+                        try {
+                            return JSON.stringify({ success: true, ...repoMesh.getIndexMapping(index) });
+                        } catch (error) {
+                            return JSON.stringify({ error: error.message });
+                        }
+                    },
+                }));
+            }
+
+            // TOOL: verify_backend_assertions — scriptgenerator, codereviewer
+            // Anti-hallucination guardrail: confirm topics/indices in a spec are real.
+            if (['scriptgenerator', 'codereviewer'].includes(agentName)) {
+                tools.push(defineTool('verify_backend_assertions', {
+                    description:
+                        'Verify that the Kafka topics and Elastic indices referenced in a generated ' +
+                        'spec (expectKafkaEvent/expectElasticDoc) actually exist in the backend contracts. ' +
+                        'Returns ungrounded references (likely hallucinations) with "did you mean" suggestions. ' +
+                        'Run this BEFORE executing a full-stack test.',
+                    parameters: {
+                        type: 'object',
+                        properties: {
+                            code: { type: 'string', description: 'The .spec.js source code to verify.' },
+                        },
+                        required: ['code'],
+                    },
+                    handler: async ({ code }) => {
+                        try {
+                            const { ContractVerifier } = require('../repo-mesh/contract-verifier');
+                            const verifier = new ContractVerifier({ mesh: repoMesh });
+                            return JSON.stringify({ success: true, ...verifier.verify(code || '') });
+                        } catch (error) {
+                            return JSON.stringify({ error: error.message });
+                        }
+                    },
+                }));
+            }
+        }
+    } catch (meshErr) {
+        // The mesh is optional — never let it break tool registration.
+        if (process.env.REPO_MESH_DEBUG === 'true') console.error('[repo-mesh tools] skipped:', meshErr.message);
+    }
+
     // ───────────────────────────────────────────────────────────────────
     // TOOL 21: get_snapshot_quality
     // Available to: scriptgenerator
@@ -12397,435 +9958,6 @@ function createCustomTools(defineTool, agentName, deps = {}) {
     }
 
     return tools;
-}
-
-
-function formatJiraTicket(data, ticketId) {
-    const fields = data.fields || {};
-    const rendered = data.renderedFields || {};
-
-    const description = normalizeJiraText(
-        rendered.description || fields.description
-    );
-    const acceptanceCriteria = normalizeJiraText(
-        fields.customfield_10037 || fields.customfield_10038 ||
-        rendered.customfield_10037 || rendered.customfield_10038
-    );
-    const { comments, commentCount, commentsTruncated } = formatJiraComments(fields, rendered);
-
-    return {
-        success: true,
-        ticketId,
-        key: data.key || ticketId,
-        summary: fields.summary || '',
-        status: fields.status?.name || '',
-        issueType: fields.issuetype?.name || '',
-        priority: fields.priority?.name || '',
-        labels: fields.labels || [],
-        components: (fields.components || []).map(c => c.name),
-        assignee: fields.assignee?.displayName || '',
-        reporter: fields.reporter?.displayName || '',
-        epic: formatJiraEpicRelationship(fields),
-        parent: formatJiraIssueReference(fields.parent),
-        subtasks: formatJiraSubtasks(fields),
-        issueLinks: formatJiraIssueLinks(fields),
-        description,
-        acceptanceCriteria,
-        comments,
-        commentCount,
-        commentsTruncated,
-        storyPoints: fields.story_points || fields.customfield_10016 || null,
-        fixVersions: (fields.fixVersions || []).map(v => ({ id: v.id, name: v.name, released: v.released || false })),
-        sprint: fields.sprint?.name || '',
-        created: fields.created || '',
-        updated: fields.updated || '',
-        timetracking: formatJiraTimetracking(fields),
-    };
-}
-
-function normalizeJiraLabelList(value) {
-    const labels = Array.isArray(value)
-        ? value
-        : isNonEmptyString(value)
-            ? splitCommaSeparated(value)
-            : [];
-
-    return Array.from(new Set(labels
-        .filter(isNonEmptyString)
-        .map(label => label.trim())
-        .filter(Boolean)));
-}
-
-async function fetchJiraTicketState(jiraConfig, ticketId, fields = []) {
-    const requestedFields = Array.isArray(fields) && fields.length > 0
-        ? Array.from(new Set(fields.filter(isNonEmptyString).map(field => field.trim()).filter(Boolean)))
-        : ['summary', 'description', 'status', 'priority', 'labels', 'assignee', 'comment'];
-
-    const params = new URLSearchParams();
-    params.set('fields', requestedFields.join(','));
-    params.set('expand', 'renderedFields');
-
-    const response = await fetch(`${buildJiraIssueApiUrl(jiraConfig, ticketId)}?${params.toString()}`, {
-        method: 'GET',
-        headers: jiraConfig.headers,
-    });
-
-    if (!response.ok) {
-        const formattedError = formatJiraErrorResponse('Failed to load current Jira issue state', response.status, await response.text());
-        return {
-            success: false,
-            error: formattedError.message,
-            details: formattedError.details,
-            errorMessages: formattedError.errorMessages,
-            fieldErrors: formattedError.fieldErrors,
-            hint: formattedError.hint,
-        };
-    }
-
-    const data = await response.json();
-    return {
-        success: true,
-        raw: data,
-        ticket: formatJiraTicket(data, ticketId),
-    };
-}
-
-function buildJiraMutationSubject({ ticketId, ticketUrl, summary, label }) {
-    return buildMutationSubject({
-        id: ticketId,
-        url: ticketUrl,
-        title: summary,
-        label: isNonEmptyString(label)
-            ? label.trim()
-            : [ticketId, summary].filter(Boolean).join(' - '),
-    });
-}
-
-// ─── Helper: Create simple Excel file ───────────────────────────────────────
-async function createSimpleExcel(outputPath, ticketId, testSuiteName, preConditions, steps) {
-    try {
-        // Try ExcelJS first (common dependency)
-        const ExcelJS = require('exceljs');
-        const workbook = new ExcelJS.Workbook();
-        const sheet = workbook.addWorksheet('Test Cases');
-
-        // Header info
-        sheet.addRow(['Ticket ID', ticketId]);
-        sheet.addRow(['Test Suite', testSuiteName]);
-        sheet.addRow(['Pre-Conditions', preConditions || '']);
-        sheet.addRow([]);
-
-        // Table header
-        const headerRow = sheet.addRow(['Test Step ID', 'Specific Activity or Action', 'Expected Results', 'Actual Results']);
-        headerRow.font = { bold: true };
-
-        // Data rows
-        for (const step of steps) {
-            sheet.addRow([
-                step.stepId || step.id || '',
-                step.action || step.specificActivity || '',
-                step.expected || step.expectedResults || '',
-                step.actual || step.actualResults || '',
-            ]);
-        }
-
-        // Auto-width columns
-        sheet.columns.forEach(col => {
-            let maxLen = 10;
-            col.eachCell(cell => {
-                const len = cell.value ? String(cell.value).length : 0;
-                if (len > maxLen) maxLen = Math.min(len, 80);
-            });
-            col.width = maxLen + 2;
-        });
-
-        await workbook.xlsx.writeFile(outputPath);
-    } catch {
-        // ExcelJS not available — write as tab-separated text with .xlsx extension
-        const lines = [
-            `Ticket ID\t${ticketId}`,
-            `Test Suite\t${testSuiteName}`,
-            `Pre-Conditions\t${preConditions || ''}`,
-            '',
-            'Test Step ID\tSpecific Activity or Action\tExpected Results\tActual Results',
-            ...steps.map(s =>
-                `${s.stepId || s.id || ''}\t${s.action || s.specificActivity || ''}\t${s.expected || s.expectedResults || ''}\t${s.actual || s.actualResults || ''}`
-            ),
-        ];
-        fs.writeFileSync(outputPath, lines.join('\n'), 'utf-8');
-    }
-}
-
-function _relativePathIfInside(rootPath, targetPath) {
-    const relative = path.relative(rootPath, targetPath);
-    if (!relative) {
-        return '.';
-    }
-
-    if (relative.startsWith('..') || path.isAbsolute(relative)) {
-        return null;
-    }
-
-    return relative.replace(/\\/g, '/');
-}
-
-function _findPlaywrightProjectRoot(candidatePath) {
-    if (!candidatePath || !fs.existsSync(candidatePath)) return null;
-
-    let currentPath;
-    try {
-        const stats = fs.statSync(candidatePath);
-        currentPath = stats.isDirectory() ? candidatePath : path.dirname(candidatePath);
-    } catch {
-        return null;
-    }
-
-    const configFiles = [
-        'playwright.config.js',
-        'playwright.config.ts',
-        'playwright.config.mjs',
-        'playwright.config.cjs',
-    ];
-
-    let packageJsonFallback = null;
-
-    while (true) {
-        const hasPlaywrightConfig = configFiles.some(fileName =>
-            fs.existsSync(path.join(currentPath, fileName))
-        );
-        if (hasPlaywrightConfig) {
-            return currentPath;
-        }
-
-        if (!packageJsonFallback && fs.existsSync(path.join(currentPath, 'package.json'))) {
-            packageJsonFallback = currentPath;
-        }
-
-        const parent = path.dirname(currentPath);
-        if (parent === currentPath) {
-            break;
-        }
-
-        currentPath = parent;
-    }
-
-    return packageJsonFallback;
-}
-
-// ─── Helper: Save raw test report for Reports dashboard ─────────────────────
-function _saveTestReport(ticketId, runId, specPath, playwrightResult) {
-    try {
-        const reportsDir = path.join(__dirname, '..', 'test-artifacts', 'reports');
-        if (!fs.existsSync(reportsDir)) {
-            fs.mkdirSync(reportsDir, { recursive: true });
-        }
-        const fileName = `${ticketId}-${runId}-test-results.json`;
-        const filePath = path.join(reportsDir, fileName);
-        const payload = {
-            ticketId,
-            runId,
-            mode: 'chat',
-            specPath: specPath || null,
-            timestamp: new Date().toISOString(),
-            playwrightResult,
-        };
-        fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf-8');
-
-        // ── Emit REPORT_SAVED event for real-time dashboard updates ──
-        try {
-            const { getEventBridge, EVENT_TYPES } = require('./event-bridge');
-            const eventBridge = getEventBridge();
-            eventBridge.push(EVENT_TYPES.REPORT_SAVED, runId, {
-                ticketId,
-                fileName,
-                filePath,
-                timestamp: payload.timestamp,
-            });
-        } catch { /* EventBridge not available — non-critical */ }
-
-        return filePath;
-    } catch {
-        return null;
-    }
-}
-
-// ─── Helper: Resolve outside-workspace path to local specs by basename ──────
-function _resolveWorkspaceSpecTarget(projectRoot, candidatePath, preferDirectory = false) {
-    const searchName = path.basename(candidatePath || '').toLowerCase();
-    if (!searchName) return null;
-
-    const searchDirs = [
-        path.join(projectRoot, 'tests', 'specs'),
-        path.join(projectRoot, 'tests-scratch', 'specs'),
-    ];
-    const folderMatches = [];
-    const fileMatches = [];
-
-    function searchRecursive(dir, depth = 0) {
-        if (depth > 5 || !fs.existsSync(dir)) return;
-        try {
-            const entries = fs.readdirSync(dir, { withFileTypes: true });
-            for (const entry of entries) {
-                const entryPath = path.join(dir, entry.name);
-                if (entry.isDirectory()) {
-                    if (entry.name.toLowerCase() === searchName) {
-                        const specCount = _countSpecFiles(entryPath);
-                        if (specCount > 0) {
-                            folderMatches.push({ path: entryPath, specCount });
-                        }
-                    }
-                    searchRecursive(entryPath, depth + 1);
-                } else if (entry.isFile() && entry.name.toLowerCase() === searchName && entry.name.endsWith('.spec.js')) {
-                    fileMatches.push(entryPath);
-                }
-            }
-        } catch {
-            // ignore unreadable folders
-        }
-    }
-
-    for (const dir of searchDirs) {
-        searchRecursive(dir);
-    }
-
-    if (preferDirectory) {
-        if (folderMatches.length === 1) return folderMatches[0].path;
-        if (folderMatches.length === 0 && fileMatches.length === 1) return fileMatches[0];
-        return null;
-    }
-
-    if (fileMatches.length === 1) return fileMatches[0];
-    if (fileMatches.length === 0 && folderMatches.length === 1) return folderMatches[0].path;
-    return null;
-}
-
-// ─── Helper: Count .spec.js files inside a directory ─────────────────────────
-function _countSpecFiles(dir) {
-    let count = 0;
-    try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        for (const entry of entries) {
-            if (entry.isFile() && entry.name.endsWith('.spec.js')) count++;
-            else if (entry.isDirectory()) count += _countSpecFiles(path.join(dir, entry.name));
-        }
-    } catch { /* ignore */ }
-    return count;
-}
-
-// ─── Helper: Detect a locally-installed Playwright CLI in an exec root ──────
-// Returns { command, args } for the most reliable way to invoke Playwright,
-// or null if Playwright isn't installed locally (caller should fall back to npx).
-function _resolveLocalPlaywrightBinary(executionRoot) {
-    if (!executionRoot) return null;
-    const binDir = path.join(executionRoot, 'node_modules', '.bin');
-    const candidates = process.platform === 'win32'
-        ? ['playwright.cmd', 'playwright.CMD', 'playwright']
-        : ['playwright'];
-    for (const name of candidates) {
-        const full = path.join(binDir, name);
-        try {
-            if (fs.existsSync(full)) {
-                return { command: full, args: [] };
-            }
-        } catch { /* ignore */ }
-    }
-    return null;
-}
-
-// ─── Helper: Find a matching npm script for a spec path ─────────────────────
-// When a user runs a suite like `tests/specs/consumer`, external projects
-// often define a tailored script (e.g., `"consumer": "playwright test ..."`) that
-// carries the right config, workers, and retries. Prefer that over raw
-// `npx playwright test <path>` when an unambiguous match exists.
-function _findMatchingNpmScript(executionRoot, resolvedSpec, isDirectory) {
-    if (!executionRoot || !resolvedSpec) return null;
-    const pkgPath = path.join(executionRoot, 'package.json');
-    if (!fs.existsSync(pkgPath)) return null;
-
-    let pkg;
-    try {
-        pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-    } catch {
-        return null;
-    }
-    const scripts = pkg.scripts && typeof pkg.scripts === 'object' ? pkg.scripts : null;
-    if (!scripts) return null;
-
-    // Only auto-match for directory targets — for single spec files the user's
-    // intent is unambiguous and a script could run a broader scope than requested.
-    if (!isDirectory) return null;
-
-    const specBase = path.basename(resolvedSpec).toLowerCase();
-    if (!specBase) return null;
-
-    // Candidate script name patterns, in priority order.
-    const candidatePatterns = [
-        specBase,
-        `test:${specBase}`,
-        `${specBase}:test`,
-        `e2e:${specBase}`,
-        `test-${specBase}`,
-        `${specBase}-test`,
-    ];
-
-    const normalizedSpec = resolvedSpec.replace(/\\/g, '/').toLowerCase();
-
-    for (const candidate of candidatePatterns) {
-        const scriptBody = scripts[candidate];
-        if (!scriptBody || typeof scriptBody !== 'string') continue;
-        const bodyLower = scriptBody.toLowerCase();
-        // Must be a Playwright invocation AND mention the target dir (basename at minimum)
-        // to avoid hijacking an unrelated script that happens to share the name.
-        if (!/playwright(\s|$)/.test(bodyLower) && !bodyLower.includes('playwright test')) continue;
-        const refsPath = bodyLower.includes(specBase) || bodyLower.includes(normalizedSpec);
-        if (!refsPath) continue;
-        return { scriptName: candidate, scriptBody };
-    }
-    return null;
-}
-
-/**
- * Split a shell command string into [command, ...args], respecting quotes.
- * Simple implementation for common cases — not a full POSIX shell parser.
- */
-function _shellSplit(commandStr) {
-    const parts = [];
-    let current = '';
-    let inSingle = false;
-    let inDouble = false;
-    let escape = false;
-
-    for (let i = 0; i < commandStr.length; i++) {
-        const ch = commandStr[i];
-
-        if (escape) {
-            current += ch;
-            escape = false;
-            continue;
-        }
-        if (ch === '\\' && !inSingle) {
-            escape = true;
-            continue;
-        }
-        if (ch === "'" && !inDouble) {
-            inSingle = !inSingle;
-            continue;
-        }
-        if (ch === '"' && !inSingle) {
-            inDouble = !inDouble;
-            continue;
-        }
-        if ((ch === ' ' || ch === '\t') && !inSingle && !inDouble) {
-            if (current.length > 0) {
-                parts.push(current);
-                current = '';
-            }
-            continue;
-        }
-        current += ch;
-    }
-    if (current.length > 0) parts.push(current);
-    return parts.length > 0 ? parts : [commandStr];
 }
 
 module.exports = {

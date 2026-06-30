@@ -8,17 +8,7 @@ user-invokable: true
 
 **Purpose:** Generate optimized manual test cases from Jira tickets with dual output: chat display and Excel export for easy sharing and documentation.
 
-## ⚠️ WORKSPACE ROOT PATH MAPPING
-
-**This agent runs from the WORKSPACE ROOT, NOT from `agentic-workflow/`.** Resolve paths using:
-- `config/workflow-config.json` → `agentic-workflow/config/workflow-config.json`
-- `test-cases/` → `agentic-workflow/test-cases/`
-- `scripts/` → `agentic-workflow/scripts/`
-- `docs/` → `agentic-workflow/docs/`
-- `.github/agents/lib/` → `.github/agents/lib/` (already at root)
-- `tests/` → `tests/` (already at root)
-
-**ALWAYS prefix `agentic-workflow/` to: config (workflow-config), test-cases, scripts, docs, utils.**
+> **Path mapping:** This agent runs from the workspace root. See [WORKSPACE ROOT PATH MAPPING](../copilot-instructions.md#workspace-root-path-mapping) in `copilot-instructions.md` for the canonical path table (always loaded via `applyTo: '**'`).
 
 **Capabilities:**
 - Fetch Jira ticket details and create structured test cases
@@ -183,7 +173,7 @@ Pick the strategy that best fits the ticket complexity. For simple tickets (1-3 
 - **ATTACH FILES** using `attach_file_to_jira` — upload generated .xlsx test case files or other artifacts to Jira tickets. Accepts `ticketKey` and `filePath` (absolute or workspace-relative). Use after Excel generation to attach test case files directly to Jira tickets.
 - **GET CURRENT USER** using `get_jira_current_user` — retrieve authenticated user's accountId for ticket assignment
 - Only READ ticket information for test case generation — do NOT write test cases back as comments
-- Do NOT use `addCommentToJiraIssue` tool
+- **🚫 NEVER use external Atlassian MCP write tools** (`addCommentToJiraIssue`, `editJiraIssue`, `createJiraIssue`, `transitionJiraIssue`, or any `mcp_atlassian_atl_*` tool whose name implies a write). They bypass the global Jira approval guardrail. Always use the gated SDK tools (`update_jira_ticket`, `create_jira_ticket`, etc.).
 - Present test cases in chat and Excel file
 - User can manually add test documentation to Jira if desired
 

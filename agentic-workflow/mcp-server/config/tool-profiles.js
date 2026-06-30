@@ -44,6 +44,7 @@ export const TOOL_PROFILES = {
      * check visibility/state, wait, assert, find by role/text/label/testid, browser lifecycle.
      */
     core: [
+        'intelligent',       // act, observe, extract (preferred high-level primitives)
         'navigation',       // navigate, navigate_back, navigate_forward, reload
         'snapshot',          // snapshot, screenshot, screenshot_baseline, screenshot_compare
         'interaction',       // click, type, hover, drag, check, uncheck, select_option, etc.
@@ -67,6 +68,7 @@ export const TOOL_PROFILES = {
      * keyboard/mouse precision, multi-page, downloads, performance, debugging.
      */
     advanced: [
+        'intelligent',        // act, observe, extract (preferred high-level primitives)
         'iframe',             // frame_action, switch_to_frame, switch_to_main_frame, list_frames
         'shadow-dom',         // shadow_dom_query, shadow_pierce
         'network-interception', // route_intercept, route_list, route_remove, get_network_request, network_requests
@@ -118,6 +120,7 @@ export const TOOL_PROFILES = {
      * can progress through real application flows without profile-blocked tool gaps.
      */
     'explorer-nav': [
+        'intelligent',       // act, observe, extract
         'navigation',        // navigate, navigate_back, navigate_forward, reload
         'snapshot',          // snapshot, screenshot
         'interaction',       // click, type, hover, drag, select_option, check
@@ -147,6 +150,7 @@ export const TOOL_PROFILES = {
      * to navigate through the application flow and reach deeper pages.
      */
     'explorer-interact': [
+        'intelligent',       // act, observe, extract
         'navigation',        // navigate, navigate_back, reload
         'snapshot',          // snapshot (re-snapshot after interaction)
         'interaction',       // click, type, hover, drag, select_option, check
@@ -172,6 +176,7 @@ export const TOOL_PROFILES = {
      * generated script still resolve to real elements on the page.
      */
     dryrun: [
+        'intelligent',       // observe/extract for selector verification
         'navigation',        // navigate to each page
         'selectors',         // get_by_role, get_by_test_id, etc. (verify selector resolves)
         'element-state',     // is_visible, is_enabled (confirm element is interactable)
@@ -194,7 +199,41 @@ export const TOOL_PROFILES = {
      * Expected token savings: ~85% reduction (30-40K → 4-6K).
      */
     deferred: null,  // Handled by isToolDeferred() in server.js, not category filter
+
+    /**
+     * INTELLIGENT — the lean, primitives-first default surface (~12 tools).
+     * Exposes the high-level self-healing primitives (act / observe / extract),
+     * the autonomous crawler, programmatic execution, and a handful of essentials.
+     * Every other low-level tool remains fully callable and is discoverable via
+     * the unified_tool_search meta-tool. This is the recommended surface for
+     * minimal context bloat. Handled by name-allowlist in server.js, not by
+     * category (so it stays a tight curated set), hence the null here.
+     */
+    intelligent: null,
 };
+
+/**
+ * Curated tool-name allowlist for the `intelligent` profile.
+ * unified_crawl / unified_execute_exploration / unified_tool_search are injected
+ * separately by the server, so they are listed here for documentation only.
+ */
+export const INTELLIGENT_SURFACE = new Set([
+    // High-level primitives (preferred)
+    'unified_act',
+    'unified_observe',
+    'unified_extract',
+    // Autonomous exploration
+    'unified_crawl',
+    'unified_execute_exploration',
+    // Essentials
+    'unified_navigate',
+    'unified_navigate_back',
+    'unified_snapshot',
+    'unified_screenshot',
+    'unified_wait_for',
+    'unified_get_page_url',
+    'unified_browser_close',
+]);
 
 /**
  * Map agent modes to their optimal tool profile.

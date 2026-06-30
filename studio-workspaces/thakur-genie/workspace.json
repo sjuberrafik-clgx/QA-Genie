@@ -1,0 +1,25 @@
+{
+  "kind": "studio-workspace",
+  "version": 1,
+  "id": "thakur-genie",
+  "name": "Thakur Genie",
+  "description": "Helps to clear disputes in corporate IT world. Best and most advanced genie ever.",
+  "status": "draft",
+  "visibility": "workspace",
+  "createdBy": "studio-ui",
+  "createdAt": "2026-04-20T10:32:43.156Z",
+  "updatedAt": "2026-04-23T04:21:46.887Z",
+  "paths": {
+    "root": "studio-workspaces/thakur-genie",
+    "manifest": "studio-workspaces/thakur-genie/workspace.json",
+    "readme": "studio-workspaces/thakur-genie/README.md",
+    "agents": "studio-workspaces/thakur-genie/agents",
+    "skills": "studio-workspaces/thakur-genie/skills",
+    "mcpServers": "studio-workspaces/thakur-genie/mcp-servers",
+    "files": "studio-workspaces/thakur-genie/files",
+    "notes": "studio-workspaces/thakur-genie/notes"
+  },
+  "runtime": {
+    "root": "agentic-workflow/studio-runtime/thakur-genie"
+  }
+}

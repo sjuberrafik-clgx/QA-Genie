@@ -9,16 +9,8 @@ user-invokable: true
 
 **Purpose:** Create linked Testing tasks in Jira with intelligent context extraction from parent tickets, auto-assignment to the requesting user, and optional embedded test case tables for Bug-type parents.
 
-## ⚠️ WORKSPACE ROOT PATH MAPPING
-
-**This agent runs from the WORKSPACE ROOT, NOT from `agentic-workflow/`.** Resolve paths using:
-- `config/workflow-config.json` → `agentic-workflow/config/workflow-config.json`
-- `docs/` → `agentic-workflow/docs/`
-- `.github/agents/lib/` → `.github/agents/lib/` (already at root)
-- `tests/` → `tests/` (already at root)
-
-**ALWAYS prefix `agentic-workflow/` to: config (workflow-config), docs, scripts, utils.**
-
+> **Path mapping:** See [WORKSPACE ROOT PATH MAPPING](../copilot-instructions.md#workspace-root-path-mapping) in `copilot-instructions.md` for the canonical path table (always loaded via `applyTo: '**'`).
+>
 > **Dynamic Configuration:** Environment URLs are loaded from `.env` file (`UAT_URL`, `PROD_URL`). Do NOT hardcode auth tokens in this file.
 
 **Capabilities:**
@@ -61,6 +53,7 @@ When you need to READ existing Jira ticket details:
 - **UPDATE ESTIMATES** using `update_jira_estimates` only when the user explicitly asks to change originalEstimate or remainingEstimate
 - If a request mixes worklog wording and estimate wording, ask for clarification before mutating Jira
 - Labels are opt-in only. Pass `labels` to `create_jira_ticket` only when the user explicitly asks for labels. Otherwise omit the parameter entirely.
+- **🚫 NEVER use external Atlassian MCP write tools** (`addCommentToJiraIssue`, `editJiraIssue`, `createJiraIssue`, `transitionJiraIssue`, `createConfluencePage`, `updateConfluencePage`, or any `mcp_atlassian_atl_*` tool whose name implies a write). They bypass the global Jira approval guardrail. Always use the gated SDK tools listed above (`update_jira_ticket`, `create_jira_ticket`, `transition_jira_ticket`, `edit_jira_comment`, `delete_jira_comment`, etc.).
 
 ---
 

@@ -205,10 +205,18 @@
         "name": "generate_html_report",
         "category": "document",
         "ownerAgents": [
+            "buggenie"
+        ],
+        "description": "Generate a schema-driven HTML report from structured content (BugGenie defect reports)."
+    },
+    {
+        "name": "generate_custom_html",
+        "category": "document",
+        "ownerAgents": [
             "docgenie",
             "buggenie"
         ],
-        "description": "Generate an HTML report from structured content."
+        "description": "Save a complete, agent-authored self-contained HTML document (full markup + CSS + JS). DocGenie's default for HTML."
     },
     {
         "name": "generate_infographic",

@@ -183,6 +183,10 @@ export function usePipeline() {
         if (activeRunId && (sseStatus === 'disconnected' || sseStatus === 'reconnecting')) {
             if (!pollIntervalRef.current) {
                 pollIntervalRef.current = setInterval(async () => {
+                    // Perf: skip the fallback fetch while the tab is hidden
+                    // to avoid request churn for users with the app in a
+                    // background tab. SSE will reconnect on focus.
+                    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
                     try {
                         const status = await apiClient.getRunStatus(activeRunId);
                         if (status?.stages) {

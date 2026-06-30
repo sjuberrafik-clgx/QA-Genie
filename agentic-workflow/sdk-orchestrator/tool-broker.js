@@ -41,7 +41,7 @@ const TOOL_CATEGORIES = {
     document: [
         'generate_pptx', 'generate_docx', 'generate_pdf', 'generate_excel_report',
         'generate_diagram', 'generate_chart_image', 'generate_infographic',
-        'generate_html_report', 'generate_infographic_poster', 'generate_video',
+        'generate_html_report', 'generate_custom_html', 'generate_infographic_poster', 'generate_video',
         'get_design_score', 'generate_markdown',
     ],
     // Test framework
@@ -50,6 +50,7 @@ const TOOL_CATEGORIES = {
         'execute_test', 'get_historical_failures', 'get_exploration_data',
         'save_exploration_data', 'analyze_test_failure', 'get_test_results',
         'get_assertion_config', 'suggest_popup_handler', 'get_snapshot_quality',
+        'run_command',
     ],
     // Grounding & knowledge base
     grounding: [
@@ -100,6 +101,13 @@ const DEFAULT_DELEGATION_PERMISSIONS = {
     docgenie: ['jira', 'document'],
     codereviewer: ['framework', 'grounding'],
     filegenie: [],
+    // Workspace/custom agents created via Studio. Broad capability envelope so
+    // these agents can fulfil dynamic user prompts (e.g. Summarizer asked to
+    // summarise a pasted Jira URL → delegate to fetch_jira_ticket).
+    // The runtime should pass the alias `workspace` as the caller name when
+    // invoking the broker for a custom agent's session.
+    workspace: ['jira', 'evidence', 'document', 'framework', 'grounding', 'pipeline', 'docparse'],
+    custom: ['jira', 'evidence', 'document', 'framework', 'grounding', 'pipeline', 'docparse'],
 };
 
 // ─── Tool Broker ────────────────────────────────────────────────────────────

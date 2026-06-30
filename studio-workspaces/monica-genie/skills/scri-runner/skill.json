@@ -1,0 +1,34 @@
+{
+  "kind": "studio-skill",
+  "version": 1,
+  "id": "scri-runner",
+  "name": "scri-runner",
+  "description": "Run and triage Playwright automation scripts in this repository with clear targeting, evidence capture, and failure reporting.",
+  "workspaceId": "monica-genie",
+  "status": "draft",
+  "keywords": [
+    "run script",
+    "run spec",
+    "execute playwright",
+    "rerun failed test",
+    "validate automation",
+    "test execution",
+    "playwright report",
+    "test-results",
+    "test-artifacts",
+    "run generated script",
+    "spec triage",
+    "automation debugging"
+  ],
+  "allowedTools": [],
+  "agentBindings": [
+    "monica-genie",
+    "scri-runner"
+  ],
+  "alwaysActiveForBoundAgents": false,
+  "entry": {
+    "instruction": "SKILL.md"
+  },
+  "createdAt": "2026-04-27T17:33:10.940Z",
+  "updatedAt": "2026-04-27T17:33:10.940Z"
+}

@@ -114,7 +114,7 @@ async function checkUrlReachable(url, timeout = 15000) {
             path: urlObj.pathname,
             method: 'HEAD',
             timeout: timeout,
-            rejectUnauthorized: false
+            // CWE-295 fix: enforce TLS certificate verification
         };
 
         const req = https.request(options, (res) => {

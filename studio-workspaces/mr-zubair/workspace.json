@@ -1,0 +1,25 @@
+{
+  "kind": "studio-workspace",
+  "version": 1,
+  "id": "mr-zubair",
+  "name": "Mr Zubair",
+  "description": "",
+  "status": "draft",
+  "visibility": "workspace",
+  "createdBy": "studio-ui",
+  "createdAt": "2026-05-20T16:52:54.394Z",
+  "updatedAt": "2026-06-26T15:31:03.896Z",
+  "paths": {
+    "root": "studio-workspaces/mr-zubair",
+    "manifest": "studio-workspaces/mr-zubair/workspace.json",
+    "readme": "studio-workspaces/mr-zubair/README.md",
+    "agents": "studio-workspaces/mr-zubair/agents",
+    "skills": "studio-workspaces/mr-zubair/skills",
+    "mcpServers": "studio-workspaces/mr-zubair/mcp-servers",
+    "files": "studio-workspaces/mr-zubair/files",
+    "notes": "studio-workspaces/mr-zubair/notes"
+  },
+  "runtime": {
+    "root": "agentic-workflow/studio-runtime/mr-zubair"
+  }
+}

@@ -3,6 +3,7 @@
  */
 
 const { spawn } = require('child_process');
+const path = require('path');
 
 function quoteArg(value) {
     const input = String(value ?? '');
@@ -12,6 +13,26 @@ function quoteArg(value) {
         : input;
 }
 
+// CWE-78 mitigation: when we spawn with `shell: true`, the command string is
+// re-parsed by cmd.exe, so any metacharacter (& | ; && || > < ^) becomes a
+// chaining/redirection operator. We restrict shell:true to a known-safe set of
+// Node.js launchers and reject any command path that smells like injection.
+const WINDOWS_SHELL_LAUNCHER_ALLOWLIST = new Set([
+    'npx.cmd',
+    'npm.cmd',
+    'node.cmd',
+    'yarn.cmd',
+    'pnpm.cmd',
+    'pnpx.cmd',
+    'npx.bat',
+    'npm.bat',
+    'node.bat',
+    'yarn.bat',
+    'pnpm.bat',
+]);
+
+const WINDOWS_SHELL_METACHAR_RE = /[&|;<>^()!"`]|&&|\|\|/;
+
 // Windows + Node.js >= 20 requires `shell: true` (or explicit .exe path) to spawn
 // batch-style launchers (.cmd / .bat). Without it, spawn rejects with EINVAL
 // because of the CVE-2024-27980 mitigation. This helper detects the case so
@@ -19,7 +40,20 @@ function quoteArg(value) {
 function needsShellOnWindows(command) {
     if (process.platform !== 'win32') return false;
     if (typeof command !== 'string' || !command) return false;
-    return /\.(cmd|bat)$/i.test(command);
+    if (!/\.(cmd|bat)$/i.test(command)) return false;
+    const basename = path.basename(command).toLowerCase();
+    return WINDOWS_SHELL_LAUNCHER_ALLOWLIST.has(basename);
+}
+
+// Used to reject a .cmd/.bat command that is not on the allowlist OR contains
+// shell metacharacters in its path before we ever call spawn().
+function isUnsafeWindowsShellCommand(command) {
+    if (process.platform !== 'win32') return false;
+    if (typeof command !== 'string' || !command) return false;
+    if (!/\.(cmd|bat)$/i.test(command)) return false;
+    if (WINDOWS_SHELL_METACHAR_RE.test(command)) return true;
+    const basename = path.basename(command).toLowerCase();
+    return !WINDOWS_SHELL_LAUNCHER_ALLOWLIST.has(basename);
 }
 
 // When running under shell:true on Windows, arguments are re-joined into a
@@ -136,6 +170,20 @@ function runCommand(options = {}) {
             command,
             args,
         }));
+    }
+
+    // CWE-78 fix: refuse to spawn a Windows .cmd/.bat launcher that isn't on
+    // the shell-launcher allowlist (or whose path contains shell metacharacters).
+    // Without this guard, `shell: true` would let metacharacters chain commands.
+    if (isUnsafeWindowsShellCommand(command)) {
+        return Promise.reject(createCommandError(
+            `Refusing to spawn untrusted Windows shell launcher: ${command}`,
+            {
+                code: 'UNSAFE_SHELL_COMMAND',
+                command,
+                args,
+            }
+        ));
     }
 
     return new Promise((resolve, reject) => {

@@ -8,6 +8,16 @@
 			],
 			"env": {}
 		},
+		"glass": {
+			"type": "stdio",
+			"command": "node",
+			"args": [
+				"${workspaceFolder}/../glass-mcp/src/server.js"
+			],
+			"env": {
+				"GLASS_HEADLESS": "true"
+			}
+		},
 		"atlassian/atlassian-mcp-server": {
 			"type": "http",
 			"url": "https://mcp.atlassian.com/v1/sse",

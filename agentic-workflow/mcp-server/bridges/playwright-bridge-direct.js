@@ -1647,6 +1647,9 @@ export class PlaywrightDirectBridge extends EventEmitter {
                 : { applied: false, total: preFilterCount },
         };
         if (visionResult) payload._vision = { provider: visionResult.provider, fused: visionResult.fusedCount, ambiguous: visionResult.ambiguousCount };
+        // Affordance overview (CBR): up-front "what is clickable" analysis over the whole page.
+        const affordances = this._summarizeAffordances(fullElements);
+        if (affordances) payload.affordances = affordances;
         if (verbose || includeAria) payload.ariaTree = ariaTree;
         if (verbose) payload.verbose = true;
 
@@ -1720,11 +1723,44 @@ export class PlaywrightDirectBridge extends EventEmitter {
             if (el.inputType) out.inputType = el.inputType;
             if (el.isInteractive) out.interactive = true;
             if (el.visible === false) out.visible = false;
+            // Affordance / interactability (CBR): WHAT kind of control this is (button, link,
+            // card, map, input, cta…) and — for clickable things — whether it is on screen now.
+            // This is the "what is clickable and what is not" signal that lets the agent target
+            // the actionable copy instead of blindly text-clicking a hidden responsive duplicate.
+            if (el.affordance && el.affordance !== 'text') out.affordance = el.affordance;
+            if (el.isInteractive && el.inViewport === false) out.inViewport = false;
             // Vision-fused name (P5): transparent provenance — the caller sees the name came
             // from visual perception, not the DOM (QA-integrity).
             if (el.fusedName) { out.visualSource = el.visualSource; out.visualConfidence = el.visualConfidence; }
             return out;
         });
+    }
+
+    /**
+     * Build a page-level affordance overview — an up-front "what is clickable and what is not"
+     * analysis the agent can read before attempting any action. Counts each interaction kind
+     * (button / link / card / map / input / tab / cta…) and, crucially, how many clickable
+     * controls are actually in the viewport right now (i.e. immediately actionable) versus
+     * off-screen. Derived entirely from data already on each fingerprint — no extra round-trip.
+     *
+     * @param {Array} elements - full (pre-filter) enriched element set
+     * @returns {Object|null} { byKind, clickable, clickableInViewport } or null when nothing interactive
+     */
+    _summarizeAffordances(elements) {
+        const byKind = {};
+        let clickable = 0;
+        let clickableInViewport = 0;
+        for (const el of elements) {
+            const kind = el.affordance || 'text';
+            if (kind === 'text') continue;
+            byKind[kind] = (byKind[kind] || 0) + 1;
+            if (el.isInteractive) {
+                clickable++;
+                if (el.inViewport !== false && el.visible !== false) clickableInViewport++;
+            }
+        }
+        if (Object.keys(byKind).length === 0) return null;
+        return { byKind, clickable, clickableInViewport };
     }
 
     /**
@@ -1841,6 +1877,7 @@ export class PlaywrightDirectBridge extends EventEmitter {
             doubleClick = false,
             modifiers = [],
             force = false,
+            timeout,
         } = args;
 
         let selector;
@@ -1876,6 +1913,11 @@ export class PlaywrightDirectBridge extends EventEmitter {
             modifiers,
             clickCount: doubleClick ? 2 : 1,
         };
+        // A bounded timeout lets a wrong pick (e.g. a hidden responsive duplicate that never
+        // becomes actionable) fail fast with a clear reason instead of hanging to the tool
+        // ceiling. force already bypasses the custom guard above; Playwright's own native
+        // actionability (auto-scroll + trusted event) is intentionally preserved.
+        if (Number.isFinite(timeout)) clickOptions.timeout = timeout;
 
         await this.page.click(selector, clickOptions);
         const postActionBlocker = await this._capturePostActionBlocker('click', selector);

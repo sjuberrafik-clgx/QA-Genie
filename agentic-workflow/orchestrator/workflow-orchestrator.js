@@ -17,7 +17,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync, spawn } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const readline = require('readline');
 const { getProjectPaths } = require('../utils/project-path-resolver');
 
@@ -477,12 +477,13 @@ async function executeTestScript(specPath, iteration = 1) {
         console.log('─'.repeat(80));
 
         // Run with inherit stdio to show real-time output
-        execSync(
-            `npx playwright test "${normalizedPath}" --workers=1 --reporter=line`,
+        execFileSync(
+            'npx', ['playwright', 'test', normalizedPath, '--workers=1', '--reporter=line'],
             {
                 encoding: 'utf-8',
                 stdio: 'inherit',
                 timeout: 90000,    // 90 second timeout
+                shell: false,
                 env: {
                     ...process.env,
                     PWDEBUG: '0',
@@ -564,7 +565,9 @@ function cleanupTemporaryFiles(ticketId) {
     try {
         const rootFiles = fs.readdirSync('.');
         globPatterns.forEach(pattern => {
-            const regex = new RegExp(pattern.replace('*', '.*'), 'i');
+            // CWE-1333 fix: escape regex metacharacters, then convert glob * to .*
+            const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(escaped.replace(/\*/g, '.*'), 'i');
             rootFiles.filter(f => regex.test(f)).forEach(f => {
                 if (!filesToClean.includes(f)) {
                     filesToClean.push(f);
@@ -718,7 +721,7 @@ async function executeWorkflow() {
                         path: urlObj.pathname,
                         method: 'HEAD',
                         timeout: 10000,
-                        rejectUnauthorized: false
+                        // CWE-295 fix: enforce TLS certificate verification
                     }, (res) => {
                         resolve(res.statusCode < 500);
                     });

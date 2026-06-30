@@ -176,8 +176,10 @@ module.exports = LoginFunctions;
             content: `/**
  * General Utilities — Starter Stub
  */
+const { getDateAndTimeISTiso } = require('../../agentic-workflow/utils/date-time');
+
 function getDateAndTimeIST() {
-    return new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+    return getDateAndTimeISTiso();
 }
 
 module.exports = { getDateAndTimeIST };

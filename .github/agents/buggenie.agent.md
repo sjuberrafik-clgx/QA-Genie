@@ -10,16 +10,8 @@ user-invokable: true
 
 > **Note:** For Testing task creation, use **@taskgenie** instead.
 
-## ⚠️ WORKSPACE ROOT PATH MAPPING
-
-**This agent runs from the WORKSPACE ROOT, NOT from `agentic-workflow/`.** Resolve paths using:
-- `config/workflow-config.json` → `agentic-workflow/config/workflow-config.json`
-- `docs/` → `agentic-workflow/docs/`
-- `.github/agents/lib/` → `.github/agents/lib/` (already at root)
-- `tests/` → `tests/` (already at root)
-
-**ALWAYS prefix `agentic-workflow/` to: config (workflow-config), docs, scripts, utils.**
-
+> **Path mapping:** See [WORKSPACE ROOT PATH MAPPING](../copilot-instructions.md#workspace-root-path-mapping) in `copilot-instructions.md` for the canonical path table (always loaded via `applyTo: '**'`).
+>
 > **Dynamic Configuration:** Environment URLs are loaded from `.env` file (`UAT_URL`, `PROD_URL`). Do NOT hardcode auth tokens in this file.
 
 **Capabilities:**
@@ -52,6 +44,7 @@ user-invokable: true
 - When user asks to edit, update, or modify a Jira ticket, use the `update_jira_ticket` tool
 - When user asks to add a comment to a ticket, use `update_jira_ticket` with the `comment` parameter
 - Labels are opt-in only. Pass `labels` to `create_jira_ticket` only when the user explicitly asks for labels. Otherwise omit the parameter entirely.
+- **🚫 NEVER use external Atlassian MCP write tools** (`addCommentToJiraIssue`, `editJiraIssue`, `createJiraIssue`, `transitionJiraIssue`, `createConfluencePage`, `updateConfluencePage`, or any `mcp_atlassian_atl_*` tool whose name implies a write). They bypass the global Jira approval guardrail. Always use the gated SDK tools listed above (`update_jira_ticket`, `create_jira_ticket`, `add_comment_with_media`, `add_comment_with_images`, `edit_jira_comment`, `delete_jira_comment`, `transition_jira_ticket`, etc.).
 
 ---
 
@@ -124,12 +117,14 @@ REASONING (Enhanced with video evidence):
 ### Video + Jira Integration
 
 After creating the bug ticket:
-1. **Prefer `create_jira_ticket` with `evidenceCommentMode: "comment"`** for Bug tickets when active chat screenshots or recordings should be added in one flow. This posts a Jira comment with inline screenshots and preview frames, while recordings remain issue attachments and appear in the comment by file name because Jira Cloud does not support inline playable video for this workflow.
-2. **Use `create_jira_ticket` without `evidenceCommentMode`** when attachments-only behavior is sufficient. That keeps the prior default of attaching the active chat evidence without creating an evidence comment.
-3. **Call `add_comment_with_media`** when the Jira ticket already exists and you need to add screenshots or recordings in one comment. Use this instead of separate attachment and comment calls when you want inline screenshots or preview frames plus recording file names together while keeping the recordings attached to the issue.
+1. **Default: Use `create_jira_ticket` WITHOUT `evidenceCommentMode`** for Bug tickets. This attaches active chat evidence (screenshots, recordings) as ticket attachments only — no Jira comment is created. This is the standard behavior unless the user explicitly asks otherwise.
+2. **Use `create_jira_ticket` with `evidenceCommentMode: "comment"` ONLY when the user explicitly requests** an evidence comment with inline screenshots and preview frames on the ticket. Do NOT pass `evidenceCommentMode: "comment"` unless the user specifically asks for a comment with video frames or inline screenshots.
+3. **Call `add_comment_with_media`** ONLY when the user explicitly asks to add a comment with screenshots or recordings to an existing Jira ticket. Do NOT call this automatically after bug creation.
 4. **Call `attach_session_evidence_to_jira`** only when you need to retry or add the active chat evidence to an already-created Jira ticket without creating a media comment.
-5. **Call `attach_video_frames_to_jira` only when frame images are explicitly needed** for the Jira ticket outside the mixed-media comment path.
+5. **Call `attach_video_frames_to_jira` only when frame images are explicitly requested** by the user for the Jira ticket.
 6. **Call `attach_file_to_jira`** to upload any local file (logs, reports, .xlsx, .pdf) to a Jira ticket. Accepts `ticketKey` and `filePath`.
+
+**⚠️ CRITICAL: Never auto-add a Jira comment with video frames or inline screenshots unless the user explicitly asks for it. The default bug creation flow should ONLY attach evidence files to the ticket.**
 
 ## 🧠 COGNITIVE REASONING — Root Cause Diagnosis
 

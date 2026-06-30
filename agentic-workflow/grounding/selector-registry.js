@@ -140,7 +140,63 @@ class SelectorRegistry {
             }
         }
 
+        // ── Ingest autonomous crawl site models (*-crawl-*.json) ──────────────
+        // The crawler persists ranked, uniqueness-validated selectors per page.
+        const crawlFiles = fs.readdirSync(explorationDir)
+            .filter(f => f.includes('-crawl-') && f.endsWith('.json'));
+
+        for (const file of crawlFiles) {
+            try {
+                const data = JSON.parse(fs.readFileSync(path.join(explorationDir, file), 'utf-8'));
+                if (data.source !== 'mcp-live-crawl') continue;
+
+                const pageName = data.startUrl || file.replace(/\.json$/, '');
+                for (const pg of (data.pages || [])) {
+                    const pageUrl = pg.url || '';
+                    for (const ks of (pg.keySelectors || [])) {
+                        if (!ks.selector && !ks.name) continue;
+                        const type = this._inferTypeFromSelectorString(ks.selector);
+                        const baseReliability = this.reliabilityScores[type] || 0.5;
+                        this._addEntry({
+                            elementName: ks.name || ks.role || 'unknown',
+                            selectorType: type,
+                            selectorValue: ks.selector || null,
+                            page: pageUrl,
+                            pageName,
+                            source: 'mcp-live-crawl',
+                            reliability: ks.ambiguous ? Math.min(baseReliability, 0.6) : baseReliability,
+                            lastVerified: data.generatedAt || null,
+                            metadata: { role: ks.role || null, ambiguous: !!ks.ambiguous },
+                        });
+                        count++;
+                    }
+                }
+            } catch {
+                // Skip malformed files
+            }
+        }
+
         return count;
+    }
+
+    /**
+     * Infer a selector type from a Playwright locator string (used for crawl
+     * site-model selectors, which arrive as ready-made locator expressions).
+     * @param {string} sel
+     * @returns {string} selector type key (matches reliabilityScores)
+     */
+    _inferTypeFromSelectorString(sel) {
+        if (!sel || typeof sel !== 'string') return 'locator';
+        if (/getByTestId|data-testid|data-test-id|data-qa/.test(sel)) return 'data-qa';
+        if (/getByRole/.test(sel)) return 'getByRole';
+        if (/getByLabel/.test(sel)) return 'getByLabel';
+        if (/getByPlaceholder/.test(sel)) return 'getByPlaceholder';
+        if (/aria-label/.test(sel)) return 'aria-label';
+        if (/getByAltText/.test(sel)) return 'getByAltText';
+        if (/getByText/.test(sel)) return 'getByText';
+        if (/locator\(['"]#/.test(sel)) return 'css-id';
+        if (/locator\(['"]\./.test(sel)) return 'css-class';
+        return 'locator';
     }
 
     /**

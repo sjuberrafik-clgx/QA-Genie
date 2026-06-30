@@ -1,5 +1,8 @@
 import './globals.css';
-import '@xterm/xterm/css/xterm.css';
+// Perf: xterm CSS used to be imported here, shipping ~10kB of CSS to every
+// route even though only /dashboard uses the terminal. It now lives inside
+// TerminalXtermPane (which is itself dynamic-imported), so other routes pay
+// nothing for it.
 import { Suspense } from 'react';
 import { Plus_Jakarta_Sans, Space_Grotesk } from 'next/font/google';
 import Sidebar from '@/components/Sidebar';
@@ -51,7 +54,9 @@ export default function RootLayout({ children }) {
                         </Suspense>
                         <ErrorBoundary>
                             <AppShell>
-                                {children}
+                                <Suspense fallback={null}>
+                                    {children}
+                                </Suspense>
                             </AppShell>
                         </ErrorBoundary>
                     </div>

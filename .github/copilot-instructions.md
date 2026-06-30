@@ -347,12 +347,14 @@ Also available through POmanager:
 **MCP Server:** `unified-automation-mcp` (custom server at `agentic-workflow/mcp-server/server.js`)
 **VS Code tool prefix:** `mcp_unified-autom_unified_*` (VS Code auto-prepends `mcp_unified-autom_` to all tool names)
 
+**Glass MCP (opt-in migration target):** A lean standalone **8-verb** browser server lives at `glass-mcp/` (registered as `glass` in `.vscode/mcp.json`; the web-app enables it per session via `GLASS_MCP_ENABLED=true`, which skips the unified server for that session). When `mcp_glass_*` tools are present, prefer them and follow **GLASS MODE** in the `@scriptgenerator` prompt. Verb map: `open` (navigate/tabs) · `see` (ranked affordance menu + durable handles — replaces snapshot + `get_by_*`) · `do` (act → effect receipt) · `read` (content for assertions) · `wait` (bounded conditions) · `net` (record/mock/waitForResponse) · `devtool` (universal CDP passthrough) · `script` (audited in-page JS). Same discipline applies: explore live FIRST, never guess selectors, save exploration data with `"source": "glass-see"`, and STOP if the browser MCP is unavailable.
+
 #### Core Rules
-1. ScriptGenerator's **FIRST** tool call MUST be `mcp_unified-autom_unified_navigate` — no file reads, no code searches before MCP exploration.
-2. Before creating ANY `.spec.js`, you MUST navigate to every page under test and call `mcp_unified-autom_unified_snapshot` on each.
-3. Extract REAL selectors from snapshot output (`ref`, `id`, `ariaLabel`, `dataTestId`, `text`). **NEVER guess selectors.**
-4. Save exploration data to `agentic-workflow/exploration-data/{ticketId}-exploration.json` with `"source": "mcp-live-snapshot"`.
-5. If MCP is unavailable: **STOP and report** — do NOT fall back to `fetch_webpage` or guessed selectors.
+1. ScriptGenerator's **FIRST** tool call MUST be a live browser navigation — **`mcp_glass_open`** (Glass, primary) or `mcp_unified-autom_unified_navigate` (legacy fallback). No file reads or code searches before exploration.
+2. Before creating ANY `.spec.js`, perceive every page under test — **`mcp_glass_see`** (Glass) or `mcp_unified-autom_unified_snapshot` (legacy) — on each.
+3. Extract REAL selectors from the perception output (Glass durable handles, or `ref`/`id`/`ariaLabel`/`dataTestId`/`text`). **NEVER guess selectors.**
+4. Save exploration data to `agentic-workflow/exploration-data/{ticketId}-exploration.json` with `"source": "glass-see"` (Glass) or `"mcp-live-snapshot"` (legacy).
+5. If the browser MCP is unavailable: **STOP and report** — do NOT fall back to `fetch_webpage` or guessed selectors.
 
 #### Minimum Exploration Depth (ENFORCED)
 Before generating a `.spec.js`, you MUST have called:
@@ -378,21 +380,7 @@ Before generating a `.spec.js`, you MUST have called:
 * For Agent Portal: "Agent Portal - [Test Case Name]"
 * Instead of "Login as ONMLS user", use "Login into ONMLS". Same for "Login as non-ONMLS user" — use "Login into other MLS".
 
-## Terminology
-| Abbreviation | Full Name |
-|---|---|
-| MLS | Multiple Listing Service |
-| LM | Lead Management |
-| PA | Partial Access |
-| SAP | Standalone Agent Page |
-| ECFM | Enhanced Consumer Funnel Management |
-| TOS | Terms of Service |
-| CFM | Consumer Funnel Management |
-| EMC | Estimated Monthly Cost |
-| SND - SRCH | Syndication Search |
-| SND | Syndication |
-| OHO | OneHomeOwner |
-| DD | Data Distribution |
+
 
 ## Test Environment Links
 
@@ -403,26 +391,24 @@ Environment URLs are configured in `agentic-workflow/.env`. Read values from the
 
 Token-based URLs are constructed using `userTokens` from `tests/test-data/testData.js` — always use the exported tokens instead of hardcoding.
 
-## Features Reference
-* **Reimagine Space (CTA)** — gives virtual experience of space, powered by RoomVo. This feature works with property images shown in property details page.
-* **Ads Services Widget** — shows in Property details page, between Other Facts & Features and Schools section.
-
-## MLS Names Reference (Partial List - Key MLSes)
-* Canopy MLS (Charlotte)
-* ONMLS/ITSO MLS (ON, Canada)
-* Stellar MLS (DD) (FL)
-* Bright (DC, MD, VA, PA, WV, DE)
-* California Regional (CA)
-* SmartMLS (CT)
-* North Star MLS (MN)
-* Recolorado (DD) (CO)
-* First MLS (Atlanta) (DD) (GA)
-* Houston, TX (TX)
-* Las Vegas (NV)
-* South East Florida (Miami) (FL)
-* Toronto Regional Real Estate Board (ON, Canada) osn:TRREB
+-
 
 ## Jira Interaction Policy
+
+### 🚨 Mandatory: Use Gated SDK Tools for ALL Jira Writes
+Every Jira write (create/update/delete ticket, add/edit/delete comment, transition, attach file, log work, link issues, Confluence create/update) MUST use the gated SDK custom tools listed below. They route through the global approval guardrail (`requireJiraMutationApproval`) which prompts the user before any write hits Jira.
+
+**❌ NEVER use the external Atlassian remote MCP write tools.** They bypass the approval prompt and are programmatically blocked from chat sessions, but agents must also avoid them by name to prevent regressions if the allowlist is widened in future:
+- `mcp_atlassian_atl_addCommentToJiraIssue` — use `update_jira_ticket` (with `comment` param), `add_comment_with_media`, or `add_comment_with_images` instead.
+- `mcp_atlassian_atl_editJiraIssue` — use `update_jira_ticket` instead.
+- `mcp_atlassian_atl_createJiraIssue` — use `create_jira_ticket` instead.
+- `mcp_atlassian_atl_transitionJiraIssue` — use `transition_jira_ticket` instead.
+- `mcp_atlassian_atl_createConfluencePage` / `mcp_atlassian_atl_updateConfluencePage` — use `create_confluence_page` / `update_confluence_page` instead.
+- Any other `mcp_atlassian_atl_*` tool whose name implies a write (`add*`, `create*`, `edit*`, `update*`, `delete*`, `transition*`).
+
+The Atlassian MCP server is restricted to read-only tools (get/search/fetch). Read-only operations like `mcp_atlassian_atl_getJiraIssue`, `mcp_atlassian_atl_searchJiraIssuesUsingJql`, and `mcp_atlassian_atl_getConfluencePage` remain allowed for context retrieval.
+
+### Allowed SDK Operations
 * Agents may READ from Jira tickets (fetch ticket details)
 * Agents may CREATE new Jira tickets (bugs, testing tasks)
 * Agents may pass `labels` when creating Jira tickets only if the user explicitly asks for labels; otherwise new tickets must omit labels by default
