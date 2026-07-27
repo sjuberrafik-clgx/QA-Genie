@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { PaperclipIcon } from '@/components/Icons';
+import { PaperclipIcon, MicrophoneIcon } from '@/components/Icons';
+import { useSpeechToText } from '@/hooks/useSpeechToText';
 import ImagePreview from '@/components/ImagePreview';
 import FilePreview from '@/components/FilePreview';
 import { LIMITS, ALLOWED_IMAGE_TYPES, ALLOWED_DOC_TYPES, DOC_EXT_TO_MIME, ALLOWED_VIDEO_TYPES, ALLOWED_VIDEO_EXTENSIONS, VIDEO_EXT_TO_MIME, FILE_ACCEPT_STRING } from '@/lib/constants';
@@ -13,6 +14,25 @@ const MAX_DOCS = LIMITS.MAX_DOCS_PER_MESSAGE;
 const MAX_DOC_SIZE = LIMITS.MAX_DOC_SIZE_BYTES;
 const MAX_VIDEOS = LIMITS.MAX_VIDEOS_PER_MESSAGE;
 const MAX_VIDEO_SIZE = LIMITS.MAX_VIDEO_SIZE_BYTES;
+
+// Splice `next` onto `prev` with a single separating space when needed. Used to
+// append dictated speech to whatever is already in the textarea.
+function appendText(prev, next) {
+    if (!next) return prev;
+    if (!prev) return next;
+    return /\s$/.test(prev) ? prev + next : prev + ' ' + next;
+}
+
+// Recognition locales offered in the voice-input language picker. Matching the
+// speaker's accent is the single biggest driver of Web Speech API accuracy.
+const VOICE_LANGUAGES = [
+    { code: 'en-IN', label: 'English (India)' },
+    { code: 'en-US', label: 'English (US)' },
+    { code: 'en-GB', label: 'English (UK)' },
+    { code: 'en-AU', label: 'English (Australia)' },
+    { code: 'en-CA', label: 'English (Canada)' },
+    { code: 'hi-IN', label: 'हिन्दी (Hindi)' },
+];
 
 export default function ChatInput({ onSend, onAbort, isProcessing, disabled, placeholder: customPlaceholder, prefillText, history = [], supportsImages = true }) {
     const [input, setInput] = useState('');
@@ -29,6 +49,128 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
     // in-progress text so Down can return the user to what they were typing.
     const [historyIndex, setHistoryIndex] = useState(null);
     const draftRef = useRef('');
+
+    // ── Voice-to-text (Web Speech API) ──
+    // `dictationBaseRef` snapshots the textarea content when dictation starts;
+    // `dictationFinalsRef` accumulates finalized speech. Interim (still-being-
+    // spoken) words are folded in live for preview but only persisted once the
+    // recognizer marks them final.
+    const [voiceError, setVoiceError] = useState(null);
+    const [voiceLang, setVoiceLang] = useState('en-IN'); // BCP-47 recognition locale
+    const dictationBaseRef = useRef('');
+    const dictationFinalsRef = useRef('');
+    // The recognizer streams partial results many times per second. Committing
+    // every partial straight to React state re-renders the input (and runs the
+    // auto-resize reflow) on each word — that is what makes dictated text stutter
+    // onto the field. Instead we stash the latest composed value in a ref and
+    // flush it to state at most once per animation frame.
+    const dictationRafRef = useRef(0);
+    const dictationPendingRef = useRef(null);
+
+    // rAF callback: push the most recent composed transcript into state.
+    const flushDictation = useCallback(() => {
+        dictationRafRef.current = 0;
+        const next = dictationPendingRef.current;
+        if (next == null) return;
+        dictationPendingRef.current = null;
+        setInput(next);
+        setHistoryIndex(null);
+    }, []);
+
+    // Apply any queued transcript immediately and return it (used when dictation
+    // stops or the message is sent, so the last spoken words are never lost to a
+    // still-pending frame callback).
+    const flushDictationNow = useCallback(() => {
+        if (dictationRafRef.current) {
+            cancelAnimationFrame(dictationRafRef.current);
+            dictationRafRef.current = 0;
+        }
+        const next = dictationPendingRef.current;
+        if (next == null) return null;
+        dictationPendingRef.current = null;
+        setInput(next);
+        setHistoryIndex(null);
+        return next;
+    }, []);
+
+    // Drop any queued transcript without applying it (used when the user starts
+    // typing, so a late frame can't clobber what they just wrote).
+    const cancelDictationFlush = useCallback(() => {
+        if (dictationRafRef.current) {
+            cancelAnimationFrame(dictationRafRef.current);
+            dictationRafRef.current = 0;
+        }
+        dictationPendingRef.current = null;
+    }, []);
+
+    const handleTranscript = useCallback(({ final, interim }) => {
+        if (final) {
+            dictationFinalsRef.current = appendText(dictationFinalsRef.current, final);
+        }
+        const composed = [dictationBaseRef.current, dictationFinalsRef.current, interim]
+            .reduce((acc, part) => (part ? appendText(acc, part) : acc), '');
+        dictationPendingRef.current = composed;
+        // Coalesce bursts of partial results into a single state update per frame.
+        if (!dictationRafRef.current) {
+            dictationRafRef.current = requestAnimationFrame(flushDictation);
+        }
+    }, [flushDictation]);
+
+    // Cancel any in-flight frame if the component unmounts mid-dictation.
+    useEffect(() => () => {
+        if (dictationRafRef.current) cancelAnimationFrame(dictationRafRef.current);
+    }, []);
+
+    const {
+        isSupported: voiceSupported,
+        isListening,
+        error: recognitionError,
+        start: startRecognition,
+        stop: stopRecognition,
+    } = useSpeechToText({ onTranscript: handleTranscript, lang: voiceLang });
+
+    // Mirror recognition errors into the inline toast (auto-clears after 5s).
+    useEffect(() => {
+        if (recognitionError) setVoiceError(recognitionError.message);
+    }, [recognitionError]);
+    useEffect(() => {
+        if (!voiceError) return;
+        const t = setTimeout(() => setVoiceError(null), 5000);
+        return () => clearTimeout(t);
+    }, [voiceError]);
+
+    // Restore the saved recognition language (client-only to stay SSR-safe).
+    useEffect(() => {
+        try {
+            const saved = localStorage.getItem('voiceLang');
+            if (saved) setVoiceLang(saved);
+        } catch { /* localStorage unavailable */ }
+    }, []);
+
+    const handleVoiceLangChange = (e) => {
+        const next = e.target.value;
+        setVoiceLang(next);
+        try { localStorage.setItem('voiceLang', next); } catch { /* ignore */ }
+        // Apply the new language on the next start.
+        if (isListening) {
+            stopRecognition();
+            flushDictationNow();
+        }
+    };
+
+    const toggleDictation = useCallback(() => {
+        if (isListening) {
+            stopRecognition();
+            flushDictationNow(); // keep the last spoken words when stopping
+            return;
+        }
+        // Capture current text so recognized speech appends to it, then listen.
+        dictationBaseRef.current = input;
+        dictationFinalsRef.current = '';
+        dictationPendingRef.current = null;
+        setVoiceError(null);
+        startRecognition();
+    }, [isListening, input, startRecognition, stopRecognition, flushDictationNow]);
 
     // Accept external prefill text — populate input and focus the textarea
     useEffect(() => {
@@ -48,10 +190,17 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
 
     useEffect(() => {
         const ta = textareaRef.current;
-        if (ta) {
+        if (!ta) return;
+        // Defer the height recalculation to just before paint and cancel any
+        // superseded frame. Doing the `height:auto` -> read `scrollHeight` dance
+        // synchronously on every keystroke/partial dictation result forces a
+        // layout on each change; batching it per frame keeps typing and voice
+        // input smooth.
+        const id = requestAnimationFrame(() => {
             ta.style.height = 'auto';
             ta.style.height = Math.min(ta.scrollHeight, 150) + 'px';
-        }
+        });
+        return () => cancelAnimationFrame(id);
     }, [input]);
 
     // Clear image error after 4s
@@ -341,9 +490,14 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        const hasContent = input.trim() || attachments.length > 0 || docAttachments.length > 0 || videoAttachments.length > 0;
+        if (isListening) stopRecognition();
+        // Prefer any transcript that hasn't been flushed to state yet so the last
+        // dictated words are included even if the frame callback hasn't run.
+        const dictated = flushDictationNow();
+        const text = dictated != null ? dictated : input;
+        const hasContent = text.trim() || attachments.length > 0 || docAttachments.length > 0 || videoAttachments.length > 0;
         if (!hasContent || disabled || isProcessing) return;
-        onSend(input.trim(), attachments, docAttachments, videoAttachments);
+        onSend(text.trim(), attachments, docAttachments, videoAttachments);
         setInput('');
         setAttachments([]);
         setDocAttachments([]);
@@ -351,6 +505,8 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
         setImageError(null);
         setHistoryIndex(null);
         draftRef.current = '';
+        dictationBaseRef.current = '';
+        dictationFinalsRef.current = '';
     };
 
     // Place the caret at the end of the textarea after a programmatic value
@@ -366,6 +522,10 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
 
     // Typing exits history-browsing so the next Up arrow starts a fresh walk.
     const handleChange = (e) => {
+        // Manual typing takes over from dictation so the recognizer's next result
+        // doesn't overwrite the user's edits.
+        if (isListening) stopRecognition();
+        cancelDictationFlush(); // drop any queued transcript so it can't clobber typing
         setInput(e.target.value);
         if (historyIndex !== null) setHistoryIndex(null);
     };
@@ -486,6 +646,15 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
                             </div>
                         )}
 
+                        {/* Voice input error toast */}
+                        {voiceError && (
+                            <div className="px-3 py-1.5">
+                                <div className="text-[11px] text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-1.5">
+                                    {voiceError}
+                                </div>
+                            </div>
+                        )}
+
                         <div className="flex items-end">
                             <textarea
                                 ref={textareaRef}
@@ -499,6 +668,40 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
                                 className="flex-1 resize-none bg-transparent px-4 py-3 text-sm text-surface-800 placeholder:text-surface-400 focus:outline-none disabled:opacity-50"
                             />
                             <div className="flex items-center gap-1.5 flex-shrink-0 p-1.5">
+                                {/* Voice input (dictation) button */}
+                                {!isProcessing && voiceSupported && (
+                                    <button
+                                        type="button"
+                                        onClick={toggleDictation}
+                                        disabled={disabled}
+                                        aria-pressed={isListening}
+                                        aria-label={isListening ? 'Stop voice input' : 'Start voice input'}
+                                        className={`relative w-9 h-9 flex items-center justify-center rounded-xl border shadow-sm transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/40 focus-visible:ring-offset-1 ${disabled
+                                            ? 'border-surface-200 bg-surface-50 text-surface-300 cursor-not-allowed shadow-none'
+                                            : isListening
+                                                ? 'border-red-500 bg-red-500 text-white shadow-red-500/30 mic-listening'
+                                                : 'border-cyan-200 bg-cyan-50 text-cyan-700 shadow-cyan-700/10 hover:-translate-y-0.5 hover:border-cyan-400 hover:bg-cyan-100 hover:text-cyan-800 hover:shadow-md hover:shadow-cyan-700/15 active:translate-y-0'
+                                            }`}
+                                        title={isListening ? 'Stop voice input' : 'Speak your message'}
+                                    >
+                                        <MicrophoneIcon className="w-[18px] h-[18px]" strokeWidth={2.25} />
+                                    </button>
+                                )}
+                                {/* Voice language picker */}
+                                {!isProcessing && voiceSupported && (
+                                    <select
+                                        value={voiceLang}
+                                        onChange={handleVoiceLangChange}
+                                        disabled={disabled}
+                                        title="Voice recognition language — match your accent for best accuracy"
+                                        aria-label="Voice recognition language"
+                                        className="h-8 max-w-[96px] rounded-lg border border-surface-200 bg-white px-1.5 text-[11px] text-surface-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20 disabled:opacity-50 cursor-pointer"
+                                    >
+                                        {VOICE_LANGUAGES.map((l) => (
+                                            <option key={l.code} value={l.code}>{l.label}</option>
+                                        ))}
+                                    </select>
+                                )}
                                 {/* Attachment button */}
                                 {!isProcessing && (
                                     <button
@@ -569,10 +772,12 @@ export default function ChatInput({ onSend, onAbort, isProcessing, disabled, pla
                         </div>
                     </div>
                 </div>
-                <p className="text-[10px] text-surface-400 mt-1.5 text-center">
-                    {totalAttachments > 0
-                        ? `${totalAttachments} file${totalAttachments > 1 ? 's' : ''} attached · Press Enter to send`
-                        : 'Press Enter to send · Shift+Enter for new line · Paste or drop files'
+                <p className="text-[10px] text-surface-400 mt-1.5 text-center" aria-live="polite">
+                    {isListening
+                        ? 'Listening… speak now · click the mic again to stop'
+                        : totalAttachments > 0
+                            ? `${totalAttachments} file${totalAttachments > 1 ? 's' : ''} attached · Press Enter to send`
+                            : 'Press Enter to send · Shift+Enter for new line · Paste or drop files'
                     }
                 </p>
             </div>
