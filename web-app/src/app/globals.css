@@ -4040,6 +4040,47 @@ h2 {
     }
 }
 
+/* ═════════════════════════════════════════════════════════════════════
+   Voice input — pulsing ring shown while the mic is actively listening
+   ═════════════════════════════════════════════════════════════════════ */
+.mic-listening {
+    position: relative;
+}
+
+.mic-listening::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    border: 2px solid rgba(239, 68, 68, 0.6);
+    animation: micPulse 1.4s ease-out infinite;
+    pointer-events: none;
+}
+
+@keyframes micPulse {
+    0% {
+        transform: scale(1);
+        opacity: 0.7;
+    }
+
+    70% {
+        transform: scale(1.35);
+        opacity: 0;
+    }
+
+    100% {
+        transform: scale(1.35);
+        opacity: 0;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mic-listening::after {
+        animation: none;
+        opacity: 0.5;
+    }
+}
+
 .agent-card-copy {
     display: -webkit-box;
     -webkit-box-orient: vertical;
