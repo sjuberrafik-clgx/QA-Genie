@@ -1261,18 +1261,30 @@ class ChatSessionManager extends EventEmitter {
         const factory = this._getDelegationFactory(effectiveModel);
         const isWorkspace = selection.source === 'workspace';
 
+        // Scheduled runs are UNATTENDED — no human can review, reply, or approve. Inject
+        // a directive so agents with a built-in review/confirmation step (e.g. BugGenie's
+        // "reply with 'create bug jira ticket'") complete the whole task in a single turn
+        // instead of stopping to wait for a reply that will never come.
+        const unattendedDirective = [
+            '[SCHEDULED UNATTENDED RUN]',
+            'You are running as a scheduled job with NO human available to review, reply, or approve at any step.',
+            'Complete the ENTIRE task in this single turn. Do NOT pause to ask for confirmation and do NOT end your turn by requesting a reply (for example "reply with \'create bug jira ticket\'", "please review and confirm", or similar).',
+            'This message is BOTH the task request AND the approval to proceed: treat any confirmation phrase your normal workflow waits for as ALREADY PROVIDED, and perform all required Jira/file writes (such as creating the ticket) now. You may still include your normal review/summary content, but you MUST then carry out the final action in the same turn.',
+        ].join(' ');
+        const scheduledSystemSuffix = `=== SCHEDULED EXECUTION MODE (overrides conflicting workflow rules) ===\n${unattendedDirective}\nThis OVERRIDES any instruction to defer an action to a second prompt or to wait for a user confirmation reply — there is no second prompt and no user.`;
+
         // Build SDK attachments (screenshots → files, recordings → sampled frames)
         // so the scheduled agent sees the same evidence a chat user would attach.
         let sdkAttachments = [];
         let attachmentTempFiles = [];
-        let effectivePrompt = prompt;
+        let effectivePrompt = `${unattendedDirective}\n\n---\n\n${prompt}`;
         if (Array.isArray(attachments) && attachments.length > 0) {
             try {
                 const built = await buildSdkAttachments(attachments, { logger: (m) => console.warn(`[ScheduledAgent] ${m}`) });
                 sdkAttachments = built.sdkAttachments;
                 attachmentTempFiles = built.tempFiles;
                 if (isNonEmptyString(built.videoContextPrompt)) {
-                    effectivePrompt = `${prompt}\n\n${built.videoContextPrompt}`;
+                    effectivePrompt = `${effectivePrompt}\n\n${built.videoContextPrompt}`;
                 }
             } catch (err) {
                 console.warn(`[ScheduledAgent] Attachment build failed: ${err.message}`);
@@ -1305,6 +1317,7 @@ class ChatSessionManager extends EventEmitter {
                     runId: rid,
                     chatManager: null,
                     autoApproveMutations: true,
+                    systemPromptSuffix: scheduledSystemSuffix,
                 };
             } else {
                 ctx = {
@@ -1312,6 +1325,7 @@ class ChatSessionManager extends EventEmitter {
                     runId: rid,
                     chatManager: null,
                     autoApproveMutations: true,
+                    systemPromptSuffix: scheduledSystemSuffix,
                 };
             }
             const agentName = isWorkspace ? selection.id : (selection.agentMode || null);

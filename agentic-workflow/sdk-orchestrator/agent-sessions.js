@@ -232,7 +232,12 @@ class AgentSessionFactory {
         }
 
         // 1. Load the system prompt — prefer phase-specific override, else load from .agent.md
-        const basePrompt = context.systemPromptOverride || loadAgentPrompt(effectiveRole);
+        let basePrompt = context.systemPromptOverride || loadAgentPrompt(effectiveRole);
+        // Optional suffix appended at the system level (e.g. scheduled-execution override
+        // that instructs the agent to complete unattended without waiting for a reply).
+        if (typeof context.systemPromptSuffix === 'string' && context.systemPromptSuffix.trim()) {
+            basePrompt += `\n\n${context.systemPromptSuffix.trim()}`;
+        }
 
         // 2. Build grounding context if available
         let groundingContext = null;
