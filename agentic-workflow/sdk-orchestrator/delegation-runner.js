@@ -170,6 +170,9 @@ async function runAgentStep({ target, input, deps = {}, context = {} }) {
             onDelta: context.onDelta,
             onToolStart: context.onToolStart,
             onToolEnd: context.onToolEnd,
+            ...(Array.isArray(context.attachments) && context.attachments.length > 0
+                ? { attachments: context.attachments }
+                : {}),
         });
 
         return {

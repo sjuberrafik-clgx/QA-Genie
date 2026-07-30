@@ -780,6 +780,32 @@
             "warnThreshold": 60
         }
     },
+    "scheduler": {
+        "_comment": "One-time scheduled-action engine. Fires an allowlisted action (transition/close a Jira ticket, add a comment, or run a pipeline) at an absolute time. Deterministic, single-process, file-backed — no external queue/cron dependency.",
+        "enabled": true,
+        "pollIntervalMs": 30000,
+        "maxAttempts": 3,
+        "retryDelayMs": 60000,
+        "maxJobs": 500,
+        "missedFirePolicy": "catch-up",
+        "maxCatchUpAgeMs": 3600000,
+        "autoApproveJiraMutations": true,
+        "_autoApproveNote": "Scheduled jobs fire with no user present, so Jira writes cannot be approved interactively. Set true to let scheduled jira.transition / jira.comment actions run automatically. While false, those jobs fail with a clear message.",
+        "autoApproveAgentActions": true,
+        "_autoApproveAgentNote": "Scheduled agent.invoke jobs run an agent unattended; the agent auto-approves its own Jira/file writes since there is no interactive approver at fire time. Set false to disable scheduled agent runs (those jobs then fail with a clear message).",
+        "agentTimeoutMs": 600000,
+        "_agentTimeoutNote": "Hard timeout (ms) for a scheduled agent.invoke run. Default 10 minutes — raise for long agents (e.g. ScriptGenerator exploration).",
+        "agentModel": "gpt-5.4",
+        "_agentModelNote": "Model used for scheduled agent.invoke runs. They fire unattended and cannot inherit an interactive chat's model, so a broadly-available default (gpt-5.4) is used.",
+        "allowedActionTypes": [
+            "jira.transition",
+            "jira.comment",
+            "jira.create",
+            "jira.ai-create",
+            "pipeline.run",
+            "agent.invoke"
+        ]
+    },
     "toolBroker": {
         "_comment": "Cross-agent tool delegation layer. Enables agents to invoke tools owned by other agents without creating new LLM sessions. Zero LLM overhead — handlers are created on-demand with the current session's deps.",
         "enabled": true,

@@ -34,6 +34,7 @@ const { runAgentStep } = require('./delegation-runner');
 const { createDelegationTools } = require('./delegation-tools');
 const { buildProjectSkillRoutingHint, buildProjectSkillActivationGuide } = require('./project-skills-catalog');
 const { approveAllPermissions } = require('./permission-response');
+const { buildSdkAttachments, cleanupTempFiles } = require('./sdk-attachment-builder');
 
 const MAX_APPROVAL_DISPLAY_CHARS = 2000;
 const MAX_APPROVAL_LONG_TEXT_CHARS = 4000;
@@ -1225,6 +1226,131 @@ class ChatSessionManager extends EventEmitter {
                 destroy: () => factory.destroySession(sid).catch(() => {}),
             };
         };
+    }
+
+    /**
+     * Run an agent HEADLESSLY for a scheduled job — no chat session, no interactive
+     * approver. Reuses the delegation machinery (full direct-session parity for core
+     * AND published workspace agents) but forces `chatManager: null` so any gated
+     * Jira/file write auto-approves, since there is nobody to approve at fire time.
+     *
+     * @param {Object} params
+     * @param {string} params.agentId     - Catalog id ('core:<mode>' | 'workspace:<ws>:<asset>') or label
+     * @param {string} params.prompt      - Natural-language instruction for the agent
+     * @param {number} [params.timeoutMs] - Hard run timeout (ms)
+     * @param {string} [params.runId]     - Correlation id
+     * @returns {Promise<Object>} { success, output, error, agentId, agentLabel, durationSec, outcome }
+     */
+    async runScheduledAgent({ agentId, prompt, timeoutMs, runId, model, attachments } = {}) {
+        if (!isNonEmptyString(agentId)) return { success: false, error: 'agent.invoke requires an agentId.' };
+        if (!isNonEmptyString(prompt)) return { success: false, error: 'agent.invoke requires a prompt.' };
+
+        const resolved = await this.resolveDelegationTarget(agentId);
+        if (!resolved.ok) {
+            const targets = await this._getDelegationTargets();
+            const names = targets.map(t => t.label).join(', ');
+            return { success: false, error: `No agent matches "${agentId}". Available: ${names || '(none)'}.` };
+        }
+
+        const { selection, target, label } = resolved;
+        const rid = isNonEmptyString(runId) ? runId : `sched_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        // Scheduled runs fire unattended and cannot inherit an interactive chat's
+        // model, so default to a broadly-available model (gpt-5.4) unless the caller
+        // (scheduler config) overrides it.
+        const effectiveModel = isNonEmptyString(model) ? model : 'gpt-5.4';
+        const factory = this._getDelegationFactory(effectiveModel);
+        const isWorkspace = selection.source === 'workspace';
+
+        // Build SDK attachments (screenshots → files, recordings → sampled frames)
+        // so the scheduled agent sees the same evidence a chat user would attach.
+        let sdkAttachments = [];
+        let attachmentTempFiles = [];
+        let effectivePrompt = prompt;
+        if (Array.isArray(attachments) && attachments.length > 0) {
+            try {
+                const built = await buildSdkAttachments(attachments, { logger: (m) => console.warn(`[ScheduledAgent] ${m}`) });
+                sdkAttachments = built.sdkAttachments;
+                attachmentTempFiles = built.tempFiles;
+                if (isNonEmptyString(built.videoContextPrompt)) {
+                    effectivePrompt = `${prompt}\n\n${built.videoContextPrompt}`;
+                }
+            } catch (err) {
+                console.warn(`[ScheduledAgent] Attachment build failed: ${err.message}`);
+            }
+        }
+
+        // Headless createSession — mirrors buildDelegationCreateSession but with
+        // chatManager: null (unattended auto-approve) and no chat sessionContext.
+        const createSession = async (tgt, sessionOpts = {}) => {
+            let ctx;
+            if (isWorkspace) {
+                const toolOpts = {
+                    learningStore: this.learningStore,
+                    config: this.config,
+                    groundingStore: this._groundingStore || null,
+                    chatManager: null,
+                    autoApproveMutations: true,
+                    sessionContext: { sessionId: rid, scheduled: true },
+                    getSessionId: () => rid,
+                };
+                const systemPrompt = this._buildWorkspaceAgentPrompt(selection);
+                const categories = this._inferToolCategoriesForAgent(selection);
+                const tools = this._buildCustomAgentTools(categories, toolOpts);
+                ctx = {
+                    systemPromptOverride: systemPrompt,
+                    rawSystemPrompt: true,
+                    toolsOverride: tools,
+                    disableBroker: true,
+                    ticketContext: sessionOpts.ticketContext || '',
+                    runId: rid,
+                    chatManager: null,
+                    autoApproveMutations: true,
+                };
+            } else {
+                ctx = {
+                    ticketContext: sessionOpts.ticketContext || '',
+                    runId: rid,
+                    chatManager: null,
+                    autoApproveMutations: true,
+                };
+            }
+            const agentName = isWorkspace ? selection.id : (selection.agentMode || null);
+            const { session, sessionId: sid } = await factory.createAgentSession(agentName, ctx);
+            return {
+                sessionId: sid,
+                sendAndWait: (p, opts) => factory.sendAndWait(session, p, opts),
+                destroy: () => factory.destroySession(sid).catch(() => {}),
+            };
+        };
+
+        try {
+            const result = await runAgentStep({
+                target,
+                input: effectivePrompt,
+                deps: { createSession },
+                context: {
+                    runId: rid,
+                    timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : undefined,
+                    chatManager: null,
+                    sessionId: null,
+                    attachments: sdkAttachments,
+                },
+            });
+
+            return {
+                success: result.ok,
+                output: result.output || '',
+                error: result.ok ? null : (result.error || 'Agent run failed.'),
+                agentId: selection.id,
+                agentLabel: label,
+                durationSec: Math.round((result.durationMs || 0) / 1000),
+                outcome: result.ok
+                    ? `${label} completed the scheduled task.`
+                    : `${label} failed: ${result.error || 'unknown error'}`,
+            };
+        } finally {
+            cleanupTempFiles(attachmentTempFiles);
+        }
     }
 
     /** Semantic routing recommendation over the live specialist roster. */
