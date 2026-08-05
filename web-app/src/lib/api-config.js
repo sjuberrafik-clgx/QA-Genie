@@ -117,5 +117,10 @@ export const API_CONFIG = {
         reports: '/api/reports',
         report: (fileName) => `/api/reports/${fileName}`,
         consolidatedReport: '/api/reports/consolidated',
+
+        // Scheduler (one-time scheduled actions)
+        schedulerJobs: '/api/scheduler/jobs',
+        schedulerJob: (jobId) => `/api/scheduler/jobs/${jobId}`,
+        schedulerJobRunNow: (jobId) => `/api/scheduler/jobs/${jobId}/run-now`,
     },
 };

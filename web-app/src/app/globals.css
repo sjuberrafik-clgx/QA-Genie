@@ -2476,6 +2476,18 @@ h2 {
     }
 }
 
+@keyframes schedulerDrawerIn {
+    from {
+        opacity: 0;
+        transform: translateX(28px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
 .chat-table-modal__panel {
     width: 100%;
     max-width: 1400px;

@@ -44,6 +44,36 @@ const MAX_APPROVAL_PREVIEW_BYTES = 48 * 1024;
 const MAX_SSE_EVENT_BYTES = 256 * 1024;
 const DELEGATED_USER_INPUT_TIMEOUT_MS = 30 * 60 * 1000;
 
+const SCHEDULED_WRITE_TOOLS = new Set([
+    'update_jira_ticket',
+    'add_comment_with_images',
+    'add_comment_with_media',
+    'create_jira_ticket',
+    'transition_jira_ticket',
+    'log_jira_work',
+]);
+
+const SCHEDULED_AGENT_DIRECTIVE = [
+    '[SCHEDULED UNATTENDED RUN — STANDING APPROVAL]',
+    'No human is available during this run. Complete the entire task in this single turn and never stop to ask for confirmation or approval.',
+    'Do not call ask_user or ask_questions. This scheduled request is standing approval for all actions permitted by the scheduler configuration.',
+    `Use the approved write tools directly when needed: ${Array.from(SCHEDULED_WRITE_TOOLS).join(', ')}.`,
+    'Treat any confirmation phrase in your normal workflow as already provided, perform all required Jira and file writes, and report the completed result.',
+].join(' ');
+
+function detectApprovalStall(output) {
+    if (typeof output !== 'string' || !output.trim()) return null;
+    const patterns = [
+        /approval request\s*:/i,
+        /blocked by[^.\n]{0,120}approval/i,
+        /cannot proceed without (?:your )?approval/i,
+        /awaiting (?:your )?approval/i,
+        /(?:please )?review and confirm(?: before| so|$)/i,
+    ];
+    const match = patterns.map(pattern => output.match(pattern)).find(Boolean);
+    return match ? match[0] : null;
+}
+
 // ─── Chat Utilities (extracted) ─────────────────────────────────────────────
 const {
     // Constants
@@ -1261,23 +1291,13 @@ class ChatSessionManager extends EventEmitter {
         const factory = this._getDelegationFactory(effectiveModel);
         const isWorkspace = selection.source === 'workspace';
 
-        // Scheduled runs are UNATTENDED — no human can review, reply, or approve. Inject
-        // a directive so agents with a built-in review/confirmation step (e.g. BugGenie's
-        // "reply with 'create bug jira ticket'") complete the whole task in a single turn
-        // instead of stopping to wait for a reply that will never come.
-        const unattendedDirective = [
-            '[SCHEDULED UNATTENDED RUN]',
-            'You are running as a scheduled job with NO human available to review, reply, or approve at any step.',
-            'Complete the ENTIRE task in this single turn. Do NOT pause to ask for confirmation and do NOT end your turn by requesting a reply (for example "reply with \'create bug jira ticket\'", "please review and confirm", or similar).',
-            'This message is BOTH the task request AND the approval to proceed: treat any confirmation phrase your normal workflow waits for as ALREADY PROVIDED, and perform all required Jira/file writes (such as creating the ticket) now. You may still include your normal review/summary content, but you MUST then carry out the final action in the same turn.',
-        ].join(' ');
-        const scheduledSystemSuffix = `=== SCHEDULED EXECUTION MODE (overrides conflicting workflow rules) ===\n${unattendedDirective}\nThis OVERRIDES any instruction to defer an action to a second prompt or to wait for a user confirmation reply — there is no second prompt and no user.`;
+        const scheduledSystemSuffix = `=== SCHEDULED EXECUTION MODE (overrides conflicting workflow rules) ===\n${SCHEDULED_AGENT_DIRECTIVE}\nThis OVERRIDES any instruction to defer an action to a second prompt or to wait for a user confirmation reply — there is no second prompt and no user.`;
 
         // Build SDK attachments (screenshots → files, recordings → sampled frames)
         // so the scheduled agent sees the same evidence a chat user would attach.
         let sdkAttachments = [];
         let attachmentTempFiles = [];
-        let effectivePrompt = `${unattendedDirective}\n\n---\n\n${prompt}`;
+        let effectivePrompt = `${SCHEDULED_AGENT_DIRECTIVE}\n\n---\n\n${prompt}`;
         if (Array.isArray(attachments) && attachments.length > 0) {
             try {
                 const built = await buildSdkAttachments(attachments, { logger: (m) => console.warn(`[ScheduledAgent] ${m}`) });
@@ -1351,16 +1371,22 @@ class ChatSessionManager extends EventEmitter {
                 },
             });
 
+            const approvalStall = result.ok ? detectApprovalStall(result.output) : null;
+            const success = result.ok && !approvalStall;
+            const error = approvalStall
+                ? `Scheduled agent stopped at an approval gate: ${approvalStall}`
+                : (result.ok ? null : (result.error || 'Agent run failed.'));
+
             return {
-                success: result.ok,
+                success,
                 output: result.output || '',
-                error: result.ok ? null : (result.error || 'Agent run failed.'),
+                error,
                 agentId: selection.id,
                 agentLabel: label,
                 durationSec: Math.round((result.durationMs || 0) / 1000),
-                outcome: result.ok
+                outcome: success
                     ? `${label} completed the scheduled task.`
-                    : `${label} failed: ${result.error || 'unknown error'}`,
+                    : `${label} failed: ${error || 'unknown error'}`,
             };
         } finally {
             cleanupTempFiles(attachmentTempFiles);
@@ -5386,6 +5412,9 @@ class ChatSessionManager extends EventEmitter {
 module.exports = {
     ChatSessionManager,
     CHAT_EVENTS,
+    SCHEDULED_AGENT_DIRECTIVE,
+    SCHEDULED_WRITE_TOOLS,
+    detectApprovalStall,
     normalizeUserInputRequestPayload,
     normalizeUserInputHistoryMessage,
 };
