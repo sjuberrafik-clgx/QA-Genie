@@ -945,6 +945,83 @@
                 }
             }
         },
+        "scheduler": {
+            "type": "object",
+            "description": "One-time scheduled-action engine. Fires an allowlisted action (Jira transition, Jira comment, or pipeline run) at an absolute time. Deterministic, single-process, file-backed.",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Master toggle for the scheduler engine."
+                },
+                "pollIntervalMs": {
+                    "type": "number",
+                    "default": 30000,
+                    "minimum": 1000,
+                    "description": "How often the engine scans for due jobs, in milliseconds."
+                },
+                "maxAttempts": {
+                    "type": "number",
+                    "default": 3,
+                    "minimum": 1,
+                    "description": "Maximum execution attempts per job before it is marked failed."
+                },
+                "retryDelayMs": {
+                    "type": "number",
+                    "default": 60000,
+                    "minimum": 0,
+                    "description": "Base linear backoff delay between retries, in milliseconds."
+                },
+                "maxJobs": {
+                    "type": "number",
+                    "default": 500,
+                    "minimum": 1,
+                    "description": "Maximum retained jobs; oldest terminal jobs are evicted first."
+                },
+                "missedFirePolicy": {
+                    "type": "string",
+                    "enum": ["catch-up", "skip"],
+                    "default": "catch-up",
+                    "description": "Behaviour for jobs overdue at startup: 'catch-up' fires them if within maxCatchUpAgeMs, 'skip' marks them missed."
+                },
+                "maxCatchUpAgeMs": {
+                    "type": "number",
+                    "default": 3600000,
+                    "minimum": 0,
+                    "description": "Maximum staleness for catch-up firing; older overdue jobs are marked missed."
+                },
+                "autoApproveJiraMutations": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, scheduled Jira writes (transition/comment) run without an interactive approval prompt. While false, such jobs fail with a clear message."
+                },
+                "autoApproveAgentActions": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, scheduled agent.invoke jobs run an agent unattended (the agent auto-approves its own Jira/file writes since there is no interactive approver at fire time). While false, agent.invoke jobs fail with a clear message."
+                },
+                "agentTimeoutMs": {
+                    "type": "number",
+                    "default": 600000,
+                    "minimum": 1000,
+                    "description": "Hard timeout (ms) for a scheduled agent.invoke run. Default 10 minutes; raise for long-running agents such as ScriptGenerator."
+                },
+                "agentModel": {
+                    "type": "string",
+                    "default": "gpt-5.4",
+                    "description": "Model used for scheduled agent.invoke runs. They fire unattended and cannot inherit an interactive chat's model, so a broadly-available default is used."
+                },
+                "allowedActionTypes": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["jira.transition", "jira.comment", "jira.create", "jira.ai-create", "pipeline.run", "agent.invoke"]
+                    },
+                    "default": ["jira.transition", "jira.comment", "jira.create", "jira.ai-create", "pipeline.run", "agent.invoke"],
+                    "description": "Allowlist of action types a scheduled job may perform."
+                }
+            }
+        },
         "guardrails": {
             "type": "object",
             "description": "Universal mutation guardrail. Always-on onPreToolUse layer that gates every write/update/delete tool call (all agents, incl. custom Studio agents and custom MCP tools) behind an Approve/Cancel prompt. Deterministic classification — zero LLM cost.",

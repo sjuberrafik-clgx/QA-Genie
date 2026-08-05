@@ -168,6 +168,28 @@ class ApiClient {
         return this._fetch(url, { retries: 0, timeout: TIMEOUTS.HEALTH });
     }
 
+    /**
+     * Upload a video/recording as a raw binary stream. Returns
+     * { tempPath, filename, mediaType, size }. The tempPath can be attached to a
+     * chat message or a scheduled agent job.
+     */
+    async uploadVideo(file) {
+        const res = await fetch(`${this.baseUrl}${EP.chatUploadVideo}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': file.type || 'application/octet-stream',
+                'X-Filename': encodeURIComponent(file.name || 'recording'),
+            },
+            body: file,
+        });
+        if (!res.ok) {
+            let message = `Recording upload failed (${res.status})`;
+            try { const j = await res.json(); if (j?.error) message = j.error; } catch { /* ignore */ }
+            throw new Error(message);
+        }
+        return res.json();
+    }
+
     // ─── Pipeline ───────────────────────────────────────────────
     async startPipeline(identifier, mode = 'full', environment = 'UAT', model = 'gpt-4o', options = {}) {
         const payload = {
@@ -708,6 +730,34 @@ class ApiClient {
         if (params.runId) query.set('runId', params.runId);
         const qs = query.toString();
         return this._fetch(`${EP.consolidatedReport}${qs ? '?' + qs : ''}`);
+    }
+
+    // ─── Scheduler ──────────────────────────────────────────────
+    async listSchedulerJobs(filters = {}) {
+        const query = new URLSearchParams();
+        if (filters.status) query.set('status', filters.status);
+        if (filters.actionType) query.set('actionType', filters.actionType);
+        if (filters.limit) query.set('limit', String(filters.limit));
+        const qs = query.toString();
+        return this._fetch(`${EP.schedulerJobs}${qs ? '?' + qs : ''}`);
+    }
+
+    async createSchedulerJob(payload) {
+        return this._fetch(EP.schedulerJobs, {
+            method: 'POST',
+            body: JSON.stringify(payload),
+            retries: 0,
+        });
+    }
+
+    async getSchedulerJob(jobId) { return this._fetch(EP.schedulerJob(jobId)); }
+
+    async cancelSchedulerJob(jobId) {
+        return this._fetch(EP.schedulerJob(jobId), { method: 'DELETE', retries: 0 });
+    }
+
+    async runSchedulerJobNow(jobId) {
+        return this._fetch(EP.schedulerJobRunNow(jobId), { method: 'POST', retries: 0 });
     }
 
     // ─── SSE Stream URLs ────────────────────────────────────────

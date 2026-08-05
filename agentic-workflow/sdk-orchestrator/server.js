@@ -63,8 +63,13 @@ const {
     runJiraWebhookStartupSync,
     createQueueError,
 } = require('./jira-webhook-reliability');
+const { SchedulerStore } = require('./scheduler-store');
+const { createSchedulerActions } = require('./scheduler-actions');
+const { SchedulerEngine } = require('./scheduler-engine');
+const { SchedulerAttachmentStore } = require('./scheduler-attachment-store');
+const { AiTicketDrafter } = require('./ai-ticket-drafter');
 const {
-    loadEnv, isValidTicketId, isValidMode, generateBatchId, truncate,
+    loadEnv, isValidTicketId, isValidMode, generateBatchId, truncate, loadWorkflowConfig,
 } = require('./utils');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
@@ -105,6 +110,7 @@ class Router {
             { prefix: '/api/pipeline/batch', max: parseInt(process.env.SDK_RATE_LIMIT_PIPELINE, 10) || 30 },
             { prefix: '/api/chat/sessions', max: parseInt(process.env.SDK_RATE_LIMIT_CHAT, 10) || 120 },
             { prefix: '/api/webhooks/jira', max: parseInt(process.env.SDK_RATE_LIMIT_WEBHOOK, 10) || 300 },
+            { prefix: '/api/scheduler', max: parseInt(process.env.SDK_RATE_LIMIT_SCHEDULER, 10) || 60 },
         ];
         this._rateLimitHits = new Map(); // key -> { count, resetAt }
     }
@@ -595,6 +601,64 @@ async function startServer(options = {}) {
     let videoUploadCleanupInterval = null;
     let jiraWebhookQueueTimer = null;
     let jiraWebhookQueueProcessing = false;
+
+    // ─── Scheduler Engine ───────────────────────────────────────────
+    // One-time scheduled-action engine: transition/close a Jira ticket, add a
+    // comment, or run a pipeline at a future time. File-backed + deterministic.
+    const schedulerConfigRoot = loadWorkflowConfig();
+    const schedulerStore = new SchedulerStore({ maxJobs: schedulerConfigRoot?.scheduler?.maxJobs });
+    const schedulerAttachmentStore = new SchedulerAttachmentStore({
+        videoUploadDir: path.join(os.tmpdir(), 'qa-video-uploads'),
+    });
+    const schedulerActions = createSchedulerActions({
+        config: schedulerConfigRoot,
+        logger: (message, level) => log(message, level),
+        pipelineTrigger: async ({ ticketId, mode, environment, model }) => {
+            if (!orchestratorReady) throw new Error('SDK Orchestrator not ready yet.');
+            if (!isValidTicketId(ticketId)) throw new Error(`Invalid ticketId: "${ticketId}"`);
+            const existing = runStore.getActiveRun(ticketId);
+            if (existing) return { runId: existing.runId, ticketId, note: 'Pipeline already running' };
+            const run = runStore.createRun({
+                ticketId,
+                mode: isValidMode(mode) ? mode : 'full',
+                environment: environment || 'UAT',
+                triggeredBy: 'scheduler',
+                model: model || null,
+            });
+            runStore.updateMission(run.runId, {
+                evidence: { eventLogPath: eventBridge.getRunEventLogPath(run.runId) },
+            });
+            _executePipeline(run.runId, ticketId, run.mode, orchestrator, runStore, eventBridge, activePipelines, model || undefined);
+            return { runId: run.runId, ticketId, mode: run.mode };
+        },
+        agentInvoker: async ({ agentId, prompt, timeoutMs, model, attachments, jobId }) => {
+            if (!orchestratorReady) throw new Error('SDK Orchestrator not ready yet.');
+            if (!chatManager || typeof chatManager.runScheduledAgent !== 'function') {
+                throw new Error('Chat manager is not ready yet — cannot run scheduled agent.');
+            }
+            // Reload durable attachments (screenshots/recordings persisted at schedule time).
+            const wireAttachments = (Array.isArray(attachments) && attachments.length > 0 && jobId)
+                ? schedulerAttachmentStore.loadForJob(jobId, attachments)
+                : [];
+            return chatManager.runScheduledAgent({ agentId, prompt, timeoutMs, model, attachments: wireAttachments });
+        },
+    });
+    const schedulerEngine = new SchedulerEngine({
+        store: schedulerStore,
+        actions: schedulerActions,
+        config: schedulerConfigRoot,
+        logger: (message, level) => log(message, level),
+        onJobTerminal: (jobId) => schedulerAttachmentStore.cleanupJob(jobId),
+    });
+    schedulerEngine.start();
+
+    // AI ticket drafter — runs BugGenie/TaskGenie in draft-only mode to compose a
+    // ticket for human review; the approved draft is later scheduled as a
+    // `jira.ai-create` job. Reuses the generic lazy AgentSessionFactory.
+    const aiTicketDrafter = new AiTicketDrafter({
+        getFactory: getStudioSessionFactory,
+        logger: (message, level) => log(message, level),
+    });
 
     // ─── Stale Run Watchdog ─────────────────────────────────────────
     // Every 5 minutes, check for runs stuck in running/queued that have no
@@ -2162,6 +2226,230 @@ async function startServer(options = {}) {
     });
 
     // ═════════════════════════════════════════════════════════════════
+    // SCHEDULER (one-time scheduled actions)
+    // ═════════════════════════════════════════════════════════════════
+
+    /**
+     * POST /api/scheduler/jobs
+     * Body: { schedule: { kind?, delayMs?, runAt?, timezone? }, action: { type, params }, source?, sessionId? }
+     * Returns: { job }
+     */
+    router.post('/api/scheduler/jobs', (req, res) => {
+        const body = req.body || {};
+        const action = body.action;
+        const schedule = body.schedule || {};
+
+        const actionError = schedulerActions.validate(action);
+        if (actionError) return badRequest(res, actionError);
+
+        // Extract + validate agent.invoke attachments (screenshots/recordings). Raw
+        // media is NOT stored in the job — it is persisted durably once the job id
+        // is known, and the job keeps only lightweight refs.
+        let rawAttachments = null;
+        if (action?.type === 'agent.invoke' && Array.isArray(action?.params?.attachments) && action.params.attachments.length > 0) {
+            const attCheck = schedulerAttachmentStore.validate(action.params.attachments);
+            if (!attCheck.ok) return badRequest(res, attCheck.error);
+            rawAttachments = action.params.attachments;
+        }
+
+        // Resolve an absolute runAt (UTC) from either a relative delay or an
+        // absolute timestamp. Delay wins when both are present.
+        let runAtMs;
+        const hasDelay = Number.isFinite(Number(schedule.delayMs));
+        const runAtStr = typeof schedule.runAt === 'string' ? schedule.runAt.trim() : '';
+        if (schedule.kind === 'delay' || hasDelay) {
+            const delayMs = Number(schedule.delayMs);
+            if (!Number.isFinite(delayMs) || delayMs < 0) {
+                return badRequest(res, 'schedule.delayMs must be a non-negative number for a delay schedule.');
+            }
+            runAtMs = Date.now() + delayMs;
+        } else if (runAtStr) {
+            const parsed = new Date(runAtStr).getTime();
+            if (!Number.isFinite(parsed)) {
+                return badRequest(res, 'schedule.runAt must be a valid ISO date/time.');
+            }
+            runAtMs = parsed;
+        } else {
+            return badRequest(res, 'Provide schedule.delayMs (relative) or schedule.runAt (absolute time).');
+        }
+
+        // Reject scheduling meaningfully in the past (allow a 60s grace window).
+        if (runAtMs < Date.now() - 60000) {
+            return badRequest(res, 'Scheduled time is in the past.');
+        }
+
+        // Strip inline media before persistence; durable refs are attached below.
+        const persistedAction = rawAttachments
+            ? { ...action, params: { ...action.params, attachments: [] } }
+            : action;
+
+        const job = schedulerStore.createJob({
+            runAt: new Date(runAtMs).toISOString(),
+            action: persistedAction,
+            schedule: {
+                kind: schedule.kind || (hasDelay ? 'delay' : 'datetime'),
+                delayMs: hasDelay ? Number(schedule.delayMs) : null,
+                timezone: typeof schedule.timezone === 'string' && schedule.timezone.trim() ? schedule.timezone.trim() : 'UTC',
+            },
+            createdBy: { source: body.source || 'web-app', sessionId: body.sessionId || null },
+            maxAttempts: schedulerConfigRoot?.scheduler?.maxAttempts,
+        });
+
+        // Persist durable attachments (decode images, copy recordings out of the
+        // volatile upload dir) and record lightweight refs on the job.
+        if (rawAttachments) {
+            try {
+                const refs = schedulerAttachmentStore.persistForJob(job.jobId, rawAttachments);
+                schedulerStore.updateJob(job.jobId, {
+                    action: { ...persistedAction, params: { ...persistedAction.params, attachments: refs } },
+                });
+            } catch (err) {
+                log(`[Scheduler] Attachment persist failed for ${job.jobId}: ${err.message}`, 'warn');
+            }
+        }
+
+        accepted(res, { job: schedulerStore.getJob(job.jobId) || job });
+    });
+
+    /**
+     * GET /api/scheduler/jobs
+     * Query: ?status=&actionType=&limit=&offset=
+     */
+    router.get('/api/scheduler/jobs', (req, res) => {
+        const filters = {
+            status: req.query.status || undefined,
+            actionType: req.query.actionType || undefined,
+            limit: parseInt(req.query.limit, 10) || 100,
+            offset: parseInt(req.query.offset, 10) || 0,
+        };
+        ok(res, {
+            ...schedulerStore.listJobs(filters),
+            stats: schedulerStore.getStats(),
+            actionTypes: schedulerActions.listTypes(),
+        });
+    });
+
+    /**
+     * GET /api/scheduler/jobs/:jobId
+     */
+    router.get('/api/scheduler/jobs/:jobId', (req, res) => {
+        const job = schedulerStore.getJob(req.params.jobId);
+        if (!job) return notFound(res, `Job ${req.params.jobId} not found`);
+        ok(res, { job });
+    });
+
+    /**
+     * DELETE /api/scheduler/jobs/:jobId — cancel a pending job
+     */
+    router.delete('/api/scheduler/jobs/:jobId', (req, res) => {
+        const cancelled = schedulerStore.cancelJob(req.params.jobId);
+        if (!cancelled) return conflict(res, 'Job not found or not cancellable (already running or terminal).');
+        schedulerAttachmentStore.cleanupJob(req.params.jobId);
+        ok(res, { job: cancelled });
+    });
+
+    /**
+     * POST /api/scheduler/jobs/:jobId/run-now — fire immediately
+     */
+    router.post('/api/scheduler/jobs/:jobId/run-now', async (req, res) => {
+        const result = await schedulerEngine.runNow(req.params.jobId);
+        if (!result.ok) return badRequest(res, result.error);
+        ok(res, { job: schedulerStore.getJob(req.params.jobId) });
+    });
+
+    /**
+     * GET /api/scheduler/jobs/:jobId/attachments/:attId
+     * Streams a stored agent.invoke attachment (screenshot / recording) for preview.
+     */
+    router.get('/api/scheduler/jobs/:jobId/attachments/:attId', (req, res) => {
+        const file = schedulerAttachmentStore.getAttachmentFile(req.params.jobId, req.params.attId);
+        if (!file) return notFound(res, 'Attachment not found');
+        try {
+            const data = fs.readFileSync(file.path);
+            res.writeHead(200, {
+                'Content-Type': file.mediaType || 'application/octet-stream',
+                'Content-Length': file.size,
+                'Cache-Control': 'private, max-age=3600',
+            });
+            res.end(data);
+        } catch (err) {
+            json(res, 500, { error: `Failed to read attachment: ${err.message}` });
+        }
+    });
+
+    /**
+     * POST /api/scheduler/ai-draft
+     * Runs BugGenie/TaskGenie in draft-only mode to compose a ticket for review.
+     * NOTHING is written to Jira. The approved draft is later scheduled as a
+     * `jira.ai-create` job.
+     * Body: { agent?, issueType?, projectKey?, prompt, priority?, linkedIssueKey?, parentIssueKey?, attachments?: [{type:'image',media_type,data}|{type:'video',media_type,tempPath,filename?}] }
+     * Returns: { draftId, agent, draft }
+     */
+    router.post('/api/scheduler/ai-draft', async (req, res) => {
+        const body = req.body || {};
+        const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+        if (!prompt) return badRequest(res, 'A prompt describing the issue or task is required.');
+
+        const agent = typeof body.agent === 'string' ? body.agent.trim().toLowerCase() : '';
+        if (agent && !['buggenie', 'taskgenie'].includes(agent)) {
+            return badRequest(res, 'agent must be "buggenie" or "taskgenie".');
+        }
+
+        // Validate + normalize attachments. Images arrive as inline base64; videos
+        // arrive as a tempPath from POST /api/chat/upload-video and MUST resolve
+        // inside the managed upload directory (prevents arbitrary local file reads).
+        const rawAttachments = Array.isArray(body.attachments) ? body.attachments : [];
+        const attachments = [];
+        let imageCount = 0;
+        let videoCount = 0;
+        for (const att of rawAttachments) {
+            if (!att || typeof att !== 'object') continue;
+            if (att.type === 'image') {
+                if (++imageCount > 10) return badRequest(res, 'Too many images (max 10).');
+                if (!VALID_IMAGE_MEDIA.includes(att.media_type)) return badRequest(res, `Unsupported image type: ${att.media_type}`);
+                if (typeof att.data !== 'string' || !att.data) return badRequest(res, 'Image attachment requires base64 data.');
+                if (att.data.length > 14 * 1024 * 1024) return badRequest(res, 'Image attachment too large (max ~10 MB).');
+                attachments.push({ type: 'image', media_type: att.media_type, data: att.data });
+            } else if (att.type === 'video') {
+                if (++videoCount > 2) return badRequest(res, 'Too many videos (max 2).');
+                if (!VALID_VIDEO_MEDIA.includes(att.media_type)) return badRequest(res, `Unsupported video type: ${att.media_type}`);
+                if (typeof att.tempPath !== 'string' || !att.tempPath) return badRequest(res, 'Video attachment requires tempPath from the upload endpoint.');
+                const resolved = path.resolve(att.tempPath);
+                if (!_isPathInside(path.resolve(VIDEO_UPLOAD_DIR), resolved) || !fs.existsSync(resolved)) {
+                    return badRequest(res, 'Invalid or missing video tempPath. Please re-upload the recording.');
+                }
+                attachments.push({
+                    type: 'video',
+                    media_type: att.media_type,
+                    tempPath: resolved,
+                    filename: typeof att.filename === 'string' ? att.filename.replace(/[\\/]/g, '').replace(/\.\./g, '') : 'recording',
+                });
+            }
+            // documents / video_link are not used for ticket drafting in v1
+        }
+
+        try {
+            const result = await aiTicketDrafter.generateDraft({
+                agent,
+                issueType: typeof body.issueType === 'string' ? body.issueType : undefined,
+                projectKey: typeof body.projectKey === 'string' ? body.projectKey : undefined,
+                prompt,
+                priority: typeof body.priority === 'string' ? body.priority : undefined,
+                linkedIssueKey: typeof body.linkedIssueKey === 'string' ? body.linkedIssueKey : undefined,
+                parentIssueKey: typeof body.parentIssueKey === 'string' ? body.parentIssueKey : undefined,
+                attachments,
+            });
+            if (!result.ok) {
+                return json(res, 422, { error: result.error, agentResponse: result.agentResponse || null });
+            }
+            ok(res, { draftId: result.draftId, agent: result.agent, draft: result.draft });
+        } catch (err) {
+            log(`AI draft error: ${err.message}`, 'error');
+            return json(res, 500, { error: `Draft generation failed: ${err.message}` });
+        }
+    });
+
+    // ═════════════════════════════════════════════════════════════════
     // JIRA WEBHOOK (Phase 4 — pre-wired)
     // ═════════════════════════════════════════════════════════════════
 
@@ -3720,6 +4008,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
     const shutdown = async (signal) => {
         log(`\n${signal} received. Shutting down...`);
         clearInterval(staleRunWatchdog);
+        schedulerEngine.stop();
         if (videoUploadCleanupInterval) {
             clearInterval(videoUploadCleanupInterval);
         }

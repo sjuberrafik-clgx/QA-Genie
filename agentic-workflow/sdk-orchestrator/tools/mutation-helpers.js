@@ -637,8 +637,22 @@ async function requireJiraMutationApproval({ deps, toolName, previewLines, previ
         };
     }
 
-    const latestUserMessage = getLatestUserMessageText(deps);
     const expectedApproval = buildExpectedJiraMutationApproval(toolName, { ticketId, relatedIssueKey, commentId });
+
+    // Unattended auto-approve: scheduled/headless agent runs opt in via
+    // deps.autoApproveMutations (gated by scheduler.autoApproveAgentActions). There is
+    // no interactive approver at fire time, so honor the explicit opt-in.
+    if (deps?.autoApproveMutations === true) {
+        return {
+            approved: true,
+            guardrail,
+            mode: 'auto-approved',
+            expectedApproval,
+            preview,
+        };
+    }
+
+    const latestUserMessage = getLatestUserMessageText(deps);
     const resolvedPreview = preview && typeof preview === 'object'
         ? preview
         : buildMutationPreview({

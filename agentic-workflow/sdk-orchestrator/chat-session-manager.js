@@ -34,6 +34,7 @@ const { runAgentStep } = require('./delegation-runner');
 const { createDelegationTools } = require('./delegation-tools');
 const { buildProjectSkillRoutingHint, buildProjectSkillActivationGuide } = require('./project-skills-catalog');
 const { approveAllPermissions } = require('./permission-response');
+const { buildSdkAttachments, cleanupTempFiles } = require('./sdk-attachment-builder');
 
 const MAX_APPROVAL_DISPLAY_CHARS = 2000;
 const MAX_APPROVAL_LONG_TEXT_CHARS = 4000;
@@ -42,6 +43,36 @@ const MAX_APPROVAL_NOTES = 16;
 const MAX_APPROVAL_PREVIEW_BYTES = 48 * 1024;
 const MAX_SSE_EVENT_BYTES = 256 * 1024;
 const DELEGATED_USER_INPUT_TIMEOUT_MS = 30 * 60 * 1000;
+
+const SCHEDULED_WRITE_TOOLS = new Set([
+    'update_jira_ticket',
+    'add_comment_with_images',
+    'add_comment_with_media',
+    'create_jira_ticket',
+    'transition_jira_ticket',
+    'log_jira_work',
+]);
+
+const SCHEDULED_AGENT_DIRECTIVE = [
+    '[SCHEDULED UNATTENDED RUN — STANDING APPROVAL]',
+    'No human is available during this run. Complete the entire task in this single turn and never stop to ask for confirmation or approval.',
+    'Do not call ask_user or ask_questions. This scheduled request is standing approval for all actions permitted by the scheduler configuration.',
+    `Use the approved write tools directly when needed: ${Array.from(SCHEDULED_WRITE_TOOLS).join(', ')}.`,
+    'Treat any confirmation phrase in your normal workflow as already provided, perform all required Jira and file writes, and report the completed result.',
+].join(' ');
+
+function detectApprovalStall(output) {
+    if (typeof output !== 'string' || !output.trim()) return null;
+    const patterns = [
+        /approval request\s*:/i,
+        /blocked by[^.\n]{0,120}approval/i,
+        /cannot proceed without (?:your )?approval/i,
+        /awaiting (?:your )?approval/i,
+        /(?:please )?review and confirm(?: before| so|$)/i,
+    ];
+    const match = patterns.map(pattern => output.match(pattern)).find(Boolean);
+    return match ? match[0] : null;
+}
 
 // ─── Chat Utilities (extracted) ─────────────────────────────────────────────
 const {
@@ -1225,6 +1256,141 @@ class ChatSessionManager extends EventEmitter {
                 destroy: () => factory.destroySession(sid).catch(() => {}),
             };
         };
+    }
+
+    /**
+     * Run an agent HEADLESSLY for a scheduled job — no chat session, no interactive
+     * approver. Reuses the delegation machinery (full direct-session parity for core
+     * AND published workspace agents) but forces `chatManager: null` so any gated
+     * Jira/file write auto-approves, since there is nobody to approve at fire time.
+     *
+     * @param {Object} params
+     * @param {string} params.agentId     - Catalog id ('core:<mode>' | 'workspace:<ws>:<asset>') or label
+     * @param {string} params.prompt      - Natural-language instruction for the agent
+     * @param {number} [params.timeoutMs] - Hard run timeout (ms)
+     * @param {string} [params.runId]     - Correlation id
+     * @returns {Promise<Object>} { success, output, error, agentId, agentLabel, durationSec, outcome }
+     */
+    async runScheduledAgent({ agentId, prompt, timeoutMs, runId, model, attachments } = {}) {
+        if (!isNonEmptyString(agentId)) return { success: false, error: 'agent.invoke requires an agentId.' };
+        if (!isNonEmptyString(prompt)) return { success: false, error: 'agent.invoke requires a prompt.' };
+
+        const resolved = await this.resolveDelegationTarget(agentId);
+        if (!resolved.ok) {
+            const targets = await this._getDelegationTargets();
+            const names = targets.map(t => t.label).join(', ');
+            return { success: false, error: `No agent matches "${agentId}". Available: ${names || '(none)'}.` };
+        }
+
+        const { selection, target, label } = resolved;
+        const rid = isNonEmptyString(runId) ? runId : `sched_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        // Scheduled runs fire unattended and cannot inherit an interactive chat's
+        // model, so default to a broadly-available model (gpt-5.4) unless the caller
+        // (scheduler config) overrides it.
+        const effectiveModel = isNonEmptyString(model) ? model : 'gpt-5.4';
+        const factory = this._getDelegationFactory(effectiveModel);
+        const isWorkspace = selection.source === 'workspace';
+
+        const scheduledSystemSuffix = `=== SCHEDULED EXECUTION MODE (overrides conflicting workflow rules) ===\n${SCHEDULED_AGENT_DIRECTIVE}\nThis OVERRIDES any instruction to defer an action to a second prompt or to wait for a user confirmation reply — there is no second prompt and no user.`;
+
+        // Build SDK attachments (screenshots → files, recordings → sampled frames)
+        // so the scheduled agent sees the same evidence a chat user would attach.
+        let sdkAttachments = [];
+        let attachmentTempFiles = [];
+        let effectivePrompt = `${SCHEDULED_AGENT_DIRECTIVE}\n\n---\n\n${prompt}`;
+        if (Array.isArray(attachments) && attachments.length > 0) {
+            try {
+                const built = await buildSdkAttachments(attachments, { logger: (m) => console.warn(`[ScheduledAgent] ${m}`) });
+                sdkAttachments = built.sdkAttachments;
+                attachmentTempFiles = built.tempFiles;
+                if (isNonEmptyString(built.videoContextPrompt)) {
+                    effectivePrompt = `${effectivePrompt}\n\n${built.videoContextPrompt}`;
+                }
+            } catch (err) {
+                console.warn(`[ScheduledAgent] Attachment build failed: ${err.message}`);
+            }
+        }
+
+        // Headless createSession — mirrors buildDelegationCreateSession but with
+        // chatManager: null (unattended auto-approve) and no chat sessionContext.
+        const createSession = async (tgt, sessionOpts = {}) => {
+            let ctx;
+            if (isWorkspace) {
+                const toolOpts = {
+                    learningStore: this.learningStore,
+                    config: this.config,
+                    groundingStore: this._groundingStore || null,
+                    chatManager: null,
+                    autoApproveMutations: true,
+                    sessionContext: { sessionId: rid, scheduled: true },
+                    getSessionId: () => rid,
+                };
+                const systemPrompt = this._buildWorkspaceAgentPrompt(selection);
+                const categories = this._inferToolCategoriesForAgent(selection);
+                const tools = this._buildCustomAgentTools(categories, toolOpts);
+                ctx = {
+                    systemPromptOverride: systemPrompt,
+                    rawSystemPrompt: true,
+                    toolsOverride: tools,
+                    disableBroker: true,
+                    ticketContext: sessionOpts.ticketContext || '',
+                    runId: rid,
+                    chatManager: null,
+                    autoApproveMutations: true,
+                    systemPromptSuffix: scheduledSystemSuffix,
+                };
+            } else {
+                ctx = {
+                    ticketContext: sessionOpts.ticketContext || '',
+                    runId: rid,
+                    chatManager: null,
+                    autoApproveMutations: true,
+                    systemPromptSuffix: scheduledSystemSuffix,
+                };
+            }
+            const agentName = isWorkspace ? selection.id : (selection.agentMode || null);
+            const { session, sessionId: sid } = await factory.createAgentSession(agentName, ctx);
+            return {
+                sessionId: sid,
+                sendAndWait: (p, opts) => factory.sendAndWait(session, p, opts),
+                destroy: () => factory.destroySession(sid).catch(() => {}),
+            };
+        };
+
+        try {
+            const result = await runAgentStep({
+                target,
+                input: effectivePrompt,
+                deps: { createSession },
+                context: {
+                    runId: rid,
+                    timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : undefined,
+                    chatManager: null,
+                    sessionId: null,
+                    attachments: sdkAttachments,
+                },
+            });
+
+            const approvalStall = result.ok ? detectApprovalStall(result.output) : null;
+            const success = result.ok && !approvalStall;
+            const error = approvalStall
+                ? `Scheduled agent stopped at an approval gate: ${approvalStall}`
+                : (result.ok ? null : (result.error || 'Agent run failed.'));
+
+            return {
+                success,
+                output: result.output || '',
+                error,
+                agentId: selection.id,
+                agentLabel: label,
+                durationSec: Math.round((result.durationMs || 0) / 1000),
+                outcome: success
+                    ? `${label} completed the scheduled task.`
+                    : `${label} failed: ${error || 'unknown error'}`,
+            };
+        } finally {
+            cleanupTempFiles(attachmentTempFiles);
+        }
     }
 
     /** Semantic routing recommendation over the live specialist roster. */
@@ -5246,6 +5412,9 @@ class ChatSessionManager extends EventEmitter {
 module.exports = {
     ChatSessionManager,
     CHAT_EVENTS,
+    SCHEDULED_AGENT_DIRECTIVE,
+    SCHEDULED_WRITE_TOOLS,
+    detectApprovalStall,
     normalizeUserInputRequestPayload,
     normalizeUserInputHistoryMessage,
 };

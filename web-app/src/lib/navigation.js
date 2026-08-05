@@ -8,6 +8,7 @@ import {
     DashboardIcon,
     ChatBubbleIcon,
     ClockIcon,
+    CalendarIcon,
     DocumentIcon,
     ExplorerIcon,
     SparkleIcon,
@@ -21,6 +22,7 @@ export const NAV_ITEMS = [
     { label: 'My Agents', to: '/my-agents', Icon: SparkleIcon },
     { label: 'Studio', to: '/studio', Icon: ExplorerIcon },
     { label: 'History', to: '/history', Icon: ClockIcon },
+    { label: 'ScheduleGenie', to: '/scheduler', Icon: CalendarIcon },
     { label: 'Reports', to: '/reports', Icon: DocumentIcon },
 ];
 
@@ -35,6 +37,7 @@ export const PAGE_TITLES = {
     '/my-agents': { title: 'My Agents', subtitle: 'Custom agents from your workspaces' },
     '/studio': { title: 'Agent Studio', subtitle: 'Isolated custom workspaces' },
     '/history': { title: 'Chat History', subtitle: 'Session archive' },
+    '/scheduler': { title: 'Scheduler', subtitle: 'Schedule one-time ticket actions' },
     '/reports': { title: 'Test Reports', subtitle: 'Reporting and quality insights' },
     '/results': { title: 'Test Results', subtitle: 'Detailed run output' },
 };

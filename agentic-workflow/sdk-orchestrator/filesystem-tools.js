@@ -194,9 +194,13 @@ async function requestConfirmation(deps, sessionId, description) {
     // pipeline), deny by default. Trusted automation can opt in via the
     // FILEGENIE_AUTO_APPROVE env flag.
     if (!deps?.chatManager?.requestUserInput) {
-        const autoApprove = String(process.env.FILEGENIE_AUTO_APPROVE || '').toLowerCase() === 'true';
+        // Unattended auto-approve: scheduled/headless agent runs opt in via
+        // deps.autoApproveMutations; trusted automation can also opt in globally via
+        // the FILEGENIE_AUTO_APPROVE env flag.
+        const autoApprove = deps?.autoApproveMutations === true
+            || String(process.env.FILEGENIE_AUTO_APPROVE || '').toLowerCase() === 'true';
         if (autoApprove) {
-            console.warn('[FileGenie] No chatManager for confirmation — FILEGENIE_AUTO_APPROVE=true, proceeding');
+            console.warn('[FileGenie] No chatManager for confirmation — auto-approve enabled, proceeding');
             return true;
         }
         console.warn('[FileGenie] No chatManager for confirmation — failing closed (operation denied)');

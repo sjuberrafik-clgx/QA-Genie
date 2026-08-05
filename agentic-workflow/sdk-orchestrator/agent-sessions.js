@@ -232,7 +232,12 @@ class AgentSessionFactory {
         }
 
         // 1. Load the system prompt — prefer phase-specific override, else load from .agent.md
-        const basePrompt = context.systemPromptOverride || loadAgentPrompt(effectiveRole);
+        let basePrompt = context.systemPromptOverride || loadAgentPrompt(effectiveRole);
+        // Optional suffix appended at the system level (e.g. scheduled-execution override
+        // that instructs the agent to complete unattended without waiting for a reply).
+        if (typeof context.systemPromptSuffix === 'string' && context.systemPromptSuffix.trim()) {
+            basePrompt += `\n\n${context.systemPromptSuffix.trim()}`;
+        }
 
         // 2. Build grounding context if available
         let groundingContext = null;
@@ -294,6 +299,12 @@ class AgentSessionFactory {
             contextStore: context.contextStore || null,
             groundingStore: gStore || null,
         };
+        // Unattended auto-approve for gated Jira/file writes (e.g. scheduled agent
+        // runs that opted in via scheduler.autoApproveAgentActions). No interactive
+        // approver exists at fire time.
+        if (context.autoApproveMutations === true) {
+            toolDeps.autoApproveMutations = true;
+        }
         // Approval routing: when a chatManager + sessionContext are supplied (e.g. a
         // delegated sub-session launched from chat), thread them into toolDeps so
         // gated Jira/file writes PROMPT THE CHAT USER instead of failing closed or
@@ -739,6 +750,7 @@ class AgentSessionFactory {
      * @param {Object} [options]
      * @param {number} [options.timeout=300000] - Timeout in ms (default 5 min)
      * @param {Function} [options.onDelta] - Streaming callback for partial responses
+     * @param {Object[]} [options.attachments] - SDK file attachments ({ type:'file', path, displayName }) for multimodal prompts
      * @returns {Promise<string>} The assistant's complete response
      */
     async sendAndWait(session, prompt, options = {}) {
@@ -790,7 +802,12 @@ class AgentSessionFactory {
         }
 
         try {
-            const result = await session.sendAndWait({ prompt }, timeout);
+            const result = await session.sendAndWait(
+                Array.isArray(options.attachments) && options.attachments.length > 0
+                    ? { prompt, attachments: options.attachments }
+                    : { prompt },
+                timeout
+            );
 
             // The SDK response shape varies across versions. Handle all known forms:
             //   v1: result.data.content  (wrapped payload)
