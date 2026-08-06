@@ -235,6 +235,7 @@ function toPublicAgentDescriptor(agent) {
 class AgentCatalogService {
     constructor(options = {}) {
         this.workspaceRegistry = options.workspaceRegistry || new StudioWorkspaceRegistry(options);
+        this.logger = typeof options.logger === 'function' ? options.logger : null;
     }
 
     listCoreAgents() {
@@ -254,20 +255,40 @@ class AgentCatalogService {
         const includeInactive = options.includeInactive === true;
         const includeDraft = options.includeDraft === true;
         const items = this.listCoreAgents().map(toPublicAgentDescriptor);
-        const workspaces = await this.workspaceRegistry.listWorkspaces();
+
+        // Workspace agents are best-effort: a bad/missing workspace catalog must never
+        // wipe out the always-available core specialists (the whole dropdown would go empty).
+        let workspaces = [];
+        try {
+            workspaces = await this.workspaceRegistry.listWorkspaces();
+        } catch (error) {
+            this._logWarn(`Failed to enumerate studio workspaces; returning core agents only: ${error.message}`);
+            return items;
+        }
 
         for (const workspace of workspaces) {
-            const catalog = await this.workspaceRegistry.getWorkspaceCatalog(workspace.id);
-            for (const agent of catalog.assets.agents || []) {
-                const isPublished = agent.status === 'published';
-                if (!isPublished && !includeDraft) continue;
-                if (isPublished && !agent.isActive && !includeInactive) continue;
-                if (!Array.isArray(agent.surfaces) || !agent.surfaces.includes('chat')) continue;
-                items.push(toPublicAgentDescriptor(this._buildWorkspaceAgentDescriptor(catalog.workspace, agent)));
+            try {
+                const catalog = await this.workspaceRegistry.getWorkspaceCatalog(workspace.id);
+                for (const agent of catalog.assets.agents || []) {
+                    const isPublished = agent.status === 'published';
+                    if (!isPublished && !includeDraft) continue;
+                    if (isPublished && !agent.isActive && !includeInactive) continue;
+                    if (!Array.isArray(agent.surfaces) || !agent.surfaces.includes('chat')) continue;
+                    items.push(toPublicAgentDescriptor(this._buildWorkspaceAgentDescriptor(catalog.workspace, agent)));
+                }
+            } catch (error) {
+                this._logWarn(`Skipping workspace ${workspace?.id || '(unknown)'} in chat agent list: ${error.message}`);
             }
         }
 
         return items;
+    }
+
+    _logWarn(message) {
+        try {
+            if (typeof this.logger === 'function') this.logger(message, 'warn');
+            else console.warn(`[AgentCatalog] ${message}`);
+        } catch { /* logging must never throw */ }
     }
 
     async resolveAgentSelection(options = {}) {
