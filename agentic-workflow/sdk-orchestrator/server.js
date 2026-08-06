@@ -68,6 +68,7 @@ const { createSchedulerActions } = require('./scheduler-actions');
 const { SchedulerEngine } = require('./scheduler-engine');
 const { SchedulerAttachmentStore } = require('./scheduler-attachment-store');
 const { AiTicketDrafter } = require('./ai-ticket-drafter');
+const { startReadinessMonitors } = require('./readiness-monitor-scheduler');
 const {
     loadEnv, isValidTicketId, isValidMode, generateBatchId, truncate, loadWorkflowConfig,
 } = require('./utils');
@@ -651,6 +652,16 @@ async function startServer(options = {}) {
         onJobTerminal: (jobId) => schedulerAttachmentStore.cleanupJob(jobId),
     });
     schedulerEngine.start();
+
+    // ─── Readiness Monitors ─────────────────────────────────────────
+    // Background Jira readiness pollers that auto-send the OH Mobile and AOTF
+    // Release webhooks. Enablement + interval come from env vars
+    // (OH_MOBILE_READINESS_* / AOTF_RELEASE_READINESS_*), overriding the matching
+    // workflow-config.json sections. Baselines silently, then alerts on changes.
+    const readinessMonitors = startReadinessMonitors({
+        config: schedulerConfigRoot,
+        logger: (message, level) => log(message, level),
+    });
 
     // AI ticket drafter — runs BugGenie/TaskGenie in draft-only mode to compose a
     // ticket for human review; the approved draft is later scheduled as a
@@ -4009,6 +4020,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         log(`\n${signal} received. Shutting down...`);
         clearInterval(staleRunWatchdog);
         schedulerEngine.stop();
+        readinessMonitors.stop();
         if (videoUploadCleanupInterval) {
             clearInterval(videoUploadCleanupInterval);
         }

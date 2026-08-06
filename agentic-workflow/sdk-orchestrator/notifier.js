@@ -29,6 +29,36 @@ const NOTIFY_EVENTS = {
     SELF_HEAL_FAILED: 'self_heal_failed',
 };
 
+function exportValue(value) {
+    if (value === null || value === undefined || value === '' || value === 'Not set') {
+        return 'N/A';
+    }
+    return String(value);
+}
+
+function buildReadinessExport(report, title) {
+    const sourceName = report.release?.name
+        || title.replace(/\s+tickets ready for QA$/i, '')
+        || 'OH-Mobile';
+    const safeName = sourceName
+        .replace(/[^a-zA-Z0-9._ -]/g, '_')
+        .trim()
+        .replace(/\s+/g, '-');
+
+    return {
+        fileName: `${safeName}-QA-Readiness.csv`,
+        rows: report.tickets.map(ticket => ({
+            'ISSUE TYPE': exportValue(ticket.issueType),
+            'Issue key': exportValue(ticket.issueKey),
+            Summary: exportValue(ticket.summary),
+            Status: exportValue(ticket.status).replace(/^-\s*|\s*-$/g, ''),
+            'Related Modules': exportValue(ticket.relatedModules),
+            Assignee: exportValue(ticket.assignee),
+            'Story Points': exportValue(ticket.storyPoints),
+        })),
+    };
+}
+
 // ─── Notifier ───────────────────────────────────────────────────────────────
 
 class Notifier {
@@ -42,8 +72,13 @@ class Notifier {
     constructor(options = {}) {
         loadEnv();
 
-        this.slackUrl = options.slackWebhookUrl || process.env.SLACK_WEBHOOK_URL || null;
-        this.teamsUrl = options.teamsWebhookUrl || process.env.TEAMS_WEBHOOK_URL || null;
+        const useDefaultEnvironmentWebhooks = options.useDefaultEnvironmentWebhooks !== false;
+        this.slackUrl = options.slackWebhookUrl
+            || (useDefaultEnvironmentWebhooks ? process.env.SLACK_WEBHOOK_URL : null)
+            || null;
+        this.teamsUrl = options.teamsWebhookUrl
+            || (useDefaultEnvironmentWebhooks ? process.env.TEAMS_WEBHOOK_URL : null)
+            || null;
         this.enabled = options.enabled !== false;
         this.verbose = options.verbose || false;
 
@@ -108,6 +143,46 @@ class Notifier {
                 this._log(`Teams notification failed: ${err.message}`, 'warn')
             );
         }
+    }
+
+    /**
+     * Send an OH Mobile readiness report. At least one configured channel must
+     * accept the message before the monitor advances its deduplication state.
+     */
+    async sendTicketReadinessReport(report) {
+        if (!this.enabled) throw new Error('Notifications are disabled.');
+        const deliveries = [];
+
+        if (this.slackUrl) {
+            deliveries.push({ channel: 'slack', send: () => this._sendSlackTicketReport(report) });
+        }
+        if (this.teamsUrl) {
+            deliveries.push({ channel: 'teams', send: () => this._sendTeamsTicketReport(report) });
+        }
+        if (deliveries.length === 0) {
+            throw new Error('Set SLACK_WEBHOOK_URL or TEAMS_WEBHOOK_URL to deliver ticket readiness reports.');
+        }
+
+        const results = await Promise.allSettled(deliveries.map(delivery => delivery.send()));
+        const acceptedChannels = deliveries
+            .filter((_, index) => results[index].status === 'fulfilled')
+            .map(delivery => delivery.channel);
+        const failures = results
+            .map((result, index) => ({ result, channel: deliveries[index].channel }))
+            .filter(entry => entry.result.status === 'rejected');
+
+        failures.forEach(entry => {
+            this._log(`${entry.channel} readiness notification failed: ${entry.result.reason.message}`, 'warn');
+        });
+        if (acceptedChannels.length === 0) {
+            throw new Error('Ticket readiness notification failed for every configured channel.');
+        }
+
+        this._log(
+            `Ticket readiness webhook accepted by ${acceptedChannels.join(', ')} (${report.tickets.length} ticket(s)); ` +
+            'downstream workflow delivery is asynchronous and cannot be confirmed by this response.'
+        );
+        return { acceptedChannels, deliveredChannels: acceptedChannels, ticketCount: report.tickets.length };
     }
 
     // ─── Message Formatting ─────────────────────────────────────────
@@ -255,6 +330,136 @@ class Notifier {
         if (!response.ok) {
             throw new Error(`Teams webhook returned ${response.status}`);
         }
+    }
+
+    async _sendSlackTicketReport(report) {
+        const title = report.title || 'OH Mobile tickets ready for QA';
+        const scope = report.scopeLabel ? ` in ${report.scopeLabel}` : '';
+        const payload = {
+            text: `*${title}*\n${report.tickets.length} new status entry or transition (${report.totalMatching} currently matching${scope}).`,
+            attachments: report.tickets.map(ticket => ({
+                color: ticket.status.includes('UAT') ? '#0052CC' : '#36A64F',
+                title: `${ticket.issueKey} - ${ticket.summary}`,
+                title_link: ticket.url,
+                fields: [
+                    { title: 'ISSUE TYPE', value: ticket.issueType, short: true },
+                    { title: 'Issue key', value: `<${ticket.url}|${ticket.issueKey}>`, short: true },
+                    { title: 'Summary', value: ticket.summary, short: false },
+                    { title: 'Status', value: ticket.status, short: true },
+                    { title: 'Related Modules', value: ticket.relatedModules, short: true },
+                    { title: 'Assignee', value: ticket.assignee, short: true },
+                    { title: 'Story Points', value: ticket.storyPoints, short: true },
+                ],
+                footer: 'OH Mobile QA readiness monitor',
+                ts: Math.floor(Date.now() / 1000),
+            })),
+        };
+        const response = await fetch(this.slackUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (!response.ok) throw new Error(`Slack webhook returned ${response.status}`);
+    }
+
+    async _sendTeamsTicketReport(report) {
+        const title = report.title || 'OH Mobile tickets ready for QA';
+        const scope = report.scopeLabel ? ` in ${report.scopeLabel}` : '';
+        const columns = [
+            { title: 'TYPE', field: 'issueType', width: 2 },
+            { title: 'KEY', field: 'issueKey', width: 2 },
+            { title: 'SUMMARY', field: 'summary', width: 6 },
+            { title: 'STATUS', field: 'status', width: 3 },
+            { title: 'MODULES', field: 'relatedModules', width: 3 },
+            { title: 'ASSIGNEE', field: 'assignee', width: 4 },
+            { title: 'SP', field: 'storyPoints', width: 2 },
+        ];
+        const tableCell = (text, options = {}) => ({
+            type: 'TableCell',
+            items: [{
+                type: 'TextBlock',
+                text,
+                wrap: true,
+                size: 'Small',
+                weight: options.weight || 'Default',
+                color: options.color || 'Default',
+            }],
+            ...(options.style ? { style: options.style } : {}),
+        });
+        const headerCell = text => ({
+            type: 'TableCell',
+            style: 'emphasis',
+            items: [{
+                type: 'TextBlock',
+                text,
+                wrap: false,
+                maxLines: 1,
+                spacing: 'None',
+                size: 'Small',
+                weight: 'Bolder',
+                color: 'Default',
+            }],
+        });
+        const payload = {
+            type: 'message',
+            export: buildReadinessExport(report, title),
+            attachments: [{
+                contentType: 'application/vnd.microsoft.card.adaptive',
+                contentUrl: null,
+                content: {
+                    type: 'AdaptiveCard',
+                    version: '1.5',
+                    $schema: 'http://adaptivecards.io/schemas/adaptive-card.json',
+                    msteams: { width: 'Full' },
+                    body: [
+                        {
+                            type: 'TextBlock',
+                            text: title,
+                            size: 'Large',
+                            weight: 'Bolder',
+                            color: 'Accent',
+                        },
+                        {
+                            type: 'TextBlock',
+                            text: `${report.tickets.length} new status entry or transition (${report.totalMatching} currently matching${scope}).`,
+                            wrap: true,
+                            spacing: 'Small',
+                        },
+                        {
+                            type: 'Table',
+                            firstRowAsHeaders: true,
+                            showGridLines: true,
+                            gridStyle: 'Accent',
+                            columns: columns.map(column => ({ width: column.width })),
+                            rows: [
+                                {
+                                    type: 'TableRow',
+                                    cells: columns.map(column => headerCell(column.title)),
+                                },
+                                ...report.tickets.map(ticket => ({
+                                    type: 'TableRow',
+                                    cells: columns.map(column => tableCell(
+                                        column.field === 'issueKey'
+                                            ? `[${ticket.issueKey}](${ticket.url})`
+                                            : column.field === 'status'
+                                                ? ticket.status.replace(/^-\s*|\s*-$/g, '')
+                                                : ticket[column.field] === 'Not set'
+                                                    ? 'N/A'
+                                                    : ticket[column.field]
+                                    )),
+                                })),
+                            ],
+                        },
+                    ],
+                },
+            }],
+        };
+        const response = await fetch(this.teamsUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (!response.ok) throw new Error(`Teams webhook returned ${response.status}`);
     }
 
     // ─── Logging ────────────────────────────────────────────────────
