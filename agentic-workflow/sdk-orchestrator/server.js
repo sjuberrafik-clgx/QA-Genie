@@ -433,7 +433,7 @@ async function startServer(options = {}) {
         bufferLimit: parseInt(process.env.TERMINAL_BUFFER_LIMIT, 10) || 1200,
     });
     const studioWorkspaceRegistry = new StudioWorkspaceRegistry();
-    const agentCatalog = new AgentCatalogService({ workspaceRegistry: studioWorkspaceRegistry });
+    const agentCatalog = new AgentCatalogService({ workspaceRegistry: studioWorkspaceRegistry, logger: (message, level) => log(message, level) });
     const agentTemplateRegistry = new AgentTemplateRegistry();
     const mcpConnectionManager = new McpConnectionManager();
     const agentAnalyticsStore = new AgentAnalyticsStore();
