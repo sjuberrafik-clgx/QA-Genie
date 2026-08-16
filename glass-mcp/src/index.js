@@ -1,47 +1,40 @@
 'use strict';
 /**
- * Glass MCP — public API (perception module, first increment).
- * The standalone, universal browser MCP server. Affordance-first see(),
- * durable handles, deterministic + auditable.
+ * Glass MCP — public API. A standalone, universal, lightweight browser MCP server
+ * driven directly over the Chrome DevTools Protocol (raw CDP; zero Playwright at
+ * runtime). Affordance-first see(), durable content-addressed handles, a bounded
+ * verb algebra. Deterministic by default; cognition is opt-in and audited.
  */
 const handle = require('./handle');
 const salience = require('./perception/salience');
 const pack = require('./perception/pack');
 const { glassExtract } = require('./perception/extract');
-const { Perceiver } = require('./perception/see');
-const { resolveHandle, resolveTarget, scopeFor } = require('./resolve');
-const { BrowserSession, loadChromium } = require('./session');
-const { openVerb } = require('./verbs/open');
-const { doVerb } = require('./verbs/do');
-const { readVerb } = require('./verbs/read');
-const { waitVerb } = require('./verbs/wait');
-const { netVerb } = require('./verbs/net');
-const { devtoolVerb } = require('./verbs/devtool');
-const { scriptVerb } = require('./verbs/script');
-const { buildTools } = require('./tools');
-const { start } = require('./server');
+const { senseVerb, enrichSeeReceipt, enrichDoReceipt } = require('./verbs/sense');
+const cognition = require('./cognition');
+const { buildToolsForDriver } = require('./driver/driver-tools');
+const { createGlassServer, start } = require('./server');
+const { OperationScheduler } = require('./scheduler');
+const { createDriver, resolveDriverKind, CdpDriver, CdpBrowser } = require('./driver');
 
 module.exports = {
-    // server + session
+    // server
     start,
-    BrowserSession,
-    loadChromium,
-    buildTools,
-    // verbs
-    openVerb,
-    doVerb,
-    readVerb,
-    waitVerb,
-    netVerb,
-    devtoolVerb,
-    scriptVerb,
+    createGlassServer,
+    OperationScheduler,
+    // driver (raw CDP) + MCP tool descriptors
+    createDriver,
+    resolveDriverKind,
+    CdpDriver,
+    CdpBrowser,
+    buildToolsForDriver,
+    // cognition kernel (pure, driver-neutral, shareable)
+    senseVerb,
+    enrichSeeReceipt,
+    enrichDoReceipt,
+    cognition,
+    Cognition: cognition.Cognition,
     // perception
-    Perceiver,
     glassExtract,
-    // resolution
-    resolveHandle,
-    resolveTarget,
-    scopeFor,
     // handle codec
     encodeHandle: handle.encodeHandle,
     decodeHandle: handle.decodeHandle,

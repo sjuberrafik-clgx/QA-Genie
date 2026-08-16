@@ -179,6 +179,18 @@ loadEnvVars();
 function createCustomTools(defineTool, agentName, deps = {}) {
     const { learningStore, config, contextStore, groundingStore } = deps;
     const tools = [];
+    const scenarioSlug = (value) => String(value || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+    const baseExplorationPath = (ticketId) => path.join(
+        __dirname, '..', 'exploration-data', `${ticketId}-exploration.json`
+    );
+    const explorationPath = (ticketId, scenarioId) => {
+        const slug = scenarioSlug(scenarioId || deps.scenarioSlug || deps.scenarioId);
+        if (!slug) return baseExplorationPath(ticketId);
+        return path.join(__dirname, '..', 'exploration-data', `${ticketId}-${slug}-exploration.json`);
+    };
 
     tools.push(defineTool('commit_and_push_repo_changes', {
         description:
@@ -689,9 +701,9 @@ function createCustomTools(defineTool, agentName, deps = {}) {
             };
         }
 
-        const allowedSources = new Set(['mcp-live-snapshot', 'mcp-snapshot']);
+        const allowedSources = new Set(['glass-see', 'mcp-live-snapshot', 'mcp-snapshot']);
         if (!allowedSources.has(data.source)) {
-            errors.push('source must be "mcp-live-snapshot" or "mcp-snapshot"');
+            errors.push('source must be "glass-see", "mcp-live-snapshot", or "mcp-snapshot"');
         }
 
         if (!Array.isArray(data.snapshots) || data.snapshots.length === 0) {
@@ -817,13 +829,18 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         type: 'string',
                         description: 'Jira ticket ID (e.g., "AOTF-16339")',
                     },
+                    scenarioId: {
+                        type: 'string',
+                        description: 'Optional scenario ID; defaults to the current pipeline scenario',
+                    },
                 },
                 required: ['ticketId'],
             },
-            handler: async ({ ticketId }) => {
+            handler: async ({ ticketId, scenarioId }) => {
                 try {
-                    const explorationDir = path.join(__dirname, '..', 'exploration-data');
-                    const explorationFile = path.join(explorationDir, `${ticketId}-exploration.json`);
+                    const scenarioFile = explorationPath(ticketId, scenarioId);
+                    const fallbackFile = baseExplorationPath(ticketId);
+                    const explorationFile = fs.existsSync(scenarioFile) ? scenarioFile : fallbackFile;
 
                     if (!fs.existsSync(explorationFile)) {
                         return JSON.stringify({
@@ -849,7 +866,9 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                     const normalized = validation.normalized;
                     return JSON.stringify({
                         found: true,
+                        path: explorationFile,
                         source: normalized.source,
+                        scenarioId: normalized.scenarioId || scenarioId || deps.scenarioId || null,
                         timestamp: normalized.timestamp,
                         pagesVisited: normalized.pagesVisited,
                         selectorCount: normalized.selectorCount,
@@ -1097,6 +1116,10 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         type: 'string',
                         description: 'Jira ticket ID',
                     },
+                    scenarioId: {
+                        type: 'string',
+                        description: 'Optional scenario ID; defaults to the current pipeline scenario',
+                    },
                     explorationData: {
                         type: 'string',
                         description: 'JSON string of exploration data to save',
@@ -1104,10 +1127,15 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                 },
                 required: ['ticketId', 'explorationData'],
             },
-            handler: async ({ ticketId, explorationData }) => {
+            handler: async ({ ticketId, scenarioId, explorationData }) => {
+                let tempPath = null;
                 try {
                     const parsed = JSON.parse(explorationData);
-                    const validation = validateExplorationPayload(parsed, ticketId);
+                    const resolvedScenarioId = scenarioId || deps.scenarioId || parsed.scenarioId || null;
+                    const validation = validateExplorationPayload({
+                        ...parsed,
+                        scenarioId: resolvedScenarioId,
+                    }, ticketId);
 
                     if (!validation.valid) {
                         return JSON.stringify({
@@ -1125,18 +1153,26 @@ function createCustomTools(defineTool, agentName, deps = {}) {
                         fs.mkdirSync(explorationDir, { recursive: true });
                     }
 
-                    const filePath = path.join(explorationDir, `${ticketId}-exploration.json`);
-                    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+                    const filePath = explorationPath(ticketId, resolvedScenarioId);
+                    tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+                    fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf-8');
+                    fs.renameSync(tempPath, filePath);
+                    tempPath = null;
 
                     return JSON.stringify({
                         saved: true,
                         path: filePath,
+                        scenarioId: resolvedScenarioId,
                         selectorCount: data.selectorCount || 0,
                         pagesVisited: data.pagesVisited || [],
                         warnings: validation.warnings,
                     });
                 } catch (error) {
                     return JSON.stringify({ saved: false, error: error.message });
+                } finally {
+                    if (tempPath && fs.existsSync(tempPath)) {
+                        fs.unlinkSync(tempPath);
+                    }
                 }
             },
         }));

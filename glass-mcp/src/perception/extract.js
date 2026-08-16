@@ -92,10 +92,14 @@ function glassExtract(opts) {
         const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
         if (text) return text;
         const title = el.getAttribute('title');
-        return title ? title.trim() : '';
+        if (title && title.trim()) return title.trim();
+        // Icon-only affordance: derive a name from the glyph (svg <title>/<use>, icon-font class, data-icon).
+        const icon = iconName(el);
+        if (icon) return icon;
+        return '';
     }
 
-    function classify(el, tag, role, interactive) {
+    function classify(el, tag, role, interactive, iconHint) {
         const cls = el.className && el.className.baseVal !== undefined ? el.className.baseVal : (el.className || '');
         if (tag === 'canvas' || /\b(mapboxgl|leaflet|maplibregl|gm-style|ol-viewport)\b/.test(String(cls))) {
             return { kind: 'map', act: 'click' };
@@ -114,8 +118,9 @@ function glassExtract(opts) {
         if (role === 'tab') return { kind: 'tab', act: 'click' };
         if (role === 'menuitem' || role === 'menu') return { kind: 'menu', act: 'click' };
         if (role === 'button' || tag === 'button' || tag === 'summary') return { kind: 'button', act: 'click' };
-        // interactive container with no standard role = the "card" pattern
-        if (interactive) return { kind: 'card', act: 'click' };
+        // interactive container with no standard role: an icon glyph reads as a button,
+        // a larger clickable region reads as the "card" pattern.
+        if (interactive) return { kind: iconHint ? 'button' : 'card', act: 'click' };
         return { kind: 'text', act: 'read' };
     }
 
@@ -123,10 +128,105 @@ function glassExtract(opts) {
         if (INTERACTIVE_TAGS.has(tag)) return !(tag === 'a' && !el.hasAttribute('href'));
         if (INTERACTIVE_ROLES.has(role)) return true;
         if (el.hasAttribute('onclick')) return true;
+        // Common JS-framework click affordance markers (no listener introspection needed).
+        if (el.hasAttribute('data-action') || el.hasAttribute('data-toggle') || el.hasAttribute('data-click')) return true;
+        const hp = el.getAttribute('aria-haspopup');
+        if (hp && hp !== 'false') return true;
         const ti = el.getAttribute('tabindex');
         if (ti != null && parseInt(ti, 10) >= 0) return true;
         if (el.isContentEditable) return true;
         return false;
+    }
+
+    // ── Deterministic clickable-icon heuristics (no vision, no CDP) ──
+    function classString(el) {
+        const raw = el.className && el.className.baseVal !== undefined ? el.className.baseVal : (el.className || '');
+        return String(raw);
+    }
+    // Icon-font / layout tokens that are NOT the icon's meaning (skip when deriving a name).
+    const SKIP_ICON_TOKEN = /^(fa|fas|far|fal|fab|fad|solid|regular|light|thin|duotone|brands|fw|lg|sm|md|xs|xl|1x|2x|3x|4x|5x|spin|pulse|border|inverse|stack|pull-left|pull-right|btn|button|wrapper|container|inline|block|left|right|center|small|large|default|primary|secondary|active|disabled|selected|open|closed|show|hide|hidden|visible|circle|square|round|rounded|link|text)$/i;
+    function selfIsIcon(el) {
+        const tag = el.tagName ? el.tagName.toLowerCase() : '';
+        if (tag === 'svg' || tag === 'i') return true;
+        return /(^|\s)(icon|material-icons|glyphicon)(\s|$)|icon[-_]|[-_]icon(\s|$)|(^|\s)fa-/i.test(classString(el));
+    }
+    function containsIcon(el) {
+        const kids = el.children || [];
+        for (let i = 0; i < kids.length && i < 8; i++) if (selfIsIcon(kids[i])) return true;
+        return false;
+    }
+    function isIconic(el) { return selfIsIcon(el) || containsIcon(el); }
+    const SUGGESTIVE = /(^|[-_\s])(btn|button|clickable|close|dismiss|menu|toggle|expand|collapse|chevron|caret|arrow|hamburger|kebab|action|trigger)([-_\s]|$)/i;
+    function suggestiveClickable(el) {
+        if (el.hasAttribute('data-action') || el.hasAttribute('data-toggle') || el.hasAttribute('data-click')) return true;
+        return SUGGESTIVE.test(classString(el));
+    }
+    // Gate: bound getComputedStyle to leaf / icon-ish / suggestive elements only (perf).
+    function maybeClickable(el) {
+        const n = el.children ? el.children.length : 0;
+        return n <= 3 || isIconic(el) || suggestiveClickable(el);
+    }
+    // cursor:pointer that ORIGINATES at el (parent not pointer) = the clickable boundary.
+    function cursorClickable(el) {
+        let cs;
+        try { cs = getComputedStyle(el); } catch (e) { return false; }
+        if (!cs || cs.cursor !== 'pointer' || cs.pointerEvents === 'none') return false;
+        const p = el.parentElement;
+        if (p) {
+            try { const ps = getComputedStyle(p); if (ps && ps.cursor === 'pointer') return false; } catch (e) { /* ignore */ }
+        }
+        return true;
+    }
+    // Phase 3: computed-style visibility (display:none is already 0x0-filtered).
+    function cssHidden(el) {
+        let cs;
+        try { cs = getComputedStyle(el); } catch (e) { return false; }
+        if (!cs) return false;
+        if (cs.visibility === 'hidden' || cs.visibility === 'collapse') return true;
+        if (cs.display === 'none') return true;
+        if (parseFloat(cs.opacity) === 0) return true;
+        return false;
+    }
+    // Phase 4: deterministic occlusion via hit-test (top document + in-viewport only).
+    function occludedAt(el, rect) {
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        if (cx < 0 || cy < 0 || cx >= (window.innerWidth || 0) || cy >= (window.innerHeight || 0)) return false;
+        let top;
+        try { top = document.elementFromPoint(cx, cy); } catch (e) { return false; }
+        if (!top || top === el) return false;
+        if (el.contains(top) || top.contains(el)) return false;
+        return true;
+    }
+    function humanize(s) {
+        return String(s || '').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+    }
+    // Derive a human name for an icon-only affordance (svg <title>/<use>, data-icon, icon-font class).
+    function iconName(el) {
+        const svg = (el.tagName && el.tagName.toLowerCase() === 'svg') ? el : (el.querySelector && el.querySelector('svg'));
+        if (svg && svg.querySelector) {
+            const t = svg.querySelector('title');
+            if (t && t.textContent && t.textContent.trim()) return t.textContent.trim().slice(0, 40);
+            const use = svg.querySelector('use');
+            if (use) {
+                const href = use.getAttribute('href') || use.getAttribute('xlink:href') || '';
+                const m = href.match(/#(?:icon[-_])?([a-z0-9][a-z0-9-]*)/i);
+                if (m) return humanize(m[1]);
+            }
+        }
+        const di = el.getAttribute('data-icon');
+        if (di) return humanize(di);
+        let cls = classString(el);
+        if (el.querySelector) {
+            const ic = el.querySelector('i[class], span[class], svg[class], use');
+            if (ic) cls += ' ' + classString(ic);
+        }
+        const re = /(?:^|\s)(?:fa-|icon-|glyphicon-)([a-z0-9-]+)/ig;
+        let m;
+        while ((m = re.exec(cls))) { if (!SKIP_ICON_TOKEN.test(m[1])) return humanize(m[1]); }
+        const m2 = cls.match(/(?:^|\s)icon[-_]([a-z0-9]+(?:[-_][a-z0-9]+)*)/i);
+        if (m2 && !SKIP_ICON_TOKEN.test(m2[1])) return humanize(m2[1]);
+        return '';
     }
 
     function isDynamicToken(t) {
@@ -179,10 +279,39 @@ function glassExtract(opts) {
         const testid = el.getAttribute('data-testid') || el.getAttribute('data-test-id') || el.getAttribute('data-qa');
         if (testid) fp.testid = testid;
         if (el.id && !isDynamicToken(el.id)) fp.id = el.id;
+        if ((el.tagName.toLowerCase() === 'input' || el.tagName.toLowerCase() === 'textarea') && el.placeholder) {
+            fp.placeholder = el.placeholder;
+        }
         const href = el.getAttribute('href');
         if (href && href.length < 64) fp.href = href;
         if (el.tagName.toLowerCase() === 'input' && el.type) fp.type = el.type;
         return fp;
+    }
+
+    function frameSelector(el) {
+        const testAttrs = ['data-testid', 'data-test-id', 'data-qa'];
+        for (const attr of testAttrs) {
+            const value = el.getAttribute(attr);
+            if (value) return `iframe[${attr}="${CSS.escape(value)}"]`;
+        }
+        if (el.id && !isDynamicToken(el.id)) return 'iframe#' + CSS.escape(el.id);
+        if (el.name) return 'iframe[name="' + CSS.escape(el.name) + '"]';
+        const parent = el.parentElement;
+        if (!parent) return 'iframe';
+        const siblings = Array.from(parent.children).filter((candidate) => candidate.tagName && candidate.tagName.toLowerCase() === 'iframe');
+        const index = siblings.indexOf(el);
+        return index >= 0 ? `iframe:nth-of-type(${index + 1})` : 'iframe';
+    }
+
+    function documentTokenFor(root, framePath) {
+        const doc = root && root.nodeType === 9 ? root : (root && root.ownerDocument);
+        if (!doc) return null;
+        const view = doc.defaultView;
+        let url = doc.URL || '';
+        let timeOrigin = 0;
+        try { if (view && view.location) url = view.location.href; } catch (e) { /* cross-origin guard */ }
+        try { if (view && view.performance) timeOrigin = view.performance.timeOrigin || 0; } catch (e) { /* unavailable */ }
+        return fnv1a(`${framePath.join('>')}|${url}|${timeOrigin}`);
     }
 
     function stateOf(el, kind) {
@@ -204,9 +333,10 @@ function glassExtract(opts) {
     const out = [];
     let docCounter = 0;
 
-    function walk(root, framePath, depth) {
+    function walk(root, framePath, depth, isTop) {
         if (out.length >= MAX || depth > MAX_FRAME_DEPTH) return;
         const docId = 'd' + (docCounter++);
+        const documentToken = documentTokenFor(root, framePath);
         const els = root.querySelectorAll ? root.querySelectorAll('*') : [];
         for (let i = 0; i < els.length && out.length < MAX; i++) {
             const el = els[i];
@@ -214,14 +344,14 @@ function glassExtract(opts) {
             if (!tag || tag === 'script' || tag === 'style' || tag === 'noscript' || tag === 'template') continue;
 
             // descend shadow root
-            if (el.shadowRoot) walk(el.shadowRoot, framePath, depth);
+            if (el.shadowRoot) walk(el.shadowRoot, framePath, depth, false);
             // descend same-origin iframe
             if (tag === 'iframe') {
                 let childDoc = null;
                 try { childDoc = el.contentDocument; } catch (e) { childDoc = null; }
-                if (childDoc) {
-                    const sel = el.id ? 'iframe#' + el.id : (el.name ? 'iframe[name="' + el.name + '"]' : 'iframe');
-                    walk(childDoc, framePath.concat(sel), depth + 1);
+                if (childDoc && childDoc.documentElement) {
+                    const sel = frameSelector(el);
+                    walk(childDoc, framePath.concat(sel), depth + 1, false);
                 }
                 continue;
             }
@@ -229,13 +359,21 @@ function glassExtract(opts) {
             const type = (el.getAttribute && el.getAttribute('type')) || el.type || '';
             const role = roleOf(el, tag, type);
             if (role === 'none' || role === 'presentation') continue;
-            const interactive = isInteractive(el, tag, role);
+            let interactive = isInteractive(el, tag, role);
             const isHeading = /^h[1-6]$/.test(tag) || role === 'heading';
             const isMapMedia = tag === 'canvas' || tag === 'img' || tag === 'video';
+            // Deterministic clickable-icon heuristic: catch JS-bound glyphs/divs that carry no
+            // DOM interactivity marker but present a pointer cursor at their own boundary.
+            let iconHint = false;
+            if (!interactive && !isHeading && !isMapMedia && !INTERACTIVE_ROLES.has(role)
+                && maybeClickable(el) && cursorClickable(el)) {
+                interactive = true;
+                iconHint = isIconic(el);
+            }
             // EMIT only actions + key text (not every div/span)
             if (!interactive && !isHeading && !(INTERACTIVE_ROLES.has(role)) && !isMapMedia) continue;
 
-            const { kind, act } = classify(el, tag, role, interactive);
+            const { kind, act } = classify(el, tag, role, interactive, iconHint);
             if (kind === 'media' && !interactive) {
                 // only emit media if it carries a name (alt) — skip decorative
                 if (!(el.alt && el.alt.trim())) continue;
@@ -243,25 +381,28 @@ function glassExtract(opts) {
             let rect;
             try { rect = el.getBoundingClientRect(); } catch (e) { rect = { width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 }; }
             if (rect.width === 0 && rect.height === 0 && !isHeading) continue; // not rendered
+            if (!isHeading && cssHidden(el)) continue; // Phase 3: drop visibility:hidden / opacity:0 / pointer-events:none
 
             const name = accessibleName(el).replace(/\s+/g, ' ').trim().slice(0, 80);
+            const vp = inViewport(rect);
             out.push({
                 role, name, tag, kind, act,
                 sph: structuralHash(el),
                 fp: fingerprint(el),
                 state: stateOf(el, kind),
-                vp: inViewport(rect),
-                occluded: false,
+                vp: vp,
+                occluded: (isTop && vp) ? occludedAt(el, rect) : false,
                 region: regionOf(el),
                 interactable: interactive,
                 nameQuality: nameQuality(name, kind),
                 framePath: framePath,
                 docId: docId,
+                documentToken: documentToken,
             });
         }
     }
 
-    walk(document, [], 0);
+    walk(document, [], 0, true);
 
     return {
         candidates: out,

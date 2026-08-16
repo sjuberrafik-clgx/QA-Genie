@@ -2489,7 +2489,10 @@ class ChatSessionManager extends EventEmitter {
                         command: 'node',
                         args: [glassServerPath],
                         tools: ['*'],
-                        env: { GLASS_HEADLESS: process.env.MCP_HEADLESS || 'true' },
+                        env: {
+                            GLASS_DRIVER: process.env.GLASS_DRIVER || 'cdp',
+                            GLASS_HEADLESS: process.env.MCP_HEADLESS || 'true',
+                        },
                     };
                     console.log('[ChatManager] 🪟 Glass MCP enabled (8-verb surface) — unified-automation skipped for this session');
                 }

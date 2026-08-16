@@ -1092,6 +1092,7 @@ class PipelineRunner {
             // NOTE: In SDK context, MCP tools use RAW names without VS Code prefix.
             // unified_navigate (NOT mcp_unified-autom_unified_navigate)
             // unified_snapshot (NOT mcp_unified-autom_unified_snapshot)
+            const glassMode = process.env.GLASS_MCP_ENABLED !== 'false';
             const prompt =
                 `Generate a Playwright automation script for ticket ${context.ticketId}.\n\n` +
                 'RUN INPUT STRATEGY:\n' +
@@ -1105,71 +1106,35 @@ class PipelineRunner {
                     ? `MISSION SCENARIO:\n- Scenario ID: ${context.scenarioId}\n- Scenario Name: ${context.scenarioName || context.scenarioId}\n- Auth State: ${context.authState}\n- Generate and validate ONLY this scenario branch.\n- Authenticated branch: use existing framework login/business functions and validate post-login behavior.\n- Unauthenticated branch: do not perform login unless the application redirects to an auth wall that must be asserted.\n\n`
                     : '') +
                 'MANDATORY STEPS (in this exact order):\n' +
-                (process.env.GLASS_MCP_ENABLED !== 'false'
-                    ? '🪟 GLASS MODE (ACTIVE) — use the 8 Glass verbs, NOT the unified_* tools named below (they map 1:1):\n' +
-                      '  • open(url) = navigate.  FIRST call MUST be open(url).\n' +
-                      '  • see() = perceive the page as a ranked affordance menu with DURABLE HANDLES (replaces snapshot + get_by_*). Pass those handles straight to do/read.\n' +
-                      '  • do({target,action}) = click/type/fill/select/check/hover/press/upload/screenshot.\n' +
-                      '  • read({what,target}) = text/value/attribute/html/table, or page url/title (assertion data).\n' +
-                      '  • wait({for}) · net · devtool (CDP passthrough) · script (in-page JS). Never guess selectors — only use handles from see().\n' +
-                      '  MIN DEPTH before writing a spec: ≥1 see(), ≥1 read() for an assertion value, ≥1 navigation check (read{what:"url"} or wait{for:"url"}). Save exploration with source "glass-see".\n\n'
-                    : '') +
-                `0. FIRST: Navigate to the application using unified_navigate to ${context.appUrl || 'the resolved framework baseUrl'} (or unified_execute_exploration with an explicit navigate step)\n` +
-                '1. Take accessibility snapshots using unified_snapshot\n' +
-                '2. Validate key elements with SEMANTIC selectors (unified_get_by_role, unified_get_by_test_id, unified_get_by_label, unified_get_by_text)\n' +
-                '3. Extract REAL content for assertions (unified_get_text_content, unified_get_attribute, unified_get_input_value)\n' +
-                '4. Verify navigation state (unified_get_page_url or unified_expect_url)\n' +
-                '5. Navigate through ALL pages in the test flow, snapshot each one, repeat steps 2-4\n' +
-                frameworkDiscoveryStep +
-                '7. Save exploration data using save_exploration_data custom tool\n' +
-                scriptBuildStep +
-                '9. Validate the script using validate_generated_script\n\n' +
-                'AVAILABLE MCP TOOLS — Navigation & Page:\n' +
-                '- unified_navigate: Navigate to a URL\n' +
-                '- unified_navigate_back / unified_navigate_forward: History navigation\n' +
-                '- unified_reload: Reload current page\n' +
-                '- unified_get_page_url: Get current URL (for assertions)\n' +
-                '- unified_get_page_title: Get page title (for assertions)\n\n' +
-                'AVAILABLE MCP TOOLS — Snapshot & Discovery:\n' +
-                '- unified_snapshot: Capture full accessibility tree with element refs\n' +
-                '- unified_get_by_role: Find element by ARIA role + name (BEST for buttons, links, headings)\n' +
-                '- unified_get_by_test_id: Find element by data-testid (MOST STABLE)\n' +
-                '- unified_get_by_label: Find element by label text (BEST for form fields)\n' +
-                '- unified_get_by_text: Find element by visible text\n' +
-                '- unified_get_by_placeholder: Find element by placeholder text\n' +
-                '- unified_generate_locator: Auto-generate best locator for an element\n\n' +
-                'AVAILABLE MCP TOOLS — Content Extraction (for assertions):\n' +
-                '- unified_get_text_content: Extract text content from element\n' +
-                '- unified_get_inner_text: Extract rendered text only\n' +
-                '- unified_get_attribute: Extract element attribute (href, class, data-*)\n' +
-                '- unified_get_input_value: Extract current input field value\n\n' +
-                'AVAILABLE MCP TOOLS — Element State:\n' +
-                '- unified_is_visible / unified_is_hidden: Check element visibility\n' +
-                '- unified_is_enabled / unified_is_disabled: Check element interactability\n' +
-                '- unified_is_checked: Check checkbox/radio state\n' +
-                '- unified_is_editable: Check field editability\n\n' +
-                'AVAILABLE MCP TOOLS — Interaction:\n' +
-                '- unified_click: Click element\n' +
-                '- unified_type: Type text (triggers autocomplete)\n' +
-                '- unified_fill_form: Fill form fields\n' +
-                '- unified_clear_input: Clear input field\n' +
-                '- unified_select_option: Select dropdown option\n' +
-                '- unified_check / unified_uncheck: Toggle checkboxes\n' +
-                '- unified_press_key: Press keyboard key (Enter, Escape, Tab)\n' +
-                '- unified_scroll_into_view: Scroll element into view before interacting\n\n' +
-                'AVAILABLE MCP TOOLS — Waits & Assertions:\n' +
-                '- unified_wait_for_element: Wait for element state (visible/hidden/attached)\n' +
-                '- unified_wait_for: Wait for text/element/time\n' +
-                '- unified_expect_url: Assert URL pattern\n' +
-                '- unified_expect_title: Assert page title\n' +
-                '- unified_expect_element_text: Assert element text content\n' +
-                '- unified_expect_element_attribute: Assert element attribute\n' +
-                '- unified_verify_text_visible: Verify text is visible on page\n\n' +
-                'AVAILABLE MCP TOOLS — Advanced:\n' +
-                '- unified_screenshot: Capture screenshot for debugging\n' +
-                '- unified_evaluate: Execute JavaScript on page\n' +
-                '- unified_console_messages: Get browser console messages\n' +
-                '- unified_page_errors: Get page JS errors\n\n' +
+                                (glassMode
+                                        ? `0. FIRST: Navigate with open({url:"${context.appUrl || 'the resolved framework baseUrl'}"}).\n` +
+                                            '1. Call see() on every page under test and use only its durable handles for targets.\n' +
+                                            '2. Use read() to capture real assertion values and page URL/title.\n' +
+                                            '3. Use do() for interactions and wait() for bounded application conditions.\n' +
+                                            '4. Navigate through every page in this scenario and repeat see/read/navigation verification.\n' +
+                                            frameworkDiscoveryStep +
+                                            '7. Save exploration data using save_exploration_data with source "glass-see".\n' +
+                                            scriptBuildStep +
+                                            '9. Validate the script using validate_generated_script.\n\n' +
+                                            'AVAILABLE GLASS TOOLS:\n' +
+                                            '- open: navigate and manage tabs\n' +
+                                            '- see: perceive ranked affordances and durable handles\n' +
+                                            '- do: click, fill, select, check, press, upload, or screenshot\n' +
+                                            '- read: extract text, value, attribute, HTML, table, URL, or title\n' +
+                                            '- wait: wait for bounded element, text, URL, title, load, or network conditions\n' +
+                                            '- net: observe or control network traffic\n' +
+                                            '- devtool: use validated CDP commands\n' +
+                                            '- script: run audited in-page JavaScript\n\n'
+                                        : `0. FIRST: Navigate to the application using unified_navigate to ${context.appUrl || 'the resolved framework baseUrl'} (or unified_execute_exploration with an explicit navigate step)\n` +
+                                            '1. Take accessibility snapshots using unified_snapshot\n' +
+                                            '2. Validate key elements with semantic unified_get_by_* selectors\n' +
+                                            '3. Extract real content using unified_get_text_content, unified_get_attribute, or unified_get_input_value\n' +
+                                            '4. Verify navigation state using unified_get_page_url or unified_expect_url\n' +
+                                            '5. Navigate through all pages in the flow and repeat steps 2-4\n' +
+                                            frameworkDiscoveryStep +
+                                            '7. Save exploration data using save_exploration_data\n' +
+                                            scriptBuildStep +
+                                            '9. Validate the script using validate_generated_script\n\n') +
                 'AVAILABLE CUSTOM TOOLS:\n' +
                 frameworkInventoryToolHint +
                 '- save_exploration_data: Save exploration JSON\n' +
@@ -1183,7 +1148,7 @@ class PipelineRunner {
                 '- Do NOT use runInTerminal, powershell, or any shell/terminal tool\n' +
                 '- Do NOT run npx playwright test — test execution is a SEPARATE pipeline stage\n' +
                 frameworkProhibitedRule +
-                '- Do NOT guess selectors — every selector MUST come from MCP snapshot/get_by_* output\n' +
+                `- Do NOT guess selectors — every selector MUST come from ${glassMode ? 'Glass see() handles' : 'MCP snapshot/get_by_* output'}\n` +
                 '- Do NOT hardcode URLs containing token= — use userTokens from testData.js';
 
             onProgress(
@@ -1237,11 +1202,14 @@ class PipelineRunner {
             }
 
             // Check exploration data
-            const explorationFile = path.join(
-                __dirname, '..', 'exploration-data', `${context.ticketId}-exploration.json`
-            );
-            if (fs.existsSync(explorationFile)) {
-                context.explorationPath = this._copyArtifactForScenario(explorationFile, context);
+            const explorationDir = path.join(__dirname, '..', 'exploration-data');
+            const explorationCandidates = [
+                path.join(explorationDir, `${this._getScenarioFileStem(context, 'exploration')}.json`),
+                path.join(explorationDir, `${context.ticketId}-exploration.json`),
+            ];
+            const explorationFile = explorationCandidates.find(candidate => fs.existsSync(candidate));
+            if (explorationFile) {
+                context.explorationPath = explorationFile;
                 if (context.contextStore) {
                     context.contextStore.registerArtifact('scriptgenerator', 'exploration', context.explorationPath, {
                         summary: `MCP exploration data for ${context.ticketId}`,

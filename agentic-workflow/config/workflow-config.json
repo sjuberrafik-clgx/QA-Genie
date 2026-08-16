@@ -1000,6 +1000,17 @@
             }
         }
     },
+    "glassConcurrency": {
+        "_comment": "Bounded concurrency for Glass scenario exploration. Same-tab mutations remain ordered; isolated personas use separate CDP browser contexts.",
+        "enabled": true,
+        "maxLanes": 2,
+        "maxContexts": 2,
+        "defaultIsolation": "shared",
+        "failPolicy": "all-settled",
+        "adaptive": {
+            "enabled": false
+        }
+    },
     "sdk": {
         "_comment": "Copilot SDK Orchestrator configuration — enables programmatic pipeline control",
         "enabled": true,
