@@ -1,16 +1,6 @@
 {
 	"inputs": [],
 	"servers": {
-		"unified-automation-mcp": {
-			"type": "stdio",
-			"command": "node",
-			"args": [
-				"${workspaceFolder}/agentic-workflow/mcp-server/server.js"
-			],
-			"env": {
-				"MCP_TOOL_PROFILE": "intelligent"
-			}
-		},
 		"glass": {
 			"type": "stdio",
 			"command": "node",
@@ -18,6 +8,7 @@
 				"${workspaceFolder}/glass-mcp/src/server.js"
 			],
 			"env": {
+				"GLASS_DRIVER": "cdp",
 				"GLASS_HEADLESS": "false"
 			}
 		},

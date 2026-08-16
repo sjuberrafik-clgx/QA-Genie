@@ -8,15 +8,19 @@
  * identity — so the agent can act on it later without a server-side ref table or
  * a stateful heal-store, and re-resolution survives DOM re-render / navigation.
  *
- *   handle = "H" + base64url( JSON({ v, r:role, n:name, p:structuralHash, f:fp, d:doc, x:framePath }) )
+ *   handle = "H" + base64url( JSON({ v, r:role, n:name, p:structuralHash, f:fp, d:doc, x:framePath, t:tabId, e:epoch, u:documentToken, q:target }) )
  *
  * Identity fields:
  *   r  role               — ARIA role / element kind
  *   n  name               — accessible name (capped, normalized)
  *   p  structuralHash     — FNV-1a of the STABLE ancestor chain (dynamic ids/indices stripped)
- *   f  fingerprint        — only stable discriminators: { testid?, id?, href?, type? }
+ *   f  fingerprint        — only stable discriminators: { testid?, id?, placeholder?, href?, type? }
  *   d  docId              — shadow/iframe document scope
  *   x  framePath          — frame locator chain for same-origin iframes
+ *   t  tabId              — optional originating tab binding (v2 handles)
+ *   e  documentEpoch      — main-document generation (v3 handles)
+ *   u  documentToken      — frame-local document identity (v3 handles)
+ *   q  target              — compact OOPIF routing identity (v3 handles)
  *
  * Determinism: encode/decode are pure; the SAME identity always yields the SAME
  * handle. fnv1a is shared with the in-page extractor (parity-tested) so structural
@@ -53,11 +57,16 @@ function normalizeName(name) {
  * @returns {string} handle
  */
 function encodeHandle(identity = {}) {
-    const id = { v: 1, r: identity.role || '', n: normalizeName(identity.name) };
+    const documentBound = Number.isSafeInteger(identity.epoch) || !!identity.documentToken || !!identity.target;
+    const id = { v: documentBound ? 3 : (identity.tab ? 2 : 1), r: identity.role || '', n: normalizeName(identity.name) };
     if (identity.sph) id.p = identity.sph;
     if (identity.fp && Object.keys(identity.fp).length) id.f = pruneFp(identity.fp);
     if (identity.doc) id.d = identity.doc;
     if (Array.isArray(identity.frame) && identity.frame.length) id.x = identity.frame;
+    if (identity.tab) id.t = String(identity.tab);
+    if (Number.isSafeInteger(identity.epoch) && identity.epoch >= 0) id.e = identity.epoch;
+    if (identity.documentToken) id.u = String(identity.documentToken).slice(0, 64);
+    if (identity.target) id.q = String(identity.target).slice(0, 32);
     const json = JSON.stringify(id);
     return 'H' + Buffer.from(json, 'utf8').toString('base64url');
 }
@@ -77,21 +86,26 @@ function decodeHandle(handle) {
     } catch {
         throw new Error('invalid handle encoding');
     }
-    if (!id || typeof id !== 'object' || id.v !== 1) throw new Error('unsupported handle version');
+    if (!id || typeof id !== 'object' || ![1, 2, 3].includes(id.v)) throw new Error('unsupported handle version');
     return {
+        version: id.v,
         role: id.r || '',
         name: id.n || '',
         sph: id.p || null,
         fp: id.f || null,
         doc: id.d || null,
         frame: Array.isArray(id.x) ? id.x : null,
+        tab: id.t || null,
+        epoch: Number.isSafeInteger(id.e) ? id.e : null,
+        documentToken: id.u || null,
+        target: id.q || null,
     };
 }
 
 /** Keep only stable discriminators in a fingerprint. */
 function pruneFp(fp) {
     const out = {};
-    for (const k of ['testid', 'id', 'href', 'type']) {
+    for (const k of ['testid', 'id', 'placeholder', 'href', 'type']) {
         if (fp[k]) out[k] = String(fp[k]).slice(0, 64);
     }
     return out;

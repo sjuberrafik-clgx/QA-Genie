@@ -298,6 +298,8 @@ class AgentSessionFactory {
             config: this.config,
             contextStore: context.contextStore || null,
             groundingStore: gStore || null,
+            scenarioId: context.scenarioId || null,
+            scenarioSlug: context.scenarioSlug || null,
         };
         // Unattended auto-approve for gated Jira/file writes (e.g. scheduled agent
         // runs that opted in via scheduler.autoApproveAgentActions). No interactive
@@ -377,28 +379,50 @@ class AgentSessionFactory {
             // with hardcoded defaults (headed mode), which hangs in headless/CI contexts.
             // Default to 'true' (headless) as safe server-side fallback; .env overrides this.
             const mcpHeadless = process.env.MCP_HEADLESS || 'true';
-            // Dynamic Tool Scoping: pass the agent's tool profile to the MCP server.
-            // Default to the lean primitives-first 'intelligent' surface (~13 listed
-            // tools: act / observe / extract / crawl + essentials). All other tools
-            // remain callable and discoverable via unified_tool_search, saving ~30K
-            // tokens vs the full 141-tool list while keeping full capability.
-            const AGENT_PROFILES = { scriptgenerator: 'intelligent', testgenie: 'intelligent', buggenie: 'intelligent', codereviewer: 'intelligent', docgenie: 'intelligent' };
-            const toolProfile = context.toolProfile || AGENT_PROFILES[effectiveRole] || 'intelligent';
-            this._log(`🖥️  Unified MCP: headless=${mcpHeadless}, browser=${process.env.MCP_BROWSER || 'chromium'}, toolProfile=${toolProfile}`);
-            mcpServers['unified-automation'] = {
-                type: 'local',
-                command: 'node',
-                args: [path.join(__dirname, '..', 'mcp-server', 'server.js')],
-                tools: ['*'],
-                env: {
-                    MCP_HEADLESS: mcpHeadless,
-                    MCP_TIMEOUT: process.env.MCP_TIMEOUT || '60000',
-                    MCP_BROWSER: process.env.MCP_BROWSER || 'chromium',
-                    MCP_TOOL_TIMEOUT: process.env.MCP_TOOL_TIMEOUT || '120000',
-                    MCP_LOG_LEVEL: process.env.MCP_LOG_LEVEL || 'info',
-                    MCP_TOOL_PROFILE: toolProfile,
-                },
-            };
+            const glassServerPath = path.join(__dirname, '..', '..', 'glass-mcp', 'src', 'server.js');
+            const glassEnabled = process.env.GLASS_MCP_ENABLED !== 'false' && fs.existsSync(glassServerPath);
+            const glassConcurrency = this.config?.glassConcurrency || {};
+
+            if (glassEnabled) {
+                mcpServers.glass = {
+                    type: 'local',
+                    command: 'node',
+                    args: [glassServerPath],
+                    tools: ['*'],
+                    env: {
+                        GLASS_DRIVER: process.env.GLASS_DRIVER || 'cdp',
+                        GLASS_HEADLESS: mcpHeadless,
+                        GLASS_CONCURRENCY_ENABLED: process.env.GLASS_CONCURRENCY_ENABLED || String(glassConcurrency.enabled !== false),
+                        GLASS_MAX_LANES: process.env.GLASS_MAX_LANES || String(glassConcurrency.maxLanes || 2),
+                        GLASS_MAX_CONTEXTS: process.env.GLASS_MAX_CONTEXTS || String(glassConcurrency.maxContexts || 2),
+                        GLASS_DEFAULT_ISOLATION: process.env.GLASS_DEFAULT_ISOLATION || glassConcurrency.defaultIsolation || 'shared',
+                    },
+                };
+                this._log(`Glass MCP: driver=${process.env.GLASS_DRIVER || 'cdp'}, headless=${mcpHeadless}`);
+            } else {
+                // Dynamic Tool Scoping: pass the agent's tool profile to the MCP server.
+                // Default to the lean primitives-first 'intelligent' surface (~13 listed
+                // tools: act / observe / extract / crawl + essentials). All other tools
+                // remain callable and discoverable via unified_tool_search, saving ~30K
+                // tokens vs the full 141-tool list while keeping full capability.
+                const AGENT_PROFILES = { scriptgenerator: 'intelligent', testgenie: 'intelligent', buggenie: 'intelligent', codereviewer: 'intelligent', docgenie: 'intelligent' };
+                const toolProfile = context.toolProfile || AGENT_PROFILES[effectiveRole] || 'intelligent';
+                this._log(`Unified MCP: headless=${mcpHeadless}, browser=${process.env.MCP_BROWSER || 'chromium'}, toolProfile=${toolProfile}`);
+                mcpServers['unified-automation'] = {
+                    type: 'local',
+                    command: 'node',
+                    args: [path.join(__dirname, '..', 'mcp-server', 'server.js')],
+                    tools: ['*'],
+                    env: {
+                        MCP_HEADLESS: mcpHeadless,
+                        MCP_TIMEOUT: process.env.MCP_TIMEOUT || '60000',
+                        MCP_BROWSER: process.env.MCP_BROWSER || 'chromium',
+                        MCP_TOOL_TIMEOUT: process.env.MCP_TOOL_TIMEOUT || '120000',
+                        MCP_LOG_LEVEL: process.env.MCP_LOG_LEVEL || 'info',
+                        MCP_TOOL_PROFILE: toolProfile,
+                    },
+                };
+            }
         }
 
         // TestGenie/BugGenie: Atlassian MCP for Jira integration.

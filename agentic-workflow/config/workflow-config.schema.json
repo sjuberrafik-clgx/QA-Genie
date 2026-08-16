@@ -1095,6 +1095,47 @@
                 }
             }
         },
+        "glassConcurrency": {
+            "type": "object",
+            "description": "Bounded Glass browser concurrency and isolation policy.",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "default": true
+                },
+                "maxLanes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 8,
+                    "default": 2
+                },
+                "maxContexts": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 8,
+                    "default": 2
+                },
+                "defaultIsolation": {
+                    "type": "string",
+                    "enum": ["shared", "context"],
+                    "default": "shared"
+                },
+                "failPolicy": {
+                    "type": "string",
+                    "enum": ["all-settled", "fail-fast"],
+                    "default": "all-settled"
+                },
+                "adaptive": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "default": false
+                        }
+                    }
+                }
+            }
+        },
         "cognitiveLoop": {
             "type": "object",
             "description": "Cognitive QA Loop configuration. Controls the 5-phase (Analyst→Explorer→Coder→Reviewer→DryRun) script generation pipeline with CoT/ToT reasoning and inference-time scaling.",

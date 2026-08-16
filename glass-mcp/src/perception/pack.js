@@ -21,7 +21,18 @@ const { encodeHandle } = require('../handle');
 const { redundancyKey } = require('./salience');
 
 function handleFor(c) {
-    return encodeHandle({ role: c.role, name: c.name, sph: c.sph, fp: c.fp, doc: c.docId, frame: c.framePath });
+    return encodeHandle({
+        role: c.role,
+        name: c.name,
+        sph: c.sph,
+        fp: c.fp,
+        doc: c.docId,
+        frame: c.framePath,
+        tab: c.tabId,
+        epoch: c.documentEpoch,
+        documentToken: c.documentToken,
+        target: c.target,
+    });
 }
 
 function toAffordance(c, group) {
