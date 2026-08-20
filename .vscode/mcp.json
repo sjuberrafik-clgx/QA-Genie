@@ -12,6 +12,13 @@
 				"GLASS_HEADLESS": "false"
 			}
 		},
+		"jira": {
+			"type": "stdio",
+			"command": "node",
+			"args": [
+				"${workspaceFolder}/agentic-workflow/mcp-server/jira-server.js"
+			]
+		},
 		"atlassian/atlassian-mcp-server": {
 			"type": "http",
 			"url": "https://mcp.atlassian.com/v1/sse",
