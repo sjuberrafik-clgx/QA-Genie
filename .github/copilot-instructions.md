@@ -62,6 +62,40 @@ This workspace uses a 6-agent orchestrated workflow for end-to-end QA automation
 
 The grounding system provides local project context to LLM agents, reducing hallucinations by giving agents accurate knowledge about the codebase, selectors, domain terminology, and existing test coverage.
 
+For feature validation through `application-kb`, request bounded business rules with `get_feature_behavior(includeRules:true, maxRules<=5)`, compare Glass observations by rule ID, and resolve `rule:*` evidence only for failed or ambiguous rules. Keep intended, implemented, and observed truth lanes separate.
+
+## Context Engine (Code Freshness)
+
+Local MCP server at `context-engine-mcp/` (registered as `context-engine`). Keeps the local clones of the 31 product repos (OneHome, Matrix, Trestle, RCSL-RESS) on the code deployed to UAT, and recompiles `application-kb` knowledge when that code changes.
+
+* **UAT ref:** newest `release/X.Y.Z` branch per repo, else the default branch; per-repo pins live in `context-engine-mcp/config/repo-registry.json` (`onehome_mobile` is pinned to `develop`).
+* **Per ticket:** call `ce_repo_status` for only the repos the feature uses, then `ce_refresh_repos` for any reported stale. A refresh recompiles contracts, the feature graph and Rule DNA automatically, and `application-kb` reloads them on its next call. Use `ce_get_changes` with a feature `pathPrefix` to see what changed.
+* **New features:** `newFeatureCandidates` (from `ce_refresh_repos` or `ce_feature_coverage`) are feature folders not yet in `agentic-workflow/config/feature-catalog.json`. Report them; add a catalog entry with `pathPrefixes` so impact analysis can name them, then run `ce_rebuild_knowledge`.
+* **🚨 Read-only:** only `git ls-remote`/`fetch`/`clone` reach GitHub, and push is disabled in every clone. Never push, commit, comment on, or otherwise modify the source repos.
+* A state of `error` mentioning an IP allow list means the Appgate VPN is disconnected — ask the user to connect it.
+
+## Regression Impact (Live Trace)
+
+Answers *"what else breaks if this ticket ships?"* by tracing changed code to the already-shipped features that consume it. Runs live against the local repository clones in `agentic-workflow/repo-mesh-data/` — no prebuilt index, no rebuild step, so results always reflect the current clone.
+
+**Tools (on the `application-kb` server):**
+* `get_regression_impact` — `{ticketId | changedPaths, depth:1..2, maxFeatures}` → impacted features ranked with `riskBand`, `whyImpacted`, and the exact evidence files
+* `get_regression_scenarios` — the above plus `rulesAtRisk` (Rule DNA) and `existingCoverage` (`RERUN` when a spec exists, `GAP` when none does)
+* `get_feature_domain_pack` — `{feature}` → real routes, component selectors, test ids, and terminology read from source; use it to ground a browser agent in this product instead of a generic page archetype
+
+**🚨 TestGenie gate:** `generate_test_case_excel` is blocked until `get_regression_scenarios` (or `get_regression_impact`) has been called in the session. Set `REGRESSION_GATE_ENABLED=false` to disable.
+
+**Never present a result as regression-complete when the response carries any of these:**
+* `notSynced` — clones are missing; an empty impact list is NOT evidence of no impact
+* `staleness.warning` — clones are old, so code shipped since then is invisible
+* `breadth:"wide"` — the changed symbol touches too many features to rank; manual triage required
+* `degraded` — no pull request was resolved, so the changed-file set is incomplete
+* `unmappedUsages` — real consumers that no catalogued feature claims
+
+**Feature→path map:** `agentic-workflow/config/feature-catalog.json` → `pathPrefixes[]` (supports a single-segment `*`). Add a prefix only after verifying the directory exists in a clone.
+
+**Ticket→PR resolution** requires `GITHUB_TOKEN` and `grounding-config.json → repoMesh.source.productRepos` (`owner/name` entries). Without them, pass `changedPaths` explicitly.
+
 **Key components:**
 * `agentic-workflow/config/grounding-config.json` — Per-project config (feature map, domain terms, rules, index settings). **This is the primary file users customize for their application.**
 * `agentic-workflow/grounding/text-indexer.js` — TF-IDF/BM25 full-text search engine with class-aware chunking
