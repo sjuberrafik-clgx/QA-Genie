@@ -604,6 +604,41 @@
             "cloneDir": "repo-mesh-data/repos",
             "include": ["**/*.java", "**/application*.yml", "**/application*.yaml", "**/application*.properties", "**/bootstrap*.yml"],
             "exclude": ["**/test/**", "**/target/**", "**/generated/**", "**/*Test.java", "**/*IT.java"],
+            "productRepos": [
+                "corelogic-private/real_estate_us-aotf-frontend_apps",
+                "corelogic-private/real_estate_us-aotf-orchestration_services",
+                "corelogic-private/real_estate_us-aotf-clp_cloud_config",
+                "corelogic-private/real_estate_us-aotf-listing_domain",
+                "corelogic-private/real_estate_us-aotf-agent_profile_domain",
+                "corelogic-private/real_estate_us-aotf-polygon_service",
+                "corelogic-private/real_estate_us-aotf-consumer_domain",
+                "corelogic-private/real_estate_us-aotf-mls_domain",
+                "corelogic-private/real_estate_us-aotf-authentication_service",
+                "corelogic-private/real_estate_us-aotf-prd_service",
+                "corelogic-private/real_estate_us-aotf-feature_flag_domain",
+                "corelogic-private/real_estate_us-aotf-locallogic_service",
+                "corelogic-private/real_estate_us-aotf-saved_search_domain",
+                "corelogic-private/real_estate_us-aotf-aotf_favorites_domain",
+                "corelogic-private/real_estate_us-aotf-property_notes_service",
+                "corelogic-private/real_estate_us-aotf-planner_service",
+                "corelogic-private/real_estate_us-aotf-marketplace_services",
+                "corelogic-private/real_estate_us-aotf-api_integrations",
+                "corelogic-private/real_estate_us-aotf-analytics_service",
+                "corelogic-private/real_estate_us-aotf-group_domain",
+                "corelogic-private/real_estate_us-aotf-consume_saved_search_notification",
+                "corelogic-private/real_estate_us-aotf-liveby_service",
+                "corelogic-private/real_estate_us-aotf-property_fit_score",
+                "corelogic-private/real_estate_us-aotf-notifications_service",
+                "corelogic-private/real_estate_us-aotf-favorites_service",
+                "corelogic-private/real_estate_us-aotf-agent_profiles_service",
+                "corelogic-private/real_estate_us-aotf-onehome_mobile",
+                "corelogic-private/real_estate_us-aotf-onehome_marketing",
+                "corelogic-private/real_estate_us-matrix-main",
+                "corelogic-private/real_estate_us-trestle-web",
+                "corelogic-private/real_estate_us-ress-frontend"
+            ],
+            "repoPrefix": "real_estate_us-",
+            "_productReposComment": "owner/name entries searched (read-only GET) for '[TICKET-KEY]' pull requests by repo-mesh/change-resolver.js; mirrors context-engine-mcp/config/repo-registry.json. repoPrefix is stripped so changed paths match the local clone names (aotf-frontend_apps/...). Requires a valid GITHUB_TOKEN in agentic-workflow/.env; without it get_regression_impact reports degraded:true and needs explicit changedPaths.",
             "_comment": "org and credentials come from .env (GITHUB_ORG, GITHUB_TOKEN). fetchMethod: 'partial-clone' (git --filter=blob:none, full fidelity + fast local diff) or 'api' (GitHub REST, lighter but rate-limited). Repos auto-discovered from the org via the query when 'repos' is empty."
         },
         "repos": [],
@@ -623,6 +658,7 @@
         "graph": {
             "seedPath": "repo-mesh/data-flow-seed.json",
             "persistPath": "repo-mesh-data/full-stack-graph.json",
+            "featureCatalogPath": "config/feature-catalog.json",
             "_comment": "seedPath holds the curated repo→Kafka→Elastic data-flow map (from the architecture spreadsheet). Derived edges from extracted contracts are merged on top."
         },
         "dna": {
@@ -630,6 +666,13 @@
             "statePath": "repo-mesh-data/sync-state.json",
             "l2CardMaxChars": 600,
             "l1MaxChars": 4000
+        },
+        "businessRules": {
+            "enabled": true,
+            "persistPath": "repo-mesh-data/rule-dna.json",
+            "maxFilesPerFeature": 24,
+            "maxRulesPerQuery": 5,
+            "_comment": "Deterministic Rule DNA compiled during manual sync/rebuild. MCP startup loads persisted cards only; raw source is expanded solely through evidence handles."
         },
         "sync": {
             "pollIntervalMinutes": 0,

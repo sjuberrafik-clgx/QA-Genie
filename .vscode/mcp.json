@@ -19,6 +19,28 @@
 				"${workspaceFolder}/agentic-workflow/mcp-server/jira-server.js"
 			]
 		},
+		"application-kb": {
+			"type": "stdio",
+			"command": "node",
+			"args": [
+				"${workspaceFolder}/agentic-workflow/mcp-server/knowledge-server.js"
+			],
+			"env": {
+				"REPO_MESH_ENABLED": "true"
+			}
+		},
+		"context-engine": {
+			"type": "stdio",
+			"command": "node",
+			"args": [
+				"${workspaceFolder}/context-engine-mcp/src/server.js"
+			],
+			"env": {
+				"CE_ALLOW_CLONE": "false",
+				"CE_MAX_REPOS_PER_REFRESH": "6",
+				"CE_MAX_OUTPUT_CHARS": "12000"
+			}
+		},
 		"atlassian/atlassian-mcp-server": {
 			"type": "http",
 			"url": "https://mcp.atlassian.com/v1/sse",

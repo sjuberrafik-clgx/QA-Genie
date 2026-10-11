@@ -1,0 +1,27 @@
+{
+  "name": "context-engine-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OneHome Context Engine MCP server — keeps task-scoped, version-aware application context fresh from the product repos. GitHub access is read-only.",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "context-engine-mcp": "src/server.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "registry": "node scripts/cli.js registry",
+    "status": "node scripts/cli.js status",
+    "refresh": "node scripts/cli.js refresh",
+    "rebuild": "node scripts/cli.js rebuild",
+    "coverage": "node scripts/cli.js coverage",
+    "diagnose": "node scripts/diagnose.js",
+    "test": "node test/run.js"
+  },
+  "engines": {
+    "node": ">=20.10"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.3"
+  }
+}

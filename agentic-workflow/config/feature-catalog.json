@@ -1,0 +1,209 @@
+{
+  "version": "1.1.0",
+  "_comment": "Retrieval-only product vocabulary. Sources are verified against local frontend clones before entering the graph; partial entries must not be presented as complete behavior contracts. pathPrefixes map source directories to features for live impact tracing and support a single-segment `*` wildcard; add a prefix only when the directory has been verified in a clone.",
+  "features": [
+    {
+      "name": "Agent Preview Mode",
+      "aliases": ["BCC"],
+      "status": "grounded",
+      "description": "Agent view mode with access guards and restricted-action messaging.",
+      "repositories": ["aotf-frontend_apps"],
+      "applications": ["agent-portal", "onehome", "shared"],
+      "domains": ["auth", "agent"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/*/src/app/_@core/authorization"
+      ],
+      "sources": [
+        "aotf-frontend_apps/libs/shared-ui/src/lib/models/enum/ViewMode.ts",
+        "aotf-frontend_apps/projects/agent-portal/src/app/_@shared/components/menus/navigation/agent-preview/agent-preview.ts",
+        "aotf-frontend_apps/projects/onehome/src/app/_@core/authorization/guards/view-mode.guard.ts"
+      ]
+    },
+    {
+      "name": "Agent Branding",
+      "status": "grounded",
+      "domains": ["agent"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/*/src/app/agent"
+      ]
+    },
+    {
+      "name": "Error Pages",
+      "status": "grounded",
+      "description": "Error, access-denied, page-locked, and not-found routing shown when a guard or server error code blocks a page.",
+      "repositories": ["aotf-frontend_apps"],
+      "applications": ["agent-portal", "onehome"],
+      "domains": ["auth", "system"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/*/src/app/error",
+        "aotf-frontend_apps/libs/shared-ui/src/lib/system"
+      ]
+    },
+    {
+      "name": "Authentication",
+      "status": "grounded",
+      "domains": ["auth"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/*/src/app/auth",
+        "aotf-frontend_apps/projects/*/src/app/register"
+      ]
+    },
+    {
+      "name": "Browse Properties",
+      "aliases": ["Properties"],
+      "status": "grounded",
+      "description": "Browse listing results across map, list, tile, and single-line views.",
+      "repositories": ["aotf-frontend_apps"],
+      "applications": ["agent-portal", "onehome", "shared"],
+      "domains": ["listing", "saved-search", "favorites"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/*/src/app/properties"
+      ],
+      "sources": [
+        "aotf-frontend_apps/libs/shared-ui/src/lib/modules/analytics/analytics.config.ts",
+        "aotf-frontend_apps/projects/agent-portal/src/app/properties/properties.routes.ts",
+        "aotf-frontend_apps/projects/onehome/src/app/properties/properties.routes.ts",
+        "aotf-frontend_apps/projects/onehome/src/app/properties/__core/properties-search.service.ts"
+      ]
+    },
+    {
+      "name": "Favorites",
+      "status": "grounded",
+      "domains": ["favorites", "listing"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/*/src/app/favorites"
+      ]
+    },
+    {
+      "name": "Notes",
+      "aliases": ["Property Notes"],
+      "status": "grounded",
+      "domains": ["property-notes"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/*/src/app/property/notes"
+      ]
+    },
+    {
+      "name": "Groups",
+      "aliases": ["Agent Groups"],
+      "status": "grounded",
+      "repositories": ["aotf-frontend_apps"],
+      "applications": ["agent-portal"],
+      "domains": ["group"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/agent-portal/src/app/agent-dashboard"
+      ],
+      "sources": [
+        "aotf-frontend_apps/projects/agent-portal/src/app/agent-dashboard/__core/agent-groups.service.ts"
+      ]
+    },
+    {
+      "name": "Property Details",
+      "status": "grounded",
+      "domains": ["listing", "conversion"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/*/src/app/property",
+        "aotf-frontend_apps/projects/*/src/app/listing"
+      ]
+    },
+    {
+      "name": "Custom Property Fields",
+      "status": "partial",
+      "description": "CustomProperty is present in listing schemas and payloads; a dedicated UI ownership boundary is not yet proven.",
+      "repositories": ["aotf-frontend_apps"],
+      "applications": ["shared"],
+      "domains": ["listing"],
+      "sources": [
+        "aotf-frontend_apps/apollo/schema.generated.graphql"
+      ]
+    },
+    {
+      "name": "Matrix Integrations",
+      "status": "partial",
+      "description": "Marketplace provider recommendations expose Matrix vendor metadata; broader Matrix integration behavior requires additional evidence.",
+      "repositories": ["aotf-frontend_apps"],
+      "applications": ["shared"],
+      "domains": ["marketplace"],
+      "sources": [
+        "aotf-frontend_apps/apollo/marketplace/retrieve-agent-recommendations.graphql"
+      ]
+    },
+    {
+      "name": "Compare",
+      "status": "grounded",
+      "domains": ["listing", "favorites"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/*/src/app/compare"
+      ]
+    },
+    {
+      "name": "Planner",
+      "status": "grounded",
+      "domains": ["planner"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/*/src/app/planner"
+      ]
+    },
+    {
+      "name": "Search",
+      "aliases": ["Property Search", "Properties Search"],
+      "status": "grounded",
+      "repositories": ["aotf-frontend_apps"],
+      "applications": ["agent-portal", "onehome"],
+      "domains": ["listing"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/*/src/app/properties/__core"
+      ],
+      "sources": [
+        "aotf-frontend_apps/projects/agent-portal/src/app/properties/__core/properties-search.service.ts",
+        "aotf-frontend_apps/projects/onehome/src/app/properties/__core/properties-search.service.ts"
+      ]
+    },
+    {
+      "name": "Profile",
+      "status": "grounded",
+      "domains": ["consumer", "agent"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/*/src/app/profile"
+      ]
+    },
+    {
+      "name": "Agent Portal",
+      "status": "grounded",
+      "domains": ["agent"]
+    },
+    {
+      "name": "Marketplace",
+      "status": "grounded",
+      "domains": ["marketplace"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/*/src/app/marketplace"
+      ]
+    },
+    {
+      "name": "Investor",
+      "status": "grounded",
+      "description": "Investor single-line property view with sorting, CSV export, sentiment, and compare actions.",
+      "repositories": ["aotf-frontend_apps"],
+      "applications": ["agent-portal", "onehome", "shared"],
+      "domains": ["listing", "favorites"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/*/src/app/properties/single-line-view"
+      ],
+      "sources": [
+        "aotf-frontend_apps/libs/shared-ui/src/lib/modules/analytics/analytics.config.ts",
+        "aotf-frontend_apps/projects/agent-portal/src/app/properties/single-line-view/single-line-view.container.ts",
+        "aotf-frontend_apps/projects/onehome/src/app/properties/single-line-view/single-line-view.container.ts"
+      ]
+    },
+    {
+      "name": "Agent Share",
+      "status": "grounded",
+      "domains": ["agent"],
+      "pathPrefixes": [
+        "aotf-frontend_apps/projects/onehome/src/app/agent-share",
+        "aotf-frontend_apps/projects/onehome/src/app/share"
+      ]
+    }
+  ]
+}

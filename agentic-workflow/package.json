@@ -30,7 +30,8 @@
     "repo-mesh:clone": "node scripts/repo-mesh-setup.js clone",
     "repo-mesh:sync": "node scripts/repo-mesh-setup.js sync",
     "repo-mesh:stats": "node scripts/repo-mesh-setup.js stats",
-    "repo-mesh:test": "node repo-mesh/test-all.js"
+    "repo-mesh:test": "node repo-mesh/test-all.js",
+    "kb:mcp": "node mcp-server/knowledge-server.js"
   },
   "keywords": [],
   "author": "",
