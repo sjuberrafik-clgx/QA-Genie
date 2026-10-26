@@ -50,6 +50,19 @@ function truncResult(r) {
     return r;
 }
 
+/** Read width/height straight from a PNG IHDR chunk; null when the buffer is not a PNG. */
+function pngDimensions(buf) {
+    if (!Buffer.isBuffer(buf) || buf.length < 24) return null;
+    if (buf.readUInt32BE(0) !== 0x89504e47) return null;
+    if (buf.toString('ascii', 12, 16) !== 'IHDR') return null;
+    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
+
+function screenshotMaxDim() {
+    const configured = Number.parseInt(process.env.GLASS_SHOT_MAX_DIM, 10);
+    return Number.isInteger(configured) && configured > 0 ? configured : 7600;
+}
+
 // Streaming resources never emit loadingFinished/Failed, so they must not enter the request map.
 const NET_IGNORED_TYPES = new Set(['WebSocket', 'EventSource']);
 
@@ -550,9 +563,13 @@ class CdpDriver {
             const params = { format: 'png', captureBeyondViewport: !clip && args.fullPage !== false };
             if (clip) params.clip = clip;
             const { data } = await page.send('Page.captureScreenshot', params);
-            const buf = Buffer.from(data, 'base64');
+            let buf = Buffer.from(data, 'base64');
+            let encoded = data;
+            const fitted = await this._fitScreenshot(page, buf, clip || null, params.captureBeyondViewport);
+            if (fitted) { buf = fitted.buf; encoded = fitted.data; }
             const out = { ok: true, action: 'screenshot', bytes: buf.length, audit };
-            if (args.returnData) { out.encoding = 'base64'; out.data = data; }
+            if (fitted) out.downscaled = { scale: Number(fitted.scale.toFixed(4)), reason: 'vision dimension cap' };
+            if (args.returnData) { out.encoding = 'base64'; out.data = encoded; }
             else {
                 const fs = require('node:fs');
                 const os = require('node:os');
@@ -565,6 +582,36 @@ class CdpDriver {
         } catch (e) {
             return { ok: false, action: 'screenshot', error: e.message };
         }
+    }
+
+    /**
+     * Vision APIs reject images whose long edge exceeds ~8000px, which full-page
+     * captures of tall pages routinely do. Recapture the same region at a reduced
+     * clip scale; returns null when the shot already fits (no extra CDP calls).
+     */
+    async _fitScreenshot(page, buf, clip, fullPage) {
+        const dims = pngDimensions(buf);
+        if (!dims) return null;
+        const max = screenshotMaxDim();
+        const largest = Math.max(dims.width, dims.height);
+        if (largest <= max) return null;
+
+        let region = clip;
+        if (!region) {
+            if (!fullPage) return null;
+            const metrics = await page.send('Page.getLayoutMetrics', {});
+            const box = metrics && (metrics.cssContentSize || metrics.contentSize);
+            if (!box || !box.width || !box.height) return null;
+            region = { x: box.x || 0, y: box.y || 0, width: box.width, height: box.height };
+        }
+        const scale = (max / largest) * 0.997;
+        const shot = await page.send('Page.captureScreenshot', {
+            format: 'png',
+            captureBeyondViewport: true,
+            clip: { x: region.x, y: region.y, width: region.width, height: region.height, scale },
+        });
+        if (!shot || !shot.data) return null;
+        return { buf: Buffer.from(shot.data, 'base64'), data: shot.data, scale };
     }
 
     // ── read: content extraction ──────────────────────────────────────────────
